@@ -41,8 +41,14 @@ Then the three commands:
 
     kubectl apply -f apply/00-bootstrap/flux-system/gotk-components.yaml
     kubectl -n flux-system create secret generic sops-age \
-      --from-file=age.agekey=~/.config/sops/age/titan-k8s-key.txt
+      --from-file=age.agekey=$HOME/.config/sops/age/titan-k8s-key.txt
     kubectl apply -f apply/00-bootstrap/flux-system/gotk-sync.yaml
+
+`$HOME`, not `~`. Bash expands a tilde only at the start of a word or after `=` in
+something that looks like a variable assignment, and `--from-file=age.agekey=~/...` is
+neither — kubectl is handed a literal `~` and reports the key file is missing. The same
+`~/` is fine in `export SOPS_AGE_KEY_FILE=~/...`, which *is* an assignment, so this is not
+a style preference.
 
 Order matters. `sops-age` before the sync object means the `secrets` stage finds
 its key on the first attempt; on a bootstrap a red object is indistinguishable

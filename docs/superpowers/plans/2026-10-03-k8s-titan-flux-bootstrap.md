@@ -927,7 +927,7 @@ From a machine with titan's kubeconfig — over the mesh, or on the host with
 
     kubectl apply -f apply/00-bootstrap/flux-system/gotk-components.yaml
     kubectl -n flux-system create secret generic sops-age \
-      --from-file=age.agekey=~/.config/sops/age/titan-k8s-key.txt
+      --from-file=age.agekey=$HOME/.config/sops/age/titan-k8s-key.txt
     kubectl apply -f apply/00-bootstrap/flux-system/gotk-sync.yaml
 
 Order matters. `sops-age` before the sync object means the `secrets` stage finds
@@ -1087,7 +1087,7 @@ Expected: `success` on the GitGuardian scan.
 The API server is mesh-only, so these steps belong to the operator, from a host on the
 WireGuard network or on titan itself:
 
-1. Plant the key: `kubectl -n flux-system create secret generic sops-age --from-file=age.agekey=~/.config/sops/age/titan-k8s-key.txt`
+1. Plant the key: `kubectl -n flux-system create secret generic sops-age --from-file=age.agekey=$HOME/.config/sops/age/titan-k8s-key.txt` (use `$HOME`, not `~` — bash does not expand a tilde after `=` in a non-assignment word, so kubectl receives a literal `~`)
 2. Preflight: `flux check --pre` (spec §8 item 4) — it catches a cluster that cannot run
    Flux before anything is applied.
 3. Apply `gotk-components.yaml`, then `gotk-sync.yaml` (README, in order).
