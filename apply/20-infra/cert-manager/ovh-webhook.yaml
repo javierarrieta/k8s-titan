@@ -22,6 +22,17 @@ spec:
       version: "0.6.0"
   interval: 1h0s
   releaseName: cert-manager-webhook-ovh
+  # The webhook chart templates cert-manager.io kinds (its serving Certificate and
+  # self-signed Issuer), so it needs cert-manager's CRDs already installed. Both
+  # HelmReleases land in the same `infra` reconcile, and without this the webhook's
+  # first install attempt races cert-manager's CRD install - the same class of problem
+  # the stage graph solves one level up with wait: true.
+  dependsOn:
+    - name: cert-manager
+  install:
+    strategy:
+      name: RetryOnFailure
+      retryInterval: 5m
   values:
     # The chart creates a cluster-scoped APIService named
     # v1alpha1.<groupName>. Reusing another cluster's groupName in one cluster

@@ -41,10 +41,17 @@ authenticate.
 Run this yourself. The values should not pass through a chat, a shell history entry, or a
 commit message.
 
+Write the plaintext **outside** the repository and encrypt it in one direction. If the
+plaintext ever sits at its final path, then `git add -A && git commit` between two steps
+publishes the triple to a public repo — which is a plausible thing for an agent working
+from `AGENTS.md` to do.
+
 ```bash
 cd ~/k8s-titan
 mkdir -p apply/10-secrets
-cat > apply/10-secrets/ovh-domain-secrets.yaml <<'EOF'
+umask 077
+tmp=$(mktemp /tmp/ovh-plain.XXXXXX)
+cat > "$tmp" <<'EOF'
 apiVersion: v1
 kind: Secret
 metadata:
@@ -56,7 +63,8 @@ stringData:
   OVH_APPLICATION_SECRET: <paste>
   OVH_CONSUMER_KEY: <paste>
 EOF
-sops --encrypt --in-place apply/10-secrets/ovh-domain-secrets.yaml
+sops --encrypt "$tmp" > apply/10-secrets/ovh-domain-secrets.yaml
+shred -u "$tmp" 2>/dev/null || rm -f "$tmp"
 ```
 
 `stringData` rather than base64 `data` because `encrypted_regex` in `.sops.yaml` only
@@ -67,8 +75,7 @@ Then prove it:
 
 ```bash
 make validate      # OK: apply/10-secrets/ovh-domain-secrets.yaml
-git add apply/10-secrets
-git diff --cached | grep -nE 'OVH_[A-Z_]+: [A-Za-z0-9]{8,}' && echo "PLAINTEXT STAGED" || echo clean
+make leak-check    # staged diff must carry no credential shape
 ```
 
 ## 3. Confirm it works in the cluster

@@ -18,8 +18,15 @@ Two things git cannot deliver, because git is encrypted with one of them:
 
 ## Bootstrap (three commands, run once)
 
-From a machine with titan's kubeconfig — over the mesh, or on the host with
+Merge this tree to `main` first — the `GitRepository` syncs `main`, and until the tree
+exists there, a bootstrapped Flux has nothing to reconcile.
+
+Preflight, from a machine with titan's kubeconfig — over the mesh, or on the host with
 `sudo k3s kubectl`:
+
+    flux check --pre
+
+Then the three commands:
 
     kubectl apply -f apply/00-bootstrap/flux-system/gotk-components.yaml
     kubectl -n flux-system create secret generic sops-age \
@@ -31,11 +38,13 @@ its key on the first attempt; on a bootstrap a red object is indistinguishable
 from a broken one.
 
 No `flux bootstrap`, and no git credentials in the cluster: the repo is public, so
-the source-controller clones anonymously.
+the source-controller clones anonymously. If this repo ever goes private, that
+anonymous clone is the first thing to break — add a deploy key as a `secretRef` on
+the `GitRepository` in `apply/00-bootstrap/flux-system/gotk-sync.yaml` at the same
+moment you flip visibility, or every stage stops reconciling in silence.
 
 ## Verifying a bootstrap
 
-    flux check --pre
     kubectl get kustomization -A          # all five Ready=True
     kubectl -n cert-manager get helmrelease,clusterissuer
     kubectl -n apps get certificate titan-wildcard   # Ready=True
@@ -66,6 +75,9 @@ git.
     make check            # kustomize build every stage + decrypt every secret + secret scan
     make update-keys      # after rotating the age key group
     make secrets-list
+
+`make check` fails until the OVH credential in step 2 of *Before the first bootstrap*
+exists. That is deliberate — a gate that passes on zero secrets is not a gate.
 
 ## Not here (yet)
 

@@ -1,5 +1,8 @@
-# ggshield local scan cache (the config it writes, .gitguardian.yaml, is committed)
+# ggshield local scan cache. This repo deliberately ships NO .gitguardian.yaml: the
+# current secret-detection engine (2.173.0) was verified clean on SOPS ciphertext, and
+# an ignore list would only hide real findings. See spec §0.1.
 .cache_ggshield
+.gitguardian.yaml
 
 # Decrypted manifests must never be staged. `sops -d file.yaml > file.yaml` is a
 # real way to commit plaintext secrets.

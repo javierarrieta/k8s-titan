@@ -38,10 +38,12 @@ do not merge stage objects into one file.
 ## Before committing
 
     make check
-    git diff --cached | grep -cE 'AGE-SECRET-KEY-1[A-Z2-9]{40,}'
+    make leak-check
 
-Both must be clean — the second must print `0`. Note the key *shape*, not the bare
-word: this repo's own docs quote the pattern inside their leak checkers.
+`leak-check` greps the staged diff for all three credential shapes spec §0 names —
+the age key, PEM private keys, and the OpenSSH key prefix. It is assembled so it can
+never match its own source. Note the key *shape*, not the bare word: this repo's own
+docs quote the pattern inside their leak checkers.
 
 CI runs GitGuardian on every push and warns, rather than failing, when
 `GITGUARDIAN_API_KEY` is absent from the repo.
