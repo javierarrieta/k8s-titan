@@ -125,9 +125,14 @@ flux-system  →  ./apply/00-bootstrap     interval 10m  prune: true
 All four stage objects live in `./apply/00-bootstrap/stage-*.yaml`, one per file, so
 two branches adding stages cannot collide inside one shared file — the hazard
 `k8s-techdelivery/apply/00-bootstrap/backup-stage.yaml` documents at length.
-`./apply/00-bootstrap` has **no root `kustomization.yaml`**, so the `flux-system`
-Kustomization loads it in plain-directory mode and picks the stage files up the same
-way it picks up the namespace manifests sitting beside them.
+
+**Every stage directory carries its own `kustomization.yaml`.** The siblings rely on
+kustomize-controller's plain-directory fallback (no `kustomization.yaml` → apply every
+YAML found), which works at runtime but cannot be built offline: `kubectl kustomize DIR`
+refuses a directory with no `kustomization.yaml`, so the manifests in those repos are
+only ever validated by a real cluster. Declaring resources explicitly costs one small
+file per stage and buys the §8 offline gate — a malformed manifest fails on the laptop
+instead of as a red `Kustomization` three time zones away.
 
 `infra` carries `wait: true, timeout: 10m`. Without it, `certificates` is applied the
 moment `infra` is *applied* — before cert-manager and its OVH webhook have actually
@@ -155,26 +160,31 @@ k8s-titan/
 ├── docs/superpowers/specs/             # this file
 └── apply/
     ├── 00-bootstrap/
+    │   ├── kustomization.yaml              # namespaces + stages + flux-system/
     │   ├── flux-system/
-    │   │   ├── gotk-components.yaml    # flux install output, DO NOT EDIT
-    │   │   ├── gotk-sync.yaml          # GitRepository + flux-system Kustomization
-    │   │   └── kustomization.yaml
-    │   ├── namespaces.yaml             # apps, cert-manager, certificates
+    │   │   ├── kustomization.yaml          # gotk-components + gotk-sync
+    │   │   ├── gotk-components.yaml        # flux install output, DO NOT EDIT
+    │   │   └── gotk-sync.yaml              # GitRepository + flux-system Kustomization
+    │   ├── namespaces.yaml                 # apps, cert-manager
     │   ├── stage-secrets.yaml
     │   ├── stage-infra.yaml
     │   ├── stage-certificates.yaml
     │   └── stage-apps.yaml
     ├── 10-secrets/
-    │   └── ovh-domain-secrets.yaml     # sops-encrypted, namespace: cert-manager
+    │   ├── kustomization.yaml
+    │   └── ovh-domain-secrets.yaml         # sops-encrypted, namespace: cert-manager
     ├── 20-infra/
+    │   ├── kustomization.yaml
     │   └── cert-manager/
-    │       ├── cert-manager.yaml       # OCIRepository + HelmRelease
-    │       ├── ovh-webhook.yaml        # HelmRepository + HelmRelease + ClusterIssuers
-    │       └── rbac.yaml               # webhook SA secret-reader Role
+    │       ├── cert-manager.yaml           # OCIRepository + HelmRelease
+    │       ├── ovh-webhook.yaml            # HelmRepository + HelmRelease + ClusterIssuers
+    │       └── rbac.yaml                   # webhook SA secret-reader Role
     ├── 40-certificates/
-    │   └── titan-wildcard.yaml         # Certificate → Secret titan-tls
+    │   ├── kustomization.yaml
+    │   └── titan-wildcard.yaml             # Certificate in ns/apps → Secret titan-tls
     └── 50-apps/
-        └── .gitkeep                    # empty until the first workload
+        ├── kustomization.yaml              # empty resources until the first workload
+        └── .gitkeep
 ```
 
 Namespaces are created in `00-bootstrap` rather than inside the charts that need them,
@@ -257,8 +267,11 @@ applied second, which is the declarative path Flux documents.
 ### 6.2 The artifacts
 
 - `gotk-components.yaml` — output of
-  `flux install --version v2.9.6 --components=source-controller,kustomize-controller,helm-controller,notification-controller`,
-  committed verbatim. `notification-controller` is inert today (no `Alert`/`Provider`
+  `flux install --components=source-controller,kustomize-controller,helm-controller,notification-controller`
+  run with the Flux **v2.9.6** CLI, committed verbatim. The version comes from the
+  installed binary — `flux install` has no version flag of its own — so the binary is
+  pinned, not the command line, and the generated header (`# Flux Version: v2.9.6`)
+  is what proves it. `notification-controller` is inert today (no `Alert`/`Provider`
   objects exist) and is included for parity with the siblings and to avoid a manual
   install the day notifications are wanted.
 - `gotk-sync.yaml` — written by hand in Flux's exact generated shape, carrying the
@@ -321,16 +334,37 @@ Ported from `k8s-techdelivery/apply/20-infra/cert-manager/` with titan values.
 |---|---|
 | cert-manager | `1.21.1` from `oci://quay.io/jetstack/charts/cert-manager` via `OCIRepository` + `ref.semver`; `replicaCount: 1`; `crds.enabled: true, keep: true`; drift detection enabled; `RetryOnFailure` on install and upgrade, `crds: CreateReplace` |
 | OVH webhook | `cert-manager-webhook-ovh` `0.6.0` from `https://aureq.github.io/cert-manager-webhook-ovh/` |
-| `groupName` | `acme.titan.arrieta.eu` — **must differ from techdelivery's `acme.techdelivery.es`**; two clusters sharing a ACME group against one zone is how challenges collide |
+| `groupName` | `acme.titan.arrieta.eu` — **must differ from techdelivery's `acme.techdelivery.es`**; see the APIService note below |
 | ClusterIssuers | `le-prod-titan` (real LE) + `le-staging-titan` (staging), `cnameStrategy: None`, `ovhEndpointName: ovh-eu`, email `javier@techdelivery.es`, creds from `ovh-domain-secrets` |
-| RBAC | `Role` + `RoleBinding` granting the webhook SA `get`/`watch` on `ovh-domain-secrets` **by resource name only**. techdelivery's equivalent also names `kanghuru-ovh-secrets`, which titan has no use for; that name is dropped. |
-| Certificate | `titan-wildcard` in namespace `certificates` → Secret `titan-tls`; DNS names `titan.arrieta.eu`, `*.titan.arrieta.eu`; issuer `le-prod-titan` |
+| RBAC | None hand-written — the chart's own `Role <release>:secret-reader` already names `ovh-domain-secrets` from the issuer refs. techdelivery's extra Role exists only because two webhooks share its `cert-manager` namespace. |
+| Certificate | `titan-wildcard` in namespace **`apps`** → Secret `titan-tls`; DNS names `titan.arrieta.eu`, `*.titan.arrieta.eu`; issuer `le-prod-titan` |
+
+The `Certificate` lives in `apps`, not a dedicated `certificates` namespace, because a
+`Certificate` can only produce its Secret in its **own** namespace and the Ingresses
+that consume `titan-tls` live in `apps`. `k8s-techdelivery` solves this with a
+`certificates` namespace plus the **Reflector** operator mirroring secrets into
+consumers — a second cluster-wide component, unjustified while titan has one
+certificate and one consuming namespace. Reflector is deferred (§9) and gets added the
+day a second namespace needs the same cert.
+
+The chart's own RBAC is sufficient here: templating `cert-manager-webhook-ovh` `0.6.0`
+with titan's values confirms it creates `Role <release>:secret-reader` with
+`resourceNames` derived from `issuers[].ovhAuthenticationRef`, plus the `domain-solver`
+and `flowcontrol-solver` ClusterRoles and the `APIService v1alpha1.acme.titan.arrieta.eu`.
+No hand-written `rbac.yaml` is needed — techdelivery's exists only to widen that Role
+for a **second** webhook sharing the `cert-manager` namespace, which titan does not have.
+
+The `groupName` uniqueness requirement is sharper than "avoid challenge collisions": the
+chart creates a cluster-scoped `APIService` named `v1alpha1.<groupName>`, so reusing
+`acme.techdelivery.es` inside one cluster is a hard conflict, not a soft one.
 
 Staging issuer ships alongside production deliberately: the first DNS-01 attempt
 against a new zone is the one worth burning rate limits on.
 
-`secretTemplate` carries the annotation that keeps renewal from requiring a pod restart
-where the consumer supports it, matching current cert-manager guidance.
+No `secretTemplate` ships with titan's `Certificate`. techdelivery's certificates carry
+`reflector.v1.k8s.emberstack.com/*` annotations, which exist purely to drive the
+Reflector operator — meaningless on a cluster without it, and the reason titan's
+certificate is simply placed in `apps` instead.
 
 ---
 
@@ -340,8 +374,9 @@ No cluster access is needed for most of it, which matters because 6443 is mesh-o
 
 **Offline, in CI and via `make validate`:**
 
-1. `kubectl kustomize` each stage directory — catches a malformed manifest or a bad
-   `kustomization.yaml` before it reaches a cluster.
+1. `make kustomize-check` — `kubectl kustomize` on every stage directory, which works
+   only because each carries a `kustomization.yaml` (§3). Catches a malformed manifest
+   or a bad resource reference before it reaches a cluster.
 2. `sops --decrypt` every file under `apply/10-secrets` — catches a secret encrypted to
    the wrong key group, the failure mode that surfaces only as a red `secrets` stage.
 3. `ggshield secret scan path -r -y .` (`make scan`) on the working tree, and the same
@@ -354,7 +389,7 @@ No cluster access is needed for most of it, which matters because 6443 is mesh-o
 5. `kubectl get kustomization -A` — all five `Ready=True`.
 6. `kubectl -n cert-manager get helmrelease` — both `Ready=True`;
    `kubectl -n cert-manager get clusterissuer` — both `Ready=True`.
-7. `kubectl -n certificates get certificate titan-wildcard` → `Ready=True`, and
+7. `kubectl -n apps get certificate titan-wildcard` → `Ready=True`, and
    `openssl s_client -connect <OVH_PUBLIC_IP>:443 -servername anything.titan.arrieta.eu`
    presents a Let's Encrypt chain.
 8. End-to-end: a throwaway Ingress on `whoami.titan.arrieta.eu` serves HTTPS with a real
@@ -373,6 +408,7 @@ No cluster access is needed for most of it, which matters because 6443 is mesh-o
 | `external-dns` | The wildcard A record already resolves every service name | A service needing a record outside the wildcard |
 | Making the repo private | Would force a `secretRef` on the `GitRepository` and a deploy key on a public-internet node — decision D3 | Any secret-shaped reason to lock it down |
 | Apps under `50-apps` | Nothing to deploy yet | First workload |
+| Reflector operator + a `certificates` namespace | One certificate, one consuming namespace today; the `Certificate` sits in `apps` (§7) | A second namespace needs `titan-tls` |
 | `GITGUARDIAN_API_KEY` repo secret | The scan skips with a visible `::warning::` until it is set (§0.1) | Whenever the operator locates/reissues an API key with `scan` scope |
 | `.gitguardian.yaml` ignore list | Nothing to ignore: the current engine does not flag SOPS ciphertext (§0.1) | First real false positive reported by CI |
 
@@ -391,3 +427,4 @@ No cluster access is needed for most of it, which matters because 6443 is mesh-o
 | D7 | Stage objects | Committed to git, one file per stage, `wait: true` on `infra`. Fixes the siblings' gap. |
 | D8 | Layout | Mirrors `k8s-techdelivery` numbering (`00-bootstrap`, `10-secrets`, `20-infra`, `40-certificates`, `50-apps`), not `k8s-casa`. |
 | D9 | Secret scanning | GitGuardian CI action + `make scan`, no ignore list, scan gated on a per-repo API key that is not yet set. Casa's stale SOPS ignores are not copied. |
+| D10 | Certificate placement | `Certificate` in namespace `apps` so `titan-tls` lands where the Ingresses are; no `certificates` namespace and no Reflector in v1. |
