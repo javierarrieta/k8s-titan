@@ -157,13 +157,20 @@ is deliberately **not** in this scope (§9).
 
 ```
 k8s-titan/
-├── .gitignore                          # .cache_ggshield, **/.decrypted*.yaml, age keys
+├── .gitignore                          # .cache_ggshield, .gitguardian.yaml, age keys,
+│                                       #   **/.decrypted*.yaml, and — load-bearing —
+│                                       #   apply/10-secrets/.staging.*.yaml (§5.3)
 ├── .sops.yaml                          # §5
 ├── .github/workflows/gitguardian-scan.yml  # §0.1
 ├── AGENTS.md                           # agent-facing repo conventions
-├── Makefile                            # scan / update-keys / validate / secrets-list
+├── Makefile                            # check / leak-check / kustomize-check / validate
+│                                       #   (+ -serial) / update-keys (+ -serial) /
+│                                       #   secrets-present / secrets-placement / scan /
+│                                       #   secrets-list
 ├── README.md                           # the three-command runbook + follow-ups
+├── docs/ovh-dns-credential.md          # issuing + rotating titan's OVH API application
 ├── docs/superpowers/specs/             # this file
+├── docs/superpowers/plans/             # the implementation plan, with supersession banners
 └── apply/
     ├── 00-bootstrap/
     │   ├── kustomization.yaml              # namespaces + stages + flux-system/
