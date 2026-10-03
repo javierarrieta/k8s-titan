@@ -31,6 +31,35 @@ git diff --cached | grep -noE '\b([0-9]{1,3}\.){3}[0-9]{1,3}\b' \
   && echo "PUBLIC IPv4 IN DIFF"
 ```
 
+### 0.1 The mechanical gate
+
+Those greps are a **fallback**, not the control. A check a human has to remember is a
+check that gets skipped under pressure, so the real gate is
+`.github/workflows/gitguardian-scan.yml`: `GitGuardian/ggshield/actions/secret@v1.54.0`
+on every `push` and `pull_request`, with `fetch-depth: 0` so whole-push diffs are
+covered, plus `make scan` for the same engine locally before committing.
+
+Two facts shape that workflow:
+
+- **The API key is per-repo, and there is nothing to inherit.** `javierarrieta` is a
+  GitHub **user**, not an org, so org-level Actions secrets do not exist; and no
+  GitGuardian GitHub App posts checks on these repos — the only `GitGuardian scan`
+  check-run on `k8s-casa` is casa's own workflow job, and `k8s-techdelivery` has no
+  check-runs at all. A fresh repo therefore starts with no `GITGUARDIAN_API_KEY`, and
+  the action hard-fails without it. The workflow gates the scan on the key being
+  present and emits a `::warning::` naming the fix when it is absent, so a
+  configuration gap does not paint every push red while still being impossible to
+  mistake for a passing scan.
+- **No `.gitguardian.yaml` ships with this repo.** `k8s-casa` carries nine
+  `ignored_matches` entries because SOPS `ENC[AES256_GCM,…]` ciphertext once tripped
+  the Generic Password detector, and its own comment warns the SHAs must be re-added
+  after every `sops` rewrite. Verified against the current engine (ggshield 1.54.0 /
+  secrets engine 2.173.0): `k8s-techdelivery/apply/10-secrets` (15 files) and four of
+  the exact casa files carrying those ignore SHAs, copied to a clean directory so no
+  config applied, all scan **clean**. The engine no longer flags SOPS ciphertext, so
+  pre-loading that ignore list would only import rot. Add a `.gitguardian.yaml` if and
+  when a real false positive appears.
+
 ---
 
 ## 1. Intent and success criteria
@@ -117,10 +146,11 @@ is deliberately **not** in this scope (§9).
 
 ```
 k8s-titan/
-├── .gitignore                          # **/.decrypted*.yaml, age keys
+├── .gitignore                          # .cache_ggshield, **/.decrypted*.yaml, age keys
 ├── .sops.yaml                          # §5
+├── .github/workflows/gitguardian-scan.yml  # §0.1
 ├── AGENTS.md                           # agent-facing repo conventions
-├── Makefile                            # update-keys / validate / secrets-list
+├── Makefile                            # scan / update-keys / validate / secrets-list
 ├── README.md                           # the three-command runbook + follow-ups
 ├── docs/superpowers/specs/             # this file
 └── apply/
@@ -314,7 +344,9 @@ No cluster access is needed for most of it, which matters because 6443 is mesh-o
    `kustomization.yaml` before it reaches a cluster.
 2. `sops --decrypt` every file under `apply/10-secrets` — catches a secret encrypted to
    the wrong key group, the failure mode that surfaces only as a red `secrets` stage.
-3. The §0 credential and public-IPv4 greps against the staged diff.
+3. `ggshield secret scan path -r -y .` (`make scan`) on the working tree, and the same
+   engine in CI on every push (§0.1). The §0 greps remain as a fallback for a machine
+   without ggshield configured.
 
 **Against the cluster, post-bootstrap:**
 
@@ -341,6 +373,8 @@ No cluster access is needed for most of it, which matters because 6443 is mesh-o
 | `external-dns` | The wildcard A record already resolves every service name | A service needing a record outside the wildcard |
 | Making the repo private | Would force a `secretRef` on the `GitRepository` and a deploy key on a public-internet node — decision D3 | Any secret-shaped reason to lock it down |
 | Apps under `50-apps` | Nothing to deploy yet | First workload |
+| `GITGUARDIAN_API_KEY` repo secret | The scan skips with a visible `::warning::` until it is set (§0.1) | Whenever the operator locates/reissues an API key with `scan` scope |
+| `.gitguardian.yaml` ignore list | Nothing to ignore: the current engine does not flag SOPS ciphertext (§0.1) | First real false positive reported by CI |
 
 ---
 
@@ -356,3 +390,4 @@ No cluster access is needed for most of it, which matters because 6443 is mesh-o
 | D6 | Ingress | Bundled k3s Traefik + ServiceLB stay (inherits `nixos-configurations` D4); tuning deferred to `nixos-configurations`. |
 | D7 | Stage objects | Committed to git, one file per stage, `wait: true` on `infra`. Fixes the siblings' gap. |
 | D8 | Layout | Mirrors `k8s-techdelivery` numbering (`00-bootstrap`, `10-secrets`, `20-infra`, `40-certificates`, `50-apps`), not `k8s-casa`. |
+| D9 | Secret scanning | GitGuardian CI action + `make scan`, no ignore list, scan gated on a per-repo API key that is not yet set. Casa's stale SOPS ignores are not copied. |

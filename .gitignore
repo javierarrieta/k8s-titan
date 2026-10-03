@@ -1,0 +1,11 @@
+# ggshield local scan cache (the config it writes, .gitguardian.yaml, is committed)
+.cache_ggshield
+
+# Decrypted manifests must never be staged. `sops -d file.yaml > file.yaml` is a
+# real way to commit plaintext secrets.
+**/.decrypted*.yaml
+
+# Age private keys live outside this repo: ~/.config/sops/age/ and the password
+# manager. Belt-and-braces in case one is ever dropped next to a manifest.
+*.agekey
+*.age

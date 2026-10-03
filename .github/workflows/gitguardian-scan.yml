@@ -1,0 +1,44 @@
+name: GitGuardian scan
+
+on: [push, pull_request]
+
+jobs:
+  scanning:
+    name: GitGuardian scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # fetch all history so multiple commits can be scanned
+
+      # GITGUARDIAN_API_KEY is a per-repo secret, and `javierarrieta` is a user
+      # account, not an org — so there is no org-level secret to inherit and a
+      # fresh repo starts without one. Without the key the ggshield action fails,
+      # which would make every push red for a configuration gap rather than a
+      # leak. So the scan is gated on the key being present and says out loud
+      # when it skipped: the run stays green, the annotation is the signal.
+      #
+      # Set it once with:
+      #   gh secret set GITGUARDIAN_API_KEY -R javierarrieta/k8s-titan
+      - name: Check for GITGUARDIAN_API_KEY
+        id: key
+        env:
+          GITGUARDIAN_API_KEY: ${{ secrets.GITGUARDIAN_API_KEY }}
+        run: |
+          if [ -z "$GITGUARDIAN_API_KEY" ]; then
+            echo "::warning::GITGUARDIAN_API_KEY is not set on this repository — secret scan SKIPPED. Set it with: gh secret set GITGUARDIAN_API_KEY -R javierarrieta/k8s-titan"
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: GitGuardian scan
+        if: steps.key.outputs.present == 'true'
+        uses: GitGuardian/ggshield/actions/secret@v1.54.0
+        env:
+          GITHUB_PUSH_BEFORE_SHA: ${{ github.event.before }}
+          GITHUB_PUSH_BASE_SHA: ${{ github.event.base }}
+          GITHUB_PULL_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          GITHUB_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          GITGUARDIAN_API_KEY: ${{ secrets.GITGUARDIAN_API_KEY }}
