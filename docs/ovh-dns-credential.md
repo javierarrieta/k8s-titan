@@ -13,24 +13,39 @@ home cluster means either one's compromise edits both zones.
 
 In the [OVHcloud API console](https://api.ovh.com/console/), log in with the account
 that hosts the `arrieta.eu` zone, then open the
-[application creation page](https://api.ovh.com/createToken/index.cgi?GET=/domain/zone/*&PUT=/domain/zone/*&POST=/domain/zone/*&DELETE=/domain/zone/*).
+[application creation page](https://api.ovh.com/createToken/index.cgi?GET=/domain/zone/arrieta.eu/*&PUT=/domain/zone/arrieta.eu/*&POST=/domain/zone/arrieta.eu/*&DELETE=/domain/zone/arrieta.eu/*)
+pre-filled for this zone.
 
 | field | value |
 |---|---|
 | Application name | `k8s-titan-cert-manager` |
 | Description | DNS-01 challenge records for titan.arrieta.eu |
-| Validity | Unlimited |
-| Rights | `GET /domain/zone/*`, `PUT /domain/zone/*`, `POST /domain/zone/*`, `DELETE /domain/zone/*` |
-| Restrict IPs | blank (titan's egress is its public IP; pinning it is a hardening step, not a requirement) |
+| Validity | as short as your patience for rotating allows — see the note on the issued credential below |
+| Rights | `GET`, `PUT`, `POST`, `DELETE` on `/domain/zone/arrieta.eu/*` — this zone only |
+| Restrict IPs | titan's public egress IPv4 |
 
-Those four rights are what the webhook documents and nothing more — it only ever
-creates and deletes `_acme-challenge` TXT records and refreshes the zone.
+Those four verbs are what the webhook needs and nothing more — it only ever creates and
+deletes `_acme-challenge` TXT records and refreshes the zone. Scope them to
+`arrieta.eu` rather than `/domain/zone/*`: an account-wide DNS-write credential sitting
+in a public-internet cluster can rewrite **every** zone you own, so a leaked key secret
+stops being a titan incident and becomes a domain-loss incident.
 
-If you want to narrow it, `/domain/zone/arrieta.eu/*` instead of `/domain/zone/*` is the
-obvious cut. Test the narrower credential against **`le-staging-titan`** before trusting
-production: the webhook probes zone-status endpoints as well, and a credential that
-passes staging is proven, while one that fails only at production is a rate-limit
-problem you created for yourself.
+Two honest caveats on the narrow scope:
+
+- The webhook probes zone-status endpoints as well as `/record`, so test a narrowed
+  credential against **`le-staging-titan`** before trusting production. A credential
+  that passes staging is proven; one that fails only at production is a rate-limit
+  problem you created for yourself.
+- IP-pinning to titan's egress assumes that address is stable. If titan's egress moves,
+  certificate renewal fails silently until the 10-minute reconcile starts erroring —
+  which is a louder failure than an unpinned key, but still a outage for renewals.
+
+**The credential currently in `apply/10-secrets` predates this page.** It was issued
+with account-wide `/domain/zone/*` rights, unlimited validity, and no IP restriction,
+because that is what the first version of this document asked for. It works. It is also
+the widest-blast-radius shape available, so treat it as a rotation candidate: issue a
+zone-scoped, IP-pinned application per the table, prove it on `le-staging-titan`, cut
+over, then delete the old one.
 
 You get `ApplicationKey` and `ApplicationSecret` immediately and a `ConsumerKey`; if the
 page hands you a validation URL, open it and accept, or the consumer key will not
@@ -40,6 +55,11 @@ authenticate.
 
 Run this yourself. The values should not pass through a chat, a shell history entry, or a
 commit message.
+
+sops reads age identities from `~/.config/sops/age/keys.txt` and does not scan the
+directory, so if your `titan-k8s` key is at `~/.config/sops/age/titan-k8s-key.txt`,
+export `SOPS_AGE_KEY_FILE` to point at it before encrypting or validating — otherwise
+`make validate` reports a bare `FAILED:` on a secret that is fine.
 
 ### The way that works
 
@@ -105,11 +125,14 @@ grep -oE 'age1[a-z0-9]{12}' .sops.yaml | sort -u    # must print the same four
 ## 3. Confirm it works in the cluster
 
 ```bash
-kubectl -n cert-manager get clusterissuer le-prod-titan -o jsonpath='{.status.conditions[*].message}'
+kubectl -n cert-manager get clusterissuer le-prod-titan -o jsonpath='{.status.conditions[*]}'
 ```
 
-`We could connect to ACME server and the webhook` means the credential is accepted. A
-403 from OVH means the consumer key was never validated or the rights are missing.
+A `Ready=True` condition on both `le-prod-titan` and `le-staging-titan` means the
+credential was accepted and the webhook answered the ACME server's probe. A `False`
+carrying a 403 means the consumer key was never validated or the rights are missing;
+`Unhealthy` naming the webhook means the API service is not reachable yet, which is an
+install-order problem rather than a credential one.
 
 ## Rotating
 
