@@ -1,0 +1,28 @@
+# Hand-written in the shape `flux bootstrap` would generate. Deliberately has no
+# secretRef: the repo is public, so the source-controller clones anonymously and
+# nothing git-shaped lives in the cluster to rotate or to steal. If the repo ever
+# goes private this is the one object that changes.
+---
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: GitRepository
+metadata:
+  name: flux-system
+  namespace: flux-system
+spec:
+  interval: 1m0s
+  ref:
+    branch: main
+  url: https://github.com/javierarrieta/k8s-titan
+---
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: flux-system
+  namespace: flux-system
+spec:
+  interval: 10m0s
+  path: ./apply/00-bootstrap
+  prune: true
+  sourceRef:
+    kind: GitRepository
+    name: flux-system

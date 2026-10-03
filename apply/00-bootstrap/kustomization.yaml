@@ -6,3 +6,4 @@ resources:
   - stage-infra.yaml
   - stage-certificates.yaml
   - stage-apps.yaml
+  - flux-system
