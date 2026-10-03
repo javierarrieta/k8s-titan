@@ -39,6 +39,13 @@ check that gets skipped under pressure, so the real gate is
 on every `push` and `pull_request`, with `fetch-depth: 0` so whole-push diffs are
 covered, plus `make scan` for the same engine locally before committing.
 
+The greps above are themselves implemented as `make leak-check`, wired into `make check`,
+so they run without being remembered. It runs two independent passes: the pending diff
+(the index if something is staged, else the working tree), and — every run, regardless of
+the first — the tracked tree at HEAD plus untracked non-ignored files. The second pass is
+what makes it non-vacuous: a leak scan over an empty diff is the vacuous-pass pattern this
+spec exists to prevent, and a tree scan is never empty.
+
 Two facts shape that workflow:
 
 - **The API key is per-repo, and there is nothing to inherit.** `javierarrieta` is a
@@ -151,13 +158,20 @@ is deliberately **not** in this scope (§9).
 
 ```
 k8s-titan/
-├── .gitignore                          # .cache_ggshield, **/.decrypted*.yaml, age keys
+├── .gitignore                          # .cache_ggshield, .gitguardian.yaml, age keys,
+│                                       #   **/.decrypted*.yaml, and — load-bearing —
+│                                       #   apply/10-secrets/.staging.*.yaml (§5.3)
 ├── .sops.yaml                          # §5
 ├── .github/workflows/gitguardian-scan.yml  # §0.1
+├── .github/workflows/offline-gate.yml  # runs `make check-ci` on every push and PR
 ├── AGENTS.md                           # agent-facing repo conventions
-├── Makefile                            # scan / update-keys / validate / secrets-list
+├── Makefile                            # check / check-ci / leak-check / kustomize-check /
+│                                       #   validate / update-keys / secrets-present /
+│                                       #   secrets-placement / scan / secrets-list
 ├── README.md                           # the three-command runbook + follow-ups
+├── docs/ovh-dns-credential.md          # issuing + rotating titan's OVH API application
 ├── docs/superpowers/specs/             # this file
+├── docs/superpowers/plans/             # the implementation plan, with supersession banners
 └── apply/
     ├── 00-bootstrap/
     │   ├── kustomization.yaml              # namespaces + stages + flux-system/
@@ -177,8 +191,7 @@ k8s-titan/
     │   ├── kustomization.yaml
     │   └── cert-manager/
     │       ├── cert-manager.yaml           # OCIRepository + HelmRelease
-    │       ├── ovh-webhook.yaml            # HelmRepository + HelmRelease + ClusterIssuers
-    │       └── rbac.yaml                   # webhook SA secret-reader Role
+    │       └── ovh-webhook.yaml            # HelmRepository + HelmRelease + ClusterIssuers
     ├── 40-certificates/
     │   ├── kustomization.yaml
     │   └── titan-wildcard.yaml             # Certificate in ns/apps → Secret titan-tls
@@ -188,7 +201,12 @@ k8s-titan/
 ```
 
 Namespaces are created in `00-bootstrap` rather than inside the charts that need them,
-matching both siblings: `apps`, `cert-manager`, `certificates`.
+matching both siblings: `apps` and `cert-manager`. There is no `certificates`
+namespace — see §7, which places the `Certificate` in `apps` so its Secret lands where
+the Ingress can consume it.
+
+No `rbac.yaml` ships under `20-infra`: the webhook chart generates the Role it needs,
+and §7 explains why the sibling's hand-written Role is not ported.
 
 The stage numbering skips `30-*` on purpose: `30-backup` is reserved for the deferred
 backup stage (§9) so titan keeps the siblings' numbering rather than inventing its own.
@@ -221,6 +239,12 @@ open ("titan's age key is the repo-wide admin key").
 1. `~/.config/sops/age/titan-k8s-key.txt` on the operator's machines (mode `0600`), and
 2. the password manager, as the off-machine copy.
 
+sops reads age identities from `~/.config/sops/age/keys.txt` and does not scan the
+directory, so a key stored under a different name is invisible to it: anywhere sops must
+decrypt for titan, `SOPS_AGE_KEY_FILE` has to point at the file. Both the README and
+`docs/ovh-dns-credential.md` say so, because the failure mode — `make validate` printing
+a bare `FAILED:` — looks exactly like a corrupt secret.
+
 It is **never** committed here, and never pasted into a terminal that logs it. Losing
 both copies makes `apply/10-secrets/*.yaml` unrecoverable; the OVH triple can be
 re-issued, so the damage is bounded but real.
@@ -247,11 +271,24 @@ the group so they can decrypt, edit, and `sops updatekeys` without the cluster k
 ### 5.3 `ovh-domain-secrets`
 
 `Secret ovh-domain-secrets` in namespace `cert-manager`, keys `OVH_APPLICATION_KEY`,
-`OVH_APPLICATION_SECRET`, `OVH_CONSUMER_KEY` — the same OVH API application that
-already writes `arrieta.eu` DNS for `k8s-techdelivery`, since `titan.arrieta.eu` lives
-in that same zone. Implementation decrypts the techdelivery copy with the Coder
-workspace key and re-encrypts for titan in one step, so no plaintext reaches a file, a
-shell history entry, or a transcript.
+`OVH_APPLICATION_SECRET`, `OVH_CONSUMER_KEY`.
+
+**Superseded during implementation, recorded so nobody re-shares the credential:** this
+section originally specified that titan reuse the OVH API application that already
+writes `arrieta.eu` for `k8s-techdelivery`, decrypting that copy and re-encrypting it
+for titan in one chain. Two things ended that:
+
+- The techdelivery copy would not decrypt. sops reported a MAC mismatch on that single
+  file while every sibling secret in the same directory decrypted cleanly, so the
+  one-chain re-encryption had no source to read.
+- Reuse would have placed a credential able to rewrite the entire `arrieta.eu` zone
+  inside a public-internet cluster, where one compromised pod can edit both clusters'
+  DNS. §5.1 rejects precisely that argument for the age key; it applies identically
+  here, and sharing was never the safer option — only the quicker one.
+
+titan therefore holds **its own** OVH API application, issued and rotated per
+`docs/ovh-dns-credential.md`. The techdelivery credential is unaffected by this repo and
+remains a rotation hazard tracked outside it.
 
 ---
 
@@ -274,9 +311,11 @@ applied second, which is the declarative path Flux documents.
   is what proves it. `notification-controller` is inert today (no `Alert`/`Provider`
   objects exist) and is included for parity with the siblings and to avoid a manual
   install the day notifications are wanted.
-- `gotk-sync.yaml` — written by hand in Flux's exact generated shape, carrying the
-  `# This manifest was generated by flux. DO NOT EDIT.` banner the siblings carry so
-  nobody treats it as machine-owned:
+- `gotk-sync.yaml` — written by hand in Flux's exact generated shape, but carrying its
+  own header that says it is hand-written and why there is no `secretRef`, rather than
+  the `# This manifest was generated by flux. DO NOT EDIT.` banner the siblings carry:
+  this file is edited by hand on purpose, and a do-not-edit banner would invite someone
+  to regenerate it and lose the anonymous-clone decision.
 
 ```yaml
 apiVersion: source.toolkit.fluxcd.io/v1

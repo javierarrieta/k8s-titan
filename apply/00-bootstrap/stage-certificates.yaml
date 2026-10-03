@@ -1,0 +1,14 @@
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: certificates
+  namespace: flux-system
+spec:
+  dependsOn:
+    - name: infra
+  interval: 10m0s
+  path: ./apply/40-certificates
+  prune: true
+  sourceRef:
+    kind: GitRepository
+    name: flux-system

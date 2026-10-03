@@ -1,0 +1,21 @@
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: infra
+  namespace: flux-system
+spec:
+  dependsOn:
+    - name: secrets
+  interval: 10m0s
+  path: ./apply/20-infra
+  prune: true
+  sourceRef:
+    kind: GitRepository
+    name: flux-system
+  # Real, not nominal: HelmRelease reports Ready, so this makes `certificates`
+  # wait for cert-manager to actually be installed rather than merely applied.
+  # Without it the first Certificate sits in "issuer not found" on a fresh
+  # cluster, which reads as breakage. Cost: if cert-manager never goes Ready,
+  # certificates and apps stay blocked and fail loudly.
+  timeout: 10m0s
+  wait: true

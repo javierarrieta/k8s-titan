@@ -42,3 +42,13 @@ jobs:
           GITHUB_PULL_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           GITHUB_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           GITGUARDIAN_API_KEY: ${{ secrets.GITGUARDIAN_API_KEY }}
+
+      # A green check that never scanned is the failure mode spec §0.1 calls "impossible
+      # to mistake for a passing scan" — a warning annotation alone is easy to scroll
+      # past. This step makes the skip its own named line in the run.
+      - name: "SKIPPED: GitGuardian scan did not run (no GITGUARDIAN_API_KEY)"
+        if: steps.key.outputs.present != 'true'
+        run: |
+          echo "### GitGuardian scan SKIPPED" >> "$GITHUB_STEP_SUMMARY"
+          echo "No secret scan ran on this commit. Set the key and re-run this job." >> "$GITHUB_STEP_SUMMARY"
+          echo "::warning::GitGuardian scan SKIPPED — no GITGUARDIAN_API_KEY on this repository"

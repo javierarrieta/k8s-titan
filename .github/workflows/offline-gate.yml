@@ -1,0 +1,36 @@
+name: Offline gate
+
+on: [push, pull_request]
+
+# Least privilege: this job reads the repo and nothing else. The GitGuardian workflow
+# does not set this; a new workflow should not inherit the token's default write scope
+# for no reason.
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    name: Offline gate (no secrets, no cluster)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # kustomize-check shells out to `kubectl kustomize`. ubuntu-latest ships kubectl,
+      # but a runner-image change would otherwise turn this gate red with a confusing
+      # "command not found" - so install it if it is ever missing rather than let the
+      # gate die on tooling.
+      - name: Ensure kubectl (for kubectl kustomize)
+        run: |
+          if ! command -v kubectl >/dev/null 2>&1; then
+            v=$(curl -fsSL https://dl.k8s.io/release/stable.txt)
+            curl -fsSL -o /tmp/kubectl "https://dl.k8s.io/release/${v}/bin/linux/amd64/kubectl"
+            install -m 0755 /tmp/kubectl /usr/local/bin/kubectl
+          fi
+          kubectl version --client=true 2>/dev/null | head -1
+
+      # Runs leak-check, kustomize-check and secrets-placement, and deliberately NOT
+      # validate: that needs the sops age private key, which must never be placed in CI.
+      # This is the only control in this repo that cannot be skipped with --no-verify.
+      - name: make check-ci
+        run: make check-ci

@@ -1,0 +1,14 @@
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: titan-wildcard
+  namespace: apps
+spec:
+  secretName: titan-tls
+  issuerRef:
+    kind: ClusterIssuer
+    name: le-prod-titan
+  commonName: titan.arrieta.eu
+  dnsNames:
+    - titan.arrieta.eu
+    - "*.titan.arrieta.eu"
