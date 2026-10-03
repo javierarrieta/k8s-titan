@@ -1,4 +1,4 @@
-.PHONY: scan update-keys update-keys-serial validate validate-serial info secrets-list kustomize-check check
+.PHONY: scan update-keys update-keys-serial validate validate-serial info secrets-list kustomize-check check secrets-present
 
 # Secret scan of the working tree. CI runs the same engine on every push; this is
 # the local pre-commit form of it. Needs ggshield authenticated (ggshield auth login).
@@ -25,6 +25,20 @@ validate-serial:
 validate:
 	@echo "Validating all secrets can be decrypted:"
 	@find apply/10-secrets -name "*.yaml" ! -name kustomization.yaml -print0 | xargs -0 -P 4 sh -c 'for f; do sops --decrypt "$$f" > /dev/null 2>&1 && echo "OK: $$f" || echo "FAILED: $$f"; done' sh
+
+# A gate that passes when there is nothing to check is worse than no gate. The
+# validate / update-keys targets were inherited from repos that always had
+# secrets, and `find | xargs` exits 0 on an empty set — so with apply/10-secrets
+# missing or empty, `make check` reported success while decrypting nothing.
+secrets-present:
+	@test -d apply/10-secrets || { echo "FAIL: apply/10-secrets does not exist — nothing to validate"; exit 1; }; \
+	test -n "$$(find apply/10-secrets -name '*.yaml' ! -name kustomization.yaml)" || { \
+	  echo "FAIL: apply/10-secrets holds no secret manifests — the OVH credential the ClusterIssuers reference is required"; exit 1; }
+
+validate: secrets-present
+validate-serial: secrets-present
+update-keys: secrets-present
+update-keys-serial: secrets-present
 
 # Show info for a specific secret
 info:
