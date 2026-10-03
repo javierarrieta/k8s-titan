@@ -4,9 +4,12 @@ KUSTOMIZE_DIRS := $(shell find apply -mindepth 1 -maxdepth 2 -name kustomization
 # not be able to slip between the encryption rule and the validation glob.
 SECRET_FIND := find apply/10-secrets \( -name '*.yaml' -o -name '*.yml' \) ! -name kustomization.yaml
 
-.PHONY: check kustomize-check validate validate-serial update-keys update-keys-serial scan leak-check secrets-placement secrets-list
+.PHONY: check kustomize-check validate validate-serial update-keys update-keys-serial scan leak-check secrets-placement secrets-present secrets-list
 
-check: kustomize-check validate secrets-placement leak-check
+# leak-check runs FIRST: make has no -k, so it stops at the first failing prerequisite.
+# validate needs the age key, so an operator who forgot SOPS_AGE_KEY_FILE would never
+# reach a leak gate placed behind it.
+check: leak-check kustomize-check validate secrets-placement
 	@echo "check: all offline gates passed"
 
 # Offline gate: every stage directory must build with kubectl kustomize, every stage
@@ -28,8 +31,10 @@ kustomize-check:
 	  else echo OK; fi; \
 	done; \
 	printf 'gitrepository auth: '; \
-	n=$$(grep -A14 '^kind: GitRepository' apply/00-bootstrap/flux-system/gotk-sync.yaml | grep -c 'secretRef'); \
-	if [ "$$n" -eq 0 ]; then echo "none (anonymous public clone)"; else echo "FAIL ($$n secretRef found)"; fail=1; fi; \
+	if [ ! -f apply/00-bootstrap/flux-system/gotk-sync.yaml ]; then \
+	  echo "FAIL (gotk-sync.yaml is missing - grep would report zero secretRefs and pass)"; fail=1; \
+	else n=$$(grep -A14 '^kind: GitRepository' apply/00-bootstrap/flux-system/gotk-sync.yaml | grep -c 'secretRef'); \
+	  if [ "$$n" -eq 0 ]; then echo "none (anonymous public clone)"; else echo "FAIL ($$n secretRef found)"; fail=1; fi; fi; \
 	printf 'acme groupName: '; \
 	g=$$(grep -rhoE 'groupName:[[:space:]]*[^[:space:]]+' apply/ | sort -u | tr '\n' ' '); \
 	if [ "$$g" = "groupName: acme.titan.arrieta.eu " ]; then echo "acme.titan.arrieta.eu"; \
@@ -75,9 +80,13 @@ update-keys-serial: secrets-present
 # and CI is skipped whenever the per-repo key is absent. So the promise needs a gate.
 # (b) is belt-and-braces - `sops --decrypt` already exits 1 on a plaintext file - but it
 # fails with a sentence instead of a sops stack trace.
-secrets-placement:
+# AGENTS.md promises "Secrets go in apply/10-secrets/ only". This is that promise, and
+# it scans the whole tree rather than just apply/: a plaintext Secret under docs/ or
+# .github/ is exactly as public. Depends on secrets-present so it cannot pass vacuously
+# when run on its own.
+secrets-placement: secrets-present
 	@fail=0; \
-	stray=$$(grep -rl --include='*.yaml' --include='*.yml' -E '^kind: *Secret$$' apply/ 2>/dev/null | grep -v '^apply/10-secrets/' || true); \
+	stray=$$(grep -rlI --exclude-dir=.git --include='*.yaml' --include='*.yml' -E '^kind: *Secret$$' . 2>/dev/null | grep -v '^\./apply/10-secrets/' || true); \
 	if [ -n "$$stray" ]; then echo "FAIL: Secret manifest outside apply/10-secrets:"; echo "$$stray"; fail=1; fi; \
 	for f in $$($(SECRET_FIND)); do \
 	  if ! grep -q 'ENC\[' "$$f"; then echo "FAIL: $$f is not sops-encrypted (no ENC[)"; fail=1; fi; \
@@ -85,32 +94,59 @@ secrets-placement:
 	if [ "$$fail" -eq 0 ]; then echo "secrets-placement: no Secret outside apply/10-secrets, every secret encrypted"; fi; \
 	exit $$fail
 
-# Spec §0's three credential shapes AND its concrete-public-IPv4 check, against the
-# staged diff. It used to implement two of the three shapes and no IPv4 check, and it
-# grepped only the index - which AGENTS.md told you to run before `git add`, so it
-# scanned an empty diff and reported success. Now: index if non-empty, else the working
-# tree, and if there is genuinely nothing to scan it says so instead of passing.
+# Spec §0's three credential shapes AND its concrete-public-IPv4 check.
 #
-# The patterns are assembled from pieces so this Makefile can never match itself: the
-# literal text 'ssh-ed25519 AA''AA' does not contain four consecutive A's, a regex
-# written as '[A-Z ]*PRIVATE KEY' does not match its own source, and '{1,3}\.' has no
-# digit-followed-by-dot triple in it.
+# Three-tier source, never vacuous and never red on a legitimate state:
+#   1. the index, when something is staged - what is about to be committed
+#   2. the working tree, when it differs from HEAD
+#   3. the tracked tree at HEAD - strictly stronger than a diff, it re-proves the
+#      published state on every run
+# Untracked non-ignored files are scanned ON TOP of whichever tier is selected: a key
+# dropped next to a manifest is exactly what this gate exists to catch, and a
+# diff-only gate walked straight past one - an untracked AGE-SECRET-KEY file plus any
+# unrelated edit used to exit 0. --exclude-standard keeps the documented
+# apply/10-secrets/.staging.*.yaml flow from tripping it.
+#
+# Tier 3 excludes docs/superpowers/ and nothing else: the spec and plan quote the
+# checker's own patterns in prose (the OpenSSH key prefix among them), so scanning them
+# fails forever.
+# The cost is real - a credential pasted into a spec or plan survives tier 3 - and is
+# accepted because tiers 1 and 2 exclude nothing, so the commit that introduces it is
+# still caught. The tier scanned is printed so the result is never ambiguous.
+#
+# Patterns are assembled from pieces so this Makefile cannot match itself: the literal
+# text 'ssh-ed25519 AA''AA' holds no four consecutive A's, a regex written as
+# '[A-Z ]*PRIVATE KEY' does not match its own source, and '{1,3}\.' contains no
+# digit-followed-by-dot triple.
+#
+# Diff tiers scan ADDED lines only. A credential being deleted is the fix, not the leak
+# - and this repo's own plan history had to delete a line quoting the checker's pattern,
+# which a whole-diff grep flagged as a leak.
 leak-check:
 	@age='AGE-SECRET-KEY-1[A-Z2-9]{40,}'; pem='BEGIN [A-Z ]*PRIVATE KEY'; ssh='ssh-ed25519 AA''AA'; \
 	ip='\b([0-9]{1,3}\.){3}[0-9]{1,3}\b'; \
 	allow='(^|[^0-9])(10\.|127\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.|0\.0\.0\.0|1\.1\.1\.1|8\.8\.[48]\.4|213\.186\.33\.99|224\.)'; \
-	if git diff --cached --quiet && git diff --quiet; then \
-	  echo "leak-check: FAIL - nothing staged and no working-tree changes, so there is nothing to scan"; \
-	  echo "          stage the change (git add -A) and run it again"; exit 1; \
+	shapes="$$age|$$pem|$$ssh"; rc=0; \
+	if ! git diff --cached --quiet; then tier='staged diff'; body=$$(git diff --cached); files=''; \
+	elif ! git diff --quiet; then tier='working tree vs HEAD'; body=$$(git diff HEAD); files=''; \
+	else tier='tracked tree at HEAD'; body=''; \
+	  files=$$(git grep -lI -E "$$shapes|$$ip" -- . ':(exclude)docs/superpowers' || true); fi; \
+	if [ -n "$$body" ]; then \
+	  added=$$(printf '%s\n' "$$body" | grep '^+' || true); \
+	  if printf '%s\n' "$$added" | grep -nE "$$shapes"; then echo "LEAK: credential shape in $$tier"; rc=1; fi; \
+	  if printf '%s\n' "$$added" | grep -noE "$$ip" | grep -vE "$$allow"; then \
+	    echo "LEAK: concrete public IPv4 in $$tier - write <OVH_PUBLIC_IP>"; rc=1; fi; \
 	fi; \
-	if git diff --cached --quiet; then d=$$(git diff HEAD); else d=$$(git diff --cached); fi; \
-	if printf '%s' "$$d" | grep -nE "$$age|$$pem|$$ssh"; then \
-	  echo "LEAK: credential shape found in the diff - unstage and re-encrypt"; exit 1; \
+	scanlist=$$(printf '%s\n' $$files $$(git ls-files --others --exclude-standard) | grep -v '^$$' | sort -u); \
+	if [ -n "$$scanlist" ]; then \
+	  if printf '%s\n' "$$scanlist" | xargs grep -nHE "$$shapes" 2>/dev/null | grep -v '^$$'; then \
+	    echo "LEAK: credential shape in $$tier (tracked/untracked files)"; rc=1; fi; \
+	  if printf '%s\n' "$$scanlist" | xargs grep -noHE "$$ip" 2>/dev/null | grep -vE "$$allow" | grep -v '^$$'; then \
+	    echo "LEAK: concrete public IPv4 in $$tier (tracked/untracked files)"; rc=1; fi; \
 	fi; \
-	if printf '%s' "$$d" | grep -noE "$$ip" | grep -vE "$$allow"; then \
-	  echo "LEAK: concrete public IPv4 in the diff - write <OVH_PUBLIC_IP>"; exit 1; \
-	fi; \
-	echo "leak-check: diff carries no credential shape and no public IPv4"
+	if [ "$$rc" -eq 0 ]; then \
+	  echo "leak-check: clean - scanned $$tier plus untracked non-ignored files"; fi; \
+	exit $$rc
 
 # ggshield exits 1 when it FINDS a secret, so the previous `command -v ... && ggshield ...
 # || echo skipping` swallowed the finding: a leak printed "ggshield not installed"

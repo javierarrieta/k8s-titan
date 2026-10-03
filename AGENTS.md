@@ -44,13 +44,15 @@ do not merge stage objects into one file.
     git add -A
     make check
 
-`make check` runs `leak-check` last, and `leak-check` reads the **index** — so stage
-first. On a tree with nothing staged and nothing modified it fails rather than reporting
-success, because an empty diff proves nothing. It greps for all three credential shapes
-spec §0 names (age key, PEM private key, OpenSSH key prefix) plus the concrete public
-IPv4 check spec §0 mandates. It is assembled so it can never match its own source. Note
-the key *shape*, not the bare word: this repo's own docs quote the pattern inside their
-leak checkers.
+`make check` runs `leak-check` first, and `leak-check` reads the **index** — so stage
+first. With nothing staged it falls back to the working tree, and with a clean tree to
+the whole tracked tree at HEAD, so it can never pass vacuously and never goes red just
+because there is nothing to commit. It greps for all three credential shapes spec §0
+names (age key, PEM private key, OpenSSH key prefix) plus the concrete public IPv4
+check spec §0 mandates, and it always scans untracked non-ignored files on top — a key
+dropped next to a manifest is what this gate is for. It is assembled so it can never
+match its own source. Note the key *shape*, not the bare word: this repo's own docs
+quote the pattern inside their leak checkers.
 
 `make scan` runs ggshield when it is installed and `GITGUARDIAN_API_KEY` is set, and
 says `SKIPPED` out loud when either is missing — it no longer reports a found secret as
