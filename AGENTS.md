@@ -8,13 +8,17 @@ made and what was deliberately left out.
 
     apply/00-bootstrap/     namespaces + the stage Kustomizations + Flux itself
     apply/10-secrets/       SOPS-encrypted Secrets (decrypted by kustomize-controller)
-    apply/20-infra/         cert-manager + OVH DNS-01 webhook
+    apply/20-infra/         cert-manager + OVH DNS-01 webhook + the read-only agent identity
     apply/40-certificates/  the titan.arrieta.eu wildcard
     apply/50-apps/          workloads (empty until the first one)
 
 Stage order: `flux-system` → `secrets` → `infra` → `certificates` → `apps`, wired by
 `dependsOn` in `apply/00-bootstrap/stage-*.yaml`. Add a stage as its own file there;
 do not merge stage objects into one file.
+
+For cluster investigation, use the `k8s-reader` ServiceAccount rather than an admin
+kubeconfig — read-only, and it cannot read Secrets. Minting, verification and
+rotation are in `docs/agent-read-access.md`.
 
 ## Rules
 

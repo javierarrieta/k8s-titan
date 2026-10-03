@@ -99,10 +99,21 @@ update-keys: secrets-present
 # it scans the whole tree rather than just apply/: a plaintext Secret under docs/ or
 # .github/ is exactly as public. Depends on secrets-present so it cannot pass vacuously
 # when run on its own.
+#
+# One exemption: a Secret that is a ServiceAccount token REQUEST -- typed
+# kubernetes.io/service-account-token and carrying no data/stringData. The
+# controller fills those in-cluster, so nothing secret is in git. The exemption is
+# narrow on purpose: add a data: or stringData: block to such a file, or use any
+# other Secret type outside apply/10-secrets, and the gate fails again.
 secrets-placement: secrets-present
 	@fail=0; \
-	stray=$$(grep -rlI --exclude-dir=.git --include='*.yaml' --include='*.yml' -E '^kind: *Secret$$' . 2>/dev/null | grep -v '^\./apply/10-secrets/' || true); \
-	if [ -n "$$stray" ]; then echo "FAIL: Secret manifest outside apply/10-secrets:"; echo "$$stray"; fail=1; fi; \
+	stray=""; \
+	for f in $$(grep -rlI --exclude-dir=.git --include='*.yaml' --include='*.yml' -E '^kind: *Secret$$' . 2>/dev/null | grep -v '^\./apply/10-secrets/' || true); do \
+	  if grep -q '^type: *kubernetes\.io/service-account-token$$' "$$f" \
+	     && ! grep -qE '^(data|stringData):' "$$f"; then continue; fi; \
+	  stray="$$stray $$f"; \
+	done; \
+	if [ -n "$$stray" ]; then echo "FAIL: Secret manifest outside apply/10-secrets:"; for s in $$stray; do echo "  $$s"; done; fail=1; fi; \
 	for f in $$($(SECRET_FIND)); do \
 	  if ! grep -q 'ENC\[' "$$f"; then echo "FAIL: $$f is not sops-encrypted (no ENC[)"; fail=1; fi; \
 	done; \

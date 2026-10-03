@@ -1,0 +1,111 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: k8s-reader-role
+rules:
+  # Read-only inventory for investigation work. Modelled on k8s-casa's k8s-reader
+  # role, widened for what titan actually runs.
+  #
+  # The resource list is ENUMERATED on purpose. `resources: ["*"]` would be shorter
+  # and would silently include Secrets, which makes this identity write-equivalent:
+  # registry credentials, the OVH DNS credential in cert-manager, and every
+  # token in the cluster. If a new API group is added to the cluster and this role
+  # cannot see it, that is the failure mode you want -- add the line deliberately.
+  #
+  # Deliberately absent, and do not add them without thinking:
+  #   secrets                        read == write capability, see above
+  #   nodes/proxy                    reaches the kubelet API, which exposes running
+  #                                  pod data and is a real escalation path that
+  #                                  "read-only" roles often miss
+  #   pods/exec, /attach, /portforward, /proxy   not read operations at all
+  #   serviceaccounts/token          mints a credential for another identity
+  #   anything with create/update/patch/delete   verbs are get/list/watch only
+  - apiGroups: [""]
+    resources:
+      - pods
+      - pods/log
+      - pods/status
+      - services
+      - configmaps
+      - endpoints
+      - persistentvolumes
+      - persistentvolumeclaims
+      - nodes
+      - nodes/metrics
+      - namespaces
+      - events
+      - resourcequotas
+      - limitranges
+      - serviceaccounts
+      - replicationcontrollers
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "daemonsets", "statefulsets", "replicasets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["batch"]
+    resources: ["jobs", "cronjobs"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses", "ingressclasses", "networkpolicies"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["discovery.k8s.io"]
+    resources: ["endpointslices"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["autoscaling"]
+    resources: ["horizontalpodautoscalers"]
+    verbs: ["get", "list", "watch"]
+  # RBAC and admission objects. Reading these is how you answer "why is that apply
+  # being rejected" or "who is allowed to read that secret" without guessing.
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["clusterroles", "clusterrolebindings", "roles", "rolebindings"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["admissionregistration.k8s.io"]
+    resources: ["mutatingwebhookconfigurations", "validatingwebhookconfigurations"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["storageclasses", "volumeattachments"]
+    verbs: ["get", "list", "watch"]
+  # The aggregated-API and lease objects. titan's cert-manager OVH webhook is an
+  # APIService, so `apiservices` is the object that tells you whether the webhook
+  # is actually reachable, and `leases` is how you tell whether a control-plane
+  # component is alive or wedged.
+  - apiGroups: ["apiregistration.k8s.io"]
+    resources: ["apiservices"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apiextensions.k8s.io"]
+    resources: ["customresourcedefinitions"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["metrics.k8s.io"]
+    resources: ["nodes", "pods"]
+    verbs: ["get", "list"]
+  # cert-manager
+  - apiGroups: ["cert-manager.io"]
+    resources: ["certificates", "certificaterequests", "issuers", "clusterissuers"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["acme.cert-manager.io"]
+    resources: ["orders", "challenges"]
+    verbs: ["get", "list", "watch"]
+  # Flux. Orders and challenges land in the Certificate's own namespace, not
+  # cert-manager's, so an investigator needs them wherever the Certificate is.
+  - apiGroups: ["source.toolkit.fluxcd.io"]
+    resources: ["gitrepositories", "ocirepositories", "helmrepositories", "buckets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["helm.toolkit.fluxcd.io"]
+    resources: ["helmreleases", "helmcharts"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["kustomize.toolkit.fluxcd.io"]
+    resources: ["kustomizations"]
+    verbs: ["get", "list", "watch"]
+  # k3s owns its bundled add-ons (Traefik, ServiceLB) through its own HelmChart
+  # CRDs. Without these an agent can see the Traefik pod but not the chart that
+  # declares it, which is the half that explains why a hand-patched add-on gets
+  # reverted on the next restart.
+  - apiGroups: ["helm.cattle.io"]
+    resources: ["helmcharts", "helmconfigs"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["k3s.cattle.io"]
+    resources: ["etcdsnapshotfiles"]
+    verbs: ["get", "list", "watch"]
