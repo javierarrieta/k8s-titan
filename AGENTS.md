@@ -50,13 +50,18 @@ nothing staged it falls back to the working tree, and independently of both it r
 the whole tracked tree at HEAD plus untracked non-ignored files on every run, so it can
 never pass vacuously and never goes red just because there is nothing to commit. It
 greps for the credential shapes spec §0 names (age key, PEM private key, OpenSSH key
-prefix) plus the concrete public IPv4 check spec §0 mandates, and it always scans untracked non-ignored files on top — a key
-dropped next to a manifest is what this gate is for. It is assembled so it can never
-match its own source. Note the key *shape*, not the bare word: this repo's own docs
-quote the pattern inside their leak checkers.
+prefix) plus the concrete public IPv4 check spec §0 mandates, and it always scans
+untracked non-ignored files on top — a key dropped next to a manifest is what this gate
+is for. It is assembled so it can never match its own source. Note the key *shape*, not
+the bare word: this repo's own docs quote the pattern inside their leak checkers.
 
 `make scan` runs ggshield when it is installed and `GITGUARDIAN_API_KEY` is set, and
 says `SKIPPED` out loud when either is missing — it no longer reports a found secret as
 a skip. CI runs GitGuardian on every push and warns, rather than failing, when
-`GITGUARDIAN_API_KEY` is absent from the repo, so the local gates are the ones that
-always run.
+`GITGUARDIAN_API_KEY` is absent from the repo.
+
+What runs automatically is `make check-ci` — leak-check, kustomize-check and
+secrets-placement, the gates provable from the tree alone, and the only control here that
+`--no-verify` cannot skip. It deliberately excludes `validate`, which needs the age
+private key; that key must never be placed in CI. So `make check` locally is still the
+full gate, and still yours to run.

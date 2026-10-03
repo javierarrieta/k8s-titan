@@ -90,12 +90,17 @@ back: edit a live object and the next reconcile reverts it. So fix things in git
 if you hand-apply something to debug, delete it yourself — Flux will not do it for you.
 
     make check            # leak scan + stage builds + stage paths + secrets decrypt + placement
+    make check-ci         # the keyless subset CI runs: leak scan + stage builds + placement
     make leak-check       # credential/public-IPv4 shapes: the pending diff AND the whole tree
     make update-keys      # after rotating the age key group
     make secrets-list
 
 `make check` fails until the OVH credential in step 2 of *Before the first bootstrap*
 exists. That is deliberate — a gate that passes on zero secrets is not a gate.
+
+CI runs `make check-ci` on every push and PR: the gates provable from the tree alone.
+It deliberately excludes `validate`, because that needs the age private key and that key
+must never be placed in CI. This is the one control here that `--no-verify` cannot skip.
 `make leak-check` scans the staged diff (or the working tree) *and*, on every run
 regardless, the whole tracked tree plus untracked non-ignored files — so it is never
 vacuous and never red on a clean checkout. Stage first anyway: the diff pass is the one

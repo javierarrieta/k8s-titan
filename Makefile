@@ -4,13 +4,35 @@ KUSTOMIZE_DIRS := $(shell find apply -mindepth 1 -maxdepth 2 -name kustomization
 # not be able to slip between the encryption rule and the validation glob.
 SECRET_FIND := find apply/10-secrets \( -name '*.yaml' -o -name '*.yml' \) ! -name kustomization.yaml
 
-.PHONY: check kustomize-check validate validate-serial update-keys update-keys-serial scan leak-check secrets-placement secrets-present secrets-list
+.PHONY: check check-ci kustomize-check validate validate-serial update-keys update-keys-serial scan leak-check secrets-placement secrets-present secrets-list
 
 # leak-check runs FIRST: make has no -k, so it stops at the first failing prerequisite.
 # validate needs the age key, so an operator who forgot SOPS_AGE_KEY_FILE would never
 # reach a leak gate placed behind it.
 check: leak-check kustomize-check validate secrets-placement
 	@echo "check: all offline gates passed"
+
+# The subset provable from the tree alone - no age key, no cluster, no network.
+# `validate` is deliberately absent: it needs the sops age private key, and that key must
+# never sit in CI for any reason. Leaving it out is the whole point of this target - a
+# gate that needs a secret to run is a gate that gets skipped.
+#
+# Each gate runs even when an earlier one fails, so one red gate cannot hide the others.
+# `check` cannot do this (make has no -k), which is exactly how a leak gate ended up
+# masked behind a decrypt failure once already.
+#
+# On a CI checkout nothing is staged and the tree is clean, so leak-check's diff pass
+# finds nothing - but its tree pass re-scans the whole tracked tree regardless, which is
+# what makes this worth running in CI at all.
+check-ci:
+	@rc=0; \
+	for t in leak-check kustomize-check secrets-placement; do \
+	  echo "--- $$t ---"; \
+	  $(MAKE) --no-print-directory $$t || rc=1; \
+	done; \
+	if [ $$rc -eq 0 ]; then echo "check-ci: all keyless gates passed"; \
+	else echo "check-ci: one or more keyless gates FAILED"; fi; \
+	exit $$rc
 
 # Offline gate: every stage directory must build with kubectl kustomize, every stage
 # path declared by the bootstrap must exist, and the two invariants that only show up
