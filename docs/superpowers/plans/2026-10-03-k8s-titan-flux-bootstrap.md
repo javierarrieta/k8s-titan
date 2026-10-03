@@ -172,8 +172,10 @@ kustomize-check:
 	done
 	@echo "kustomize-check: all stage directories build"
 
-# Everything that can be proven without a cluster.
-check: kustomize-check validate scan
+# Everything that can be proven without a cluster. leak-check is FIRST: make has no
+# -k, so it stops at the first failure, and validate needs the age key - a leak gate
+# placed behind validate would never run for anyone who forgot SOPS_AGE_KEY_FILE.
+check: leak-check kustomize-check validate secrets-placement
 	@echo "check: all offline gates passed"
 ```
 
@@ -487,14 +489,18 @@ pinned v2.9.6 CLI, not a flag flux install does not have."
 > edit every zone the account owns. titan holds its **own** OVH application, issued and
 > encrypted per `docs/ovh-dns-credential.md`, and spec §5.3 records the decision. What
 > shipped: `apply/10-secrets/kustomization.yaml` plus a titan-scoped encrypted
-> `ovh-domain-secrets.yaml`. The verification steps below remain valid and were run.
+> `ovh-domain-secrets.yaml`. The supersession also covers the **Interfaces** line below,
+> which names the techdelivery file as the plaintext source, and **Step 6**'s commit
+> message, which claims "Same OVH application that already writes arrieta.eu for
+> k8s-techdelivery" — both describe the rejected shared credential and are wrong. The
+> verification steps below remain valid and were run.
 
 **Files:**
 - Create: `apply/10-secrets/kustomization.yaml`
 - Create: `apply/10-secrets/ovh-domain-secrets.yaml` (sops-encrypted)
 
 **Interfaces:**
-- Consumes: the `titan-k8s` key from Task 1 via `.sops.yaml`; `k8s-techdelivery/apply/10-secrets/ovh-domain-secrets.yaml` as the plaintext source, decrypted with the Coder workspace key present at `~/.config/sops/age/keys.txt`.
+- Consumes: the `titan-k8s` key from Task 1 via `.sops.yaml`; the OVH application key, secret and consumer key issued for titan alone, per `docs/ovh-dns-credential.md`. There is no plaintext source file to decrypt — the operator pastes the values straight into the staging file that document names.
 - Produces: `Secret ovh-domain-secrets` in namespace `cert-manager` with keys `OVH_APPLICATION_KEY`, `OVH_APPLICATION_SECRET`, `OVH_CONSUMER_KEY` — consumed by Task 5's ClusterIssuers.
 
 - [ ] **Step 1: Verify the target does not exist yet**
@@ -552,10 +558,9 @@ Expected: `apiVersion`, `kind: Secret`, `name: ovh-domain-secrets` visible in pl
 ```bash
 git diff --cached | grep -nE 'AGE-SECRET-KEY-|BEGIN [A-Z ]*PRIVATE KEY' && echo "LEAK" || git commit -m "secrets: add OVH DNS credentials encrypted to the titan-k8s key
 
-Same OVH application that already writes arrieta.eu for k8s-techdelivery,
-re-encrypted so titan's cluster key is the only cluster key that can read
-it. Decrypt and encrypt run as one chain so no plaintext crosses an
-interactive step."
+titan's own OVH application, scoped to DNS writes for arrieta.eu and encrypted so
+titan's cluster key is the only cluster key that can read it. Decrypt and encrypt run
+as one chain so no plaintext crosses an interactive step."
 ```
 
 ---
@@ -852,7 +857,9 @@ make kustomize-check
 kubectl kustomize apply/50-apps | wc -l
 ```
 
-Expected: six directories build; `0` lines of output (an empty build is valid, not an error).
+Expected: five directories build (`apply/00-bootstrap`, `10-secrets`, `20-infra`,
+`40-certificates`, `50-apps` — there is no `30-*`); `0` lines of output from the empty
+`50-apps` build, which is valid, not an error.
 
 - [ ] **Step 4: Commit**
 
@@ -867,6 +874,19 @@ first workload exists."
 ---
 
 ### Task 8: README runbook, AGENTS.md, and the full offline gate
+
+> **SUPERSEDED in its embedded copies — do not execute them verbatim.** The README and
+> AGENTS.md text below is what Task 8 first shipped, and review found four factual
+> errors in it, all since corrected in the shipped files: `le-prod-titan not found` is
+> not a message kustomize-controller emits (the real one is `dependency
+> 'flux-system/infra' is not Ready`); `prune: true` does **not** delete hand-applied
+> objects — it reverts objects Git owns and leaves a debugging object alive and
+> unmanaged; `make scan` and CI do not check plaintext Secret placement
+> (`make secrets-placement` does); and `make check` runs after `git add -A` because
+> `leak-check` reads the index. The shipped files additionally document
+> `SOPS_AGE_KEY_FILE`, which this task never mentioned. Corrections are applied inline
+> below so re-executing this task cannot reintroduce them; where this task and the
+> shipped file still differ, the shipped file is authoritative.
 
 **Files:**
 - Create: `README.md`
@@ -921,17 +941,20 @@ Reading a failure:
 - `secrets` red with a decryption error → the `sops-age` secret is missing or holds
   a different key. Delete and recreate it, then
   `kubectl -n flux-system annotate kustomization secrets -s reconcile.fluxcd.io/requestedAt=`.
-- `certificates` red with `le-prod-titan not found` → `infra` has not gone Ready yet;
-  that is `dependsOn` working, not a fault.
+- `certificates` red with `dependency 'flux-system/infra' is not Ready` → `infra` has
+  not gone Ready yet; that is `dependsOn` working, not a fault. (An `issuer not found`
+  style message cannot reach you here — `dependsOn` blocks the stage first.)
 - `Certificate` stuck `NotReady` with an ACME challenge error → the OVH credentials
   lack write access to `arrieta.eu`, or DNS has not propagated. Check the challenge
   Order's events before assuming DNS.
 
 ## Day-to-day
 
-Everything is a `git push`. **`prune: true` is on for every stage**: anything you
-`kubectl apply` into a stage-managed path is deleted within ten minutes. Fix it in
-git.
+Everything is a `git push`. **`prune: true` is on for every stage**, which means
+objects Git owns get reverted on the next reconcile — fix it in git. It does **not**
+mean a `kubectl apply` of something Git never owned gets deleted: Flux garbage-collects
+only objects recorded in the Kustomization's own inventory, so a hand-created object
+survives indefinitely and invisible to Git. Delete your debugging objects yourself.
 
     make check            # kustomize build every stage + decrypt every secret + secret scan
     make update-keys      # after rotating the age key group
@@ -973,8 +996,13 @@ do not merge stage objects into one file.
   validation is the only kind this repo can run.
 - Never set a top-level `namespace:` in a `kustomization.yaml`. These trees span
   several namespaces and that field rewrites them all.
-- Secrets go in `apply/10-secrets/` only, encrypted with `sops edit`. Never write a
-  plaintext Secret manifest anywhere else; `make scan` and CI both check.
+- Secrets go in `apply/10-secrets/` only, encrypted with sops — see
+  `docs/ovh-dns-credential.md` for the staging flow (`sops --encrypt --in-place` on a
+  git-ignored name under `apply/10-secrets/`), which exists because sops picks its
+  recipients from the file's own path. Never write a plaintext Secret manifest anywhere
+  else. `make secrets-placement` enforces both halves: no `kind: Secret` outside
+  `apply/10-secrets/`, and every file there actually carrying `ENC[`, and `make
+  validate` fails on a plaintext file because sops cannot decrypt one.
 - The cluster key is `titan-k8s`, not the titan host key. Do not "simplify" the two
   into one: the separation is what caps a pod compromise at titan's own secrets.
 - This repo is public. No credentials, and no concrete public IPv4 — write
@@ -984,26 +1012,39 @@ do not merge stage objects into one file.
 
 ## Before committing
 
+    git add -A
     make check
-    git diff --cached | grep -nE 'AGE-SECRET-KEY-|BEGIN [A-Z ]*PRIVATE KEY|ssh-ed25519 AAAA'
 
-Both must be clean. CI runs GitGuardian on every push and warns, rather than failing,
-when `GITGUARDIAN_API_KEY` is absent from the repo.
+`make check` runs `leak-check` first, and `leak-check` reads the **index** — so stage
+first. On a tree with nothing staged and nothing modified it falls back to the tracked
+tree at HEAD rather than reporting success vacuously. It greps for all three credential
+shapes spec §0 names plus the concrete public IPv4 check spec §0 mandates; note the key
+*shape*, not the bare word, because this repo's own docs quote the pattern inside their
+leak checkers. CI runs GitGuardian on every push and warns, rather than failing, when
+`GITGUARDIAN_API_KEY` is absent from the repo.
 ```
 
 - [ ] **Step 3: Run the full offline gate**
 
 ```bash
+git add README.md AGENTS.md
 make check
 ```
 
-Expected: every stage directory builds, `OK: apply/10-secrets/ovh-domain-secrets.yaml`, `No secrets have been found`, then `check: all offline gates passed`.
+Expected: `leak-check: clean - scanned staged diff plus untracked non-ignored files`,
+every stage directory building OK, `OK: apply/10-secrets/ovh-domain-secrets.yaml`,
+`secrets-placement: no Secret outside apply/10-secrets, every secret encrypted`, then
+`check: all offline gates passed`. GitGuardian runs in CI, not in `make check`; `make
+scan` runs it locally and says `SKIPPED` out loud when ggshield or the API key is
+missing.
 
-- [ ] **Step 4: Run the spec §0 leak checks**
+- [ ] **Step 4: The spec §0 leak checks**
+
+`make check` now runs them (all three credential shapes and the public-IPv4 check, with
+the RFC1918 allowlist). Run the raw spec §0 form only if you want to see it independently:
 
 ```bash
-git add README.md AGENTS.md
-git diff --cached | grep -nE 'AGE-SECRET-KEY-|BEGIN [A-Z ]*PRIVATE KEY|ssh-ed25519 AAAA' | grep -v 'grep -nE' && echo "CREDENTIAL LEAK"
+git diff --cached | grep -nE 'AGE-SECRET-KEY-|BEGIN [A-Z ]*PRIVATE KEY' | grep -v 'grep -nE' && echo "CREDENTIAL LEAK"
 git diff --cached | grep -noE '\b([0-9]{1,3}\.){3}[0-9]{1,3}\b' | grep -vE '(^|[^0-9])(10\.|127\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.|0\.0\.0\.0|1\.1\.1\.1|8\.8\.[48]\.4|213\.186\.33\.99|224\.)' && echo "PUBLIC IPv4 IN DIFF"
 ```
 
