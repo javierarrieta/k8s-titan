@@ -118,6 +118,17 @@ Expected: the commit runs (the `grep` finds nothing, so the `||` branch fires).
 
 ### Task 2: Bootstrap stage — namespaces, four stage Kustomizations, and the offline gate
 
+> **SUPERSEDED — do not execute as written.** The `Makefile` snippets below are the first
+> draft of the offline gate, and review rewrote them three times since. `kustomize-check`
+> now additionally asserts that every declared stage path carries its own
+> `kustomization.yaml`, that exactly one `GitRepository` document exists and carries no
+> `secretRef`, and that exactly one ACME `groupName` is in use; `check` gained
+> `leak-check` and `secrets-placement` and runs `leak-check` first; `validate-serial` and
+> `update-keys-serial` were deleted as redundant; and `check-ci` — the keyless subset CI
+> runs — did not exist yet. Re-appending these snippets would append a second
+> `kustomize-check` recipe, and make takes the last one, silently reverting all of it.
+> The shipped `Makefile` is the authority.
+
 **Files:**
 - Create: `apply/00-bootstrap/kustomization.yaml`
 - Create: `apply/00-bootstrap/namespaces.yaml`

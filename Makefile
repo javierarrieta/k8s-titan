@@ -4,7 +4,7 @@ KUSTOMIZE_DIRS := $(shell find apply -mindepth 1 -maxdepth 2 -name kustomization
 # not be able to slip between the encryption rule and the validation glob.
 SECRET_FIND := find apply/10-secrets \( -name '*.yaml' -o -name '*.yml' \) ! -name kustomization.yaml
 
-.PHONY: check check-ci kustomize-check validate validate-serial update-keys update-keys-serial scan leak-check secrets-placement secrets-present secrets-list
+.PHONY: check check-ci kustomize-check validate update-keys scan leak-check secrets-placement secrets-present secrets-list
 
 # leak-check runs FIRST: make has no -k, so it stops at the first failing prerequisite.
 # validate needs the age key, so an operator who forgot SOPS_AGE_KEY_FILE would never
@@ -53,10 +53,14 @@ kustomize-check:
 	  else echo OK; fi; \
 	done; \
 	printf 'gitrepository auth: '; \
-	if [ ! -f apply/00-bootstrap/flux-system/gotk-sync.yaml ]; then \
-	  echo "FAIL (gotk-sync.yaml is missing - grep would report zero secretRefs and pass)"; fail=1; \
-	else n=$$(grep -A14 '^kind: GitRepository' apply/00-bootstrap/flux-system/gotk-sync.yaml | grep -c 'secretRef'); \
-	  if [ "$$n" -eq 0 ]; then echo "none (anonymous public clone)"; else echo "FAIL ($$n secretRef found)"; fail=1; fi; fi; \
+	grdocs=$$(find apply \( -name '*.yaml' -o -name '*.yml' \) -print0 2>/dev/null \
+	  | xargs -0 -r awk '/^---[ \t]*$$/{if(isgr)printf "DOC\n%s",buf;isgr=0;buf="";next} /^kind:[ \t]*GitRepository[ \t]*$$/{isgr=1} {buf=buf $$0 "\n"} END{if(isgr)printf "DOC\n%s",buf}'); \
+	grcount=$$(printf '%s\n' "$$grdocs" | grep -c '^DOC$$'); \
+	if [ "$$grcount" -ne 1 ]; then \
+	  echo "FAIL (expected exactly 1 GitRepository document, found $$grcount - the assertion cannot be trusted)"; fail=1; \
+	elif printf '%s\n' "$$grdocs" | grep -q 'secretRef'; then \
+	  echo "FAIL (secretRef on the GitRepository - the anonymous-clone contract is gone)"; fail=1; \
+	else echo "none (anonymous public clone)"; fi; \
 	printf 'acme groupName: '; \
 	g=$$(grep -rhoE 'groupName:[[:space:]]*[^[:space:]]+' apply/ | sort -u | tr '\n' ' '); \
 	if [ "$$g" = "groupName: acme.titan.arrieta.eu " ]; then echo "acme.titan.arrieta.eu"; \
@@ -82,20 +86,9 @@ validate: secrets-present
 	@$(SECRET_FIND) -print0 | xargs -0 -P 4 -I{} sh -c \
 	  'if sops --decrypt "{}" >/dev/null 2>&1; then echo "OK: {}"; else echo "FAILED: {}"; exit 1; fi'
 
-validate-serial: secrets-present
-	@echo "Validating all secrets can be decrypted (serial):"
-	@fail=0; for f in $$($(SECRET_FIND)); do \
-	  if sops --decrypt "$$f" >/dev/null 2>&1; then echo "OK: $$f"; else echo "FAILED: $$f"; fail=1; fi; \
-	done; exit $$fail
-
 update-keys: secrets-present
 	@$(SECRET_FIND) -print0 | xargs -0 -P 4 -I{} sh -c \
 	  'sops updatekeys -y "{}" >/dev/null && echo "Updated: {}" || { echo "FAILED: {}"; exit 1; }'
-
-update-keys-serial: secrets-present
-	@fail=0; for f in $$($(SECRET_FIND)); do \
-	  if sops updatekeys -y "$$f" >/dev/null; then echo "Updated: $$f"; else echo "FAILED: $$f"; fail=1; fi; \
-	done; exit $$fail
 
 # AGENTS.md promises that a plaintext Secret outside apply/10-secrets/ is caught.
 # Nothing else does: ggshield detects credential *shapes*, not a misplaced `kind: Secret`,

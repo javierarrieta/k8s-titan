@@ -163,11 +163,11 @@ k8s-titan/
 │                                       #   apply/10-secrets/.staging.*.yaml (§5.3)
 ├── .sops.yaml                          # §5
 ├── .github/workflows/gitguardian-scan.yml  # §0.1
+├── .github/workflows/offline-gate.yml  # runs `make check-ci` on every push and PR
 ├── AGENTS.md                           # agent-facing repo conventions
-├── Makefile                            # check / leak-check / kustomize-check / validate
-│                                       #   (+ -serial) / update-keys (+ -serial) /
-│                                       #   secrets-present / secrets-placement / scan /
-│                                       #   secrets-list
+├── Makefile                            # check / check-ci / leak-check / kustomize-check /
+│                                       #   validate / update-keys / secrets-present /
+│                                       #   secrets-placement / scan / secrets-list
 ├── README.md                           # the three-command runbook + follow-ups
 ├── docs/ovh-dns-credential.md          # issuing + rotating titan's OVH API application
 ├── docs/superpowers/specs/             # this file
