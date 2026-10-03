@@ -41,17 +41,29 @@ authenticate.
 Run this yourself. The values should not pass through a chat, a shell history entry, or a
 commit message.
 
-Write the plaintext **outside** the repository and encrypt it in one direction. If the
-plaintext ever sits at its final path, then `git add -A && git commit` between two steps
-publishes the triple to a public repo — which is a plausible thing for an agent working
-from `AGENTS.md` to do.
+### The way that works
+
+sops picks its recipients by matching the **file's own path** against `path_regex` in
+`.sops.yaml`. That has a consequence worth knowing before you try to be clever: you
+cannot write the plaintext somewhere else and encrypt it into place.
+
+```bash
+$ sops --encrypt /tmp/ovh-plain.XXXXXX > apply/10-secrets/ovh-domain-secrets.yaml
+error loading config: no matching creation rules found
+```
+
+`/tmp/...` matches no creation rule, so sops refuses — which is the good outcome. The
+bad outcome would be a rule that matched and named the wrong key group.
+
+So the plaintext has to live at a path under `apply/10-secrets/`. Give it a name git
+ignores, encrypt it there, and move it:
 
 ```bash
 cd ~/k8s-titan
-mkdir -p apply/10-secrets
 umask 077
-tmp=$(mktemp /tmp/ovh-plain.XXXXXX)
-cat > "$tmp" <<'EOF'
+mkdir -p apply/10-secrets
+stage=apply/10-secrets/.staging.ovh.yaml     # git-ignored, matches path_regex
+cat > "$stage" <<'EOF'
 apiVersion: v1
 kind: Secret
 metadata:
@@ -63,9 +75,13 @@ stringData:
   OVH_APPLICATION_SECRET: <paste>
   OVH_CONSUMER_KEY: <paste>
 EOF
-sops --encrypt "$tmp" > apply/10-secrets/ovh-domain-secrets.yaml
-shred -u "$tmp" 2>/dev/null || rm -f "$tmp"
+sops --encrypt --in-place "$stage" && mv "$stage" apply/10-secrets/ovh-domain-secrets.yaml
 ```
+
+One `&&` chain, so the plaintext sits in the tree for milliseconds and under a name
+`git add -A` cannot stage. Encrypting in place at the final path also works — it is
+what was done for the first issuance — it just leaves a wider window in which a
+well-timed `git add -A` publishes the triple to a public repo.
 
 `stringData` rather than base64 `data` because `encrypted_regex` in `.sops.yaml` only
 encrypts `data`/`stringData` — the plaintext never leaves the file, and the encrypted
@@ -76,6 +92,14 @@ Then prove it:
 ```bash
 make validate      # OK: apply/10-secrets/ovh-domain-secrets.yaml
 make leak-check    # staged diff must carry no credential shape
+```
+
+And check the recipients, because a secret encrypted to the wrong key group decrypts
+fine on your laptop and fails in the cluster:
+
+```bash
+grep -oE 'age1[a-z0-9]{12}' apply/10-secrets/ovh-domain-secrets.yaml | sort -u
+grep -oE 'age1[a-z0-9]{12}' .sops.yaml | sort -u    # must print the same four
 ```
 
 ## 3. Confirm it works in the cluster

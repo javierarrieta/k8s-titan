@@ -8,6 +8,11 @@
 # real way to commit plaintext secrets.
 **/.decrypted*.yaml
 
+# Plaintext staging for `sops --encrypt --in-place`: sops selects recipients by the
+# file's own path, so the plaintext must sit under apply/10-secrets/ briefly. The name
+# is ignored so `git add -A` cannot stage it. See docs/ovh-dns-credential.md.
+apply/10-secrets/.staging.*.yaml
+
 # Age private keys live outside this repo: ~/.config/sops/age/ and the password
 # manager. Belt-and-braces in case one is ever dropped next to a manifest.
 *.agekey
