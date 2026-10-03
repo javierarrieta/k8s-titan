@@ -31,7 +31,7 @@ These are the failure modes the spec implies that no manifest build catches, bec
 2. **`groupName` reused from another cluster.** The webhook chart creates a cluster-scoped `APIService v1alpha1.<groupName>`; a duplicate is a hard install failure, not a warning. Expected: the value is asserted, not eyeballed. → Task 5.
 3. **OVH credentials without write access to `arrieta.eu`.** The `Certificate` sits `NotReady` with an ACME challenge error that looks like a DNS propagation problem. Expected: the README's verification section distinguishes "challenge not presented" from "issuer not found". → Task 8.
 4. **The repo is later made private.** The anonymous `GitRepository` starts failing to clone and the whole cluster silently stops reconciling. Expected: the sync object is asserted to carry no `secretRef`, and the README states what changes if privacy is ever needed. → Tasks 3 and 8.
-5. **`prune: true` garbage-collects a hand-created object.** Anyone who `kubectl apply`s a fix into a stage-managed path has it deleted within 10 minutes. Expected: the README says so plainly, next to the intervals. → Task 8.
+5. **`prune: true` garbage-collects a hand-created object.** ~~Anyone who `kubectl apply`s a fix into a stage-managed path has it deleted within 10 minutes.~~ **This item was wrong as written, and Task 8 shipped the correction rather than the claim.** Flux garbage-collects only objects recorded in the Kustomization's own inventory; a hand-applied object was never in it and is never pruned — it survives indefinitely and invisible to Git. What prune guarantees is the reverse: objects Git owns get reverted on the next reconcile. The README now states the true behaviour, and notes that a debugging object is yours to delete.
 
 ---
 
@@ -478,6 +478,16 @@ pinned v2.9.6 CLI, not a flag flux install does not have."
 ---
 
 ### Task 4: OVH DNS credentials, re-encrypted for titan
+
+> **SUPERSEDED — do not execute as written.** Steps 3–5 assume the plaintext source is
+> `k8s-techdelivery/apply/10-secrets/ovh-domain-secrets.yaml`. That file cannot be
+> decrypted (sops MAC mismatch on that one file; every sibling decrypts cleanly), and
+> reusing techdelivery's credential was rejected on blast-radius grounds anyway: a
+> zone-wide DNS-write key inside a public-internet cluster lets one compromised pod
+> edit every zone the account owns. titan holds its **own** OVH application, issued and
+> encrypted per `docs/ovh-dns-credential.md`, and spec §5.3 records the decision. What
+> shipped: `apply/10-secrets/kustomization.yaml` plus a titan-scoped encrypted
+> `ovh-domain-secrets.yaml`. The verification steps below remain valid and were run.
 
 **Files:**
 - Create: `apply/10-secrets/kustomization.yaml`
