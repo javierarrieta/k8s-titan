@@ -45,11 +45,12 @@ do not merge stage objects into one file.
     make check
 
 `make check` runs `leak-check` first, and `leak-check` reads the **index** — so stage
-first. With nothing staged it falls back to the working tree, and with a clean tree to
-the whole tracked tree at HEAD, so it can never pass vacuously and never goes red just
-because there is nothing to commit. It greps for all three credential shapes spec §0
-names (age key, PEM private key, OpenSSH key prefix) plus the concrete public IPv4
-check spec §0 mandates, and it always scans untracked non-ignored files on top — a key
+first, because the diff pass is what names the change you are about to publish. With
+nothing staged it falls back to the working tree, and independently of both it re-scans
+the whole tracked tree at HEAD plus untracked non-ignored files on every run, so it can
+never pass vacuously and never goes red just because there is nothing to commit. It
+greps for the credential shapes spec §0 names (age key, PEM private key, OpenSSH key
+prefix) plus the concrete public IPv4 check spec §0 mandates, and it always scans untracked non-ignored files on top — a key
 dropped next to a manifest is what this gate is for. It is assembled so it can never
 match its own source. Note the key *shape*, not the bare word: this repo's own docs
 quote the pattern inside their leak checkers.

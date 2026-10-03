@@ -39,11 +39,12 @@ check that gets skipped under pressure, so the real gate is
 on every `push` and `pull_request`, with `fetch-depth: 0` so whole-push diffs are
 covered, plus `make scan` for the same engine locally before committing.
 
-The greps above are themselves implemented as `make leak-check`, wired into `make check`
-and reading the staged index, so they run without being remembered. It fails loudly when
-there is nothing staged rather than reporting success — a leak scan over an empty diff is
-the vacuous-pass pattern this spec exists to prevent, and §0.1's own argument applies to
-the fallback too.
+The greps above are themselves implemented as `make leak-check`, wired into `make check`,
+so they run without being remembered. It runs two independent passes: the pending diff
+(the index if something is staged, else the working tree), and — every run, regardless of
+the first — the tracked tree at HEAD plus untracked non-ignored files. The second pass is
+what makes it non-vacuous: a leak scan over an empty diff is the vacuous-pass pattern this
+spec exists to prevent, and a tree scan is never empty.
 
 Two facts shape that workflow:
 

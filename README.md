@@ -89,15 +89,17 @@ from what the repo says. What prune does guarantee is that anything Git owns get
 back: edit a live object and the next reconcile reverts it. So fix things in git, and
 if you hand-apply something to debug, delete it yourself — Flux will not do it for you.
 
-    make check            # stage builds + stage paths + secrets decrypt + placement + diff leak scan
-    make leak-check       # credential/public-IPv4 shapes in the staged diff (stage first)
+    make check            # leak scan + stage builds + stage paths + secrets decrypt + placement
+    make leak-check       # credential/public-IPv4 shapes: the pending diff AND the whole tree
     make update-keys      # after rotating the age key group
     make secrets-list
 
 `make check` fails until the OVH credential in step 2 of *Before the first bootstrap*
 exists. That is deliberate — a gate that passes on zero secrets is not a gate.
-`make leak-check` inspects the staged diff, so stage first; on a pristine tree it fails
-rather than reporting success, because an empty diff proves nothing.
+`make leak-check` scans the staged diff (or the working tree) *and*, on every run
+regardless, the whole tracked tree plus untracked non-ignored files — so it is never
+vacuous and never red on a clean checkout. Stage first anyway: the diff pass is the one
+that points at the change you are about to publish.
 
 ## Not here (yet)
 

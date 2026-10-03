@@ -94,25 +94,44 @@ secrets-placement: secrets-present
 	if [ "$$fail" -eq 0 ]; then echo "secrets-placement: no Secret outside apply/10-secrets, every secret encrypted"; fi; \
 	exit $$fail
 
-# Spec §0's three credential shapes AND its concrete-public-IPv4 check.
+# Spec §0's credential shapes AND its concrete-public-IPv4 check, plus the shape of the
+# credential this repo actually holds (an OVH application triple, which is opaque and
+# matches none of the age/PEM/OpenSSH patterns).
 #
-# Three-tier source, never vacuous and never red on a legitimate state:
-#   1. the index, when something is staged - what is about to be committed
-#   2. the working tree, when it differs from HEAD
-#   3. the tracked tree at HEAD - strictly stronger than a diff, it re-proves the
-#      published state on every run
-# Untracked non-ignored files are scanned ON TOP of whichever tier is selected: a key
-# dropped next to a manifest is exactly what this gate exists to catch, and a
-# diff-only gate walked straight past one - an untracked AGE-SECRET-KEY file plus any
-# unrelated edit used to exit 0. --exclude-standard keeps the documented
-# apply/10-secrets/.staging.*.yaml flow from tripping it.
+# Two independent passes, so neither can mask the other:
+#   A. a DIFF pass - the index if something is staged, else the working tree vs HEAD.
+#      Added lines only: deleting a credential is the fix, not the leak, and this repo's
+#      own plan history had to delete a line quoting the checker's pattern.
+#   B. a TREE pass - the tracked tree at HEAD plus every untracked non-ignored file,
+#      ALWAYS, regardless of pass A.
+# Pass B is what makes the gate re-prove the published state on every run. Making it
+# conditional on a clean tree was a defect: the documented flow is `git add -A` then
+# `make check`, so a tree-only pass would never have run, and a credential already in
+# HEAD stayed invisible while any edit was pending.
 #
-# Tier 3 excludes docs/superpowers/ and nothing else: the spec and plan quote the
-# checker's own patterns in prose (the OpenSSH key prefix among them), so scanning them
-# fails forever.
-# The cost is real - a credential pasted into a spec or plan survives tier 3 - and is
-# accepted because tiers 1 and 2 exclude nothing, so the commit that introduces it is
-# still caught. The tier scanned is printed so the result is never ambiguous.
+# Untracked files are scanned because a key dropped next to a manifest is exactly what
+# this gate exists to catch, and a diff-only gate walked straight past one.
+# --exclude-standard keeps the documented apply/10-secrets/.staging.*.yaml flow from
+# tripping it.
+#
+# The tree pass excludes docs/superpowers/ and nothing else: the spec and plan quote the
+# checker's own patterns in prose (the OpenSSH prefix among them), so scanning them is
+# red forever. The cost is real - a credential pasted into a spec survives pass B - and
+# is accepted because pass A excludes nothing, so the commit that introduces it is caught.
+#
+# File lists are NUL-delimited end to end (git grep -z, git ls-files -z, sort -z, xargs
+# -0). A newline-delimited list word-split on filenames with spaces and silently dropped
+# the file from the scan - a key at 'my age key.txt' passed the gate.
+#
+# It refuses to report clean when HEAD cannot be resolved. Inferring the tier from git's
+# exit status meant running outside a repo, or with a locked index, printed "clean".
+#
+# No `\b` in the IPv4 pattern: it is a GNU-regex convention, and two of the four sops
+# recipients are MacBooks where BSD grep may treat it as a literal, which would make the
+# mandated IPv4 check silently dead. The allow-list absorbs the extra matches instead.
+#
+# Matched content is NOT echoed - only file names - so a leak cannot be copied into a CI
+# log by the gate that found it.
 #
 # Patterns are assembled from pieces so this Makefile cannot match itself: the literal
 # text 'ssh-ed25519 AA''AA' holds no four consecutive A's, a regex written as
@@ -124,28 +143,34 @@ secrets-placement: secrets-present
 # which a whole-diff grep flagged as a leak.
 leak-check:
 	@age='AGE-SECRET-KEY-1[A-Z2-9]{40,}'; pem='BEGIN [A-Z ]*PRIVATE KEY'; ssh='ssh-ed25519 AA''AA'; \
-	ip='\b([0-9]{1,3}\.){3}[0-9]{1,3}\b'; \
-	allow='(^|[^0-9])(10\.|127\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.|0\.0\.0\.0|1\.1\.1\.1|8\.8\.[48]\.4|213\.186\.33\.99|224\.)'; \
-	shapes="$$age|$$pem|$$ssh"; rc=0; \
-	if ! git diff --cached --quiet; then tier='staged diff'; body=$$(git diff --cached); files=''; \
-	elif ! git diff --quiet; then tier='working tree vs HEAD'; body=$$(git diff HEAD); files=''; \
-	else tier='tracked tree at HEAD'; body=''; \
-	  files=$$(git grep -lI -E "$$shapes|$$ip" -- . ':(exclude)docs/superpowers' || true); fi; \
+	ovh='OVH_(APPLICATION_KEY|APPLICATION_SECRET|CONSUMER_KEY): *[A-Za-z0-9]{16,}$$'; \
+	ip='([0-9]{1,3}\.){3}[0-9]{1,3}'; \
+	allow='(^|[^0-9.])(10\.|127\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.|100\.64\.|169\.254\.|0\.0\.0\.0|1\.1\.1\.1|8\.8\.[48]\.4|213\.186\.33\.99|224\.|255\.255\.255\.255)'; \
+	shapes="$$age|$$pem|$$ssh|$$ovh"; rc=0; \
+	if ! git rev-parse --verify HEAD >/dev/null 2>&1; then \
+	  echo "leak-check: cannot resolve HEAD - refusing to report clean"; exit 1; fi; \
+	if ! git diff --cached --quiet 2>/dev/null; then tier='staged diff'; body=$$(git diff --cached); \
+	elif ! git diff --quiet 2>/dev/null; then tier='working tree vs HEAD'; body=$$(git diff HEAD); \
+	else tier='clean tree'; body=''; fi; \
 	if [ -n "$$body" ]; then \
 	  added=$$(printf '%s\n' "$$body" | grep '^+' || true); \
-	  if printf '%s\n' "$$added" | grep -nE "$$shapes"; then echo "LEAK: credential shape in $$tier"; rc=1; fi; \
-	  if printf '%s\n' "$$added" | grep -noE "$$ip" | grep -vE "$$allow"; then \
+	  if printf '%s\n' "$$added" | grep -qE "$$shapes"; then \
+	    echo "LEAK: credential shape in $$tier (content not echoed; find it with: git diff --cached | grep -nE ...)"; rc=1; fi; \
+	  if printf '%s\n' "$$added" | grep -oE "$$ip" | grep -vE "$$allow" | grep -q .; then \
 	    echo "LEAK: concrete public IPv4 in $$tier - write <OVH_PUBLIC_IP>"; rc=1; fi; \
 	fi; \
-	scanlist=$$(printf '%s\n' $$files $$(git ls-files --others --exclude-standard) | grep -v '^$$' | sort -u); \
-	if [ -n "$$scanlist" ]; then \
-	  if printf '%s\n' "$$scanlist" | xargs grep -nHE "$$shapes" 2>/dev/null | grep -v '^$$'; then \
-	    echo "LEAK: credential shape in $$tier (tracked/untracked files)"; rc=1; fi; \
-	  if printf '%s\n' "$$scanlist" | xargs grep -noHE "$$ip" 2>/dev/null | grep -vE "$$allow" | grep -v '^$$'; then \
-	    echo "LEAK: concrete public IPv4 in $$tier (tracked/untracked files)"; rc=1; fi; \
-	fi; \
+	shithits=$$( { git grep -lI -z -E "$$shapes" -- . ':(exclude)docs/superpowers' 2>/dev/null; \
+	               git ls-files -z --others --exclude-standard 2>/dev/null; } | sort -z -u \
+	             | xargs -0 -r grep -lE "$$shapes" 2>/dev/null || true); \
+	if [ -n "$$shithits" ]; then echo "LEAK: credential shape in tracked tree or untracked files (names only):"; \
+	  printf '%s\n' "$$shithits"; rc=1; fi; \
+	iphits=$$( { git grep -lI -z -E "$$ip" -- . ':(exclude)docs/superpowers' 2>/dev/null; \
+	             git ls-files -z --others --exclude-standard 2>/dev/null; } | sort -z -u \
+	           | xargs -0 -r grep -oHE "$$ip" 2>/dev/null | grep -vE "$$allow" || true); \
+	if [ -n "$$iphits" ]; then echo "LEAK: concrete public IPv4 in tracked tree or untracked files:"; \
+	  printf '%s\n' "$$iphits" | cut -d: -f1 | sort -u; rc=1; fi; \
 	if [ "$$rc" -eq 0 ]; then \
-	  echo "leak-check: clean - scanned $$tier plus untracked non-ignored files"; fi; \
+	  echo "leak-check: clean - scanned $$tier, the tracked tree at HEAD, and untracked non-ignored files"; fi; \
 	exit $$rc
 
 # ggshield exits 1 when it FINDS a secret, so the previous `command -v ... && ggshield ...
