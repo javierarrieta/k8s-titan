@@ -3,3 +3,8 @@ kind: Kustomization
 resources:
   - cert-manager/cert-manager.yaml
   - cert-manager/ovh-webhook.yaml
+  - k8s-reader/namespace.yaml
+  - k8s-reader/serviceaccount.yaml
+  - k8s-reader/clusterrole.yaml
+  - k8s-reader/clusterrolebinding.yaml
+  - k8s-reader/serviceaccount-token.yaml
