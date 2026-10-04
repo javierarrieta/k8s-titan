@@ -231,6 +231,14 @@ secrets-list:
 # rejects it. That is a known, deliberate gap - the first release that reaches for
 # it adds the arm here rather than routing around this gate.
 #
+# The same narrowness is why only one of the three Secrets spec S9 adds is gated:
+# `authentik-secrets` is reached for by a HelmRelease, while `s3-backup-secrets`
+# is reached for by the Cluster CR's `s3Credentials` and `authentik-db-credentials`
+# by a DatabaseRole's `passwordSecret`, and neither of those is a HelmRelease. A
+# wrong name there surfaces as a not-Healthy Cluster or a failing DatabaseRole in
+# cluster, not on the laptop - correct per spec S10.1, which scopes this gate to
+# HelmReleases, but do not read a green gate as the database credentials checked.
+#
 # Inside `valuesFrom` only a Secret counts, because the spec scopes the gate to
 # Secrets: every `- ` item starts from Flux's own default of `kind: Secret`, an
 # explicit `kind: ConfigMap` is skipped, and an item marked `optional: true` is
@@ -239,16 +247,31 @@ secrets-list:
 # there.
 #
 # Both HelmRelease arms capture through one cap(): the text after the key with a
-# leading list dash and surrounding double quotes stripped, so `- name: x`,
-# `name: x` and `name: "x"` all resolve to the plaintext Secret name. Single
-# quotes are not stripped - such a name FAILs loudly instead of passing unseen.
+# leading list dash, a trailing `#` comment and surrounding double quotes stripped,
+# so `- name: x`, `name: x`, `name: "x"` and `namespace: auth  # shared with
+# authentik` all resolve to the plaintext value. A `#` only starts a YAML comment
+# when whitespace precedes it, so the strip is anchored on that, and a quoted value
+# is left alone because a `#` inside quotes is literal - leaving the comment in
+# place would check every reference in that release against a namespace of
+# `auth  # shared with authentik`. Single quotes are not stripped - such a name
+# FAILs loudly instead of passing unseen.
 #
-# What the scanner cannot read is an error, never a silent miss: a
-# `valuesFrom:`/`secretRef:` carrying content on its own line (flow style, or any
-# other suffix the block form does not allow) FAILs, and a HelmRelease document
-# with no `metadata.namespace` FAILs by name - the apiserver would default that to
-# `default`, and checking references against a guessed namespace is worse than
-# refusing to check them.
+# What the scanner cannot read is an error, never a silent miss: inside a
+# HelmRelease document, a `valuesFrom:`/`secretRef:` carrying content on its own
+# line FAILs wherever that content sits - the line-start form (`secretRef: {name:
+# x}`) and the same key nested under another key
+# (`global: {envFrom: [{secretRef: {name: x}}]}`), which the line-start arms alone
+# walked straight past, printing `0 Secret reference(s)` over an unread release.
+# Only HelmRelease documents can trip these guards: `secretRef` is Flux's own
+# syntax elsewhere - the stage Kustomizations' `decryption.secretRef` - and none
+# of this gate's business. A HelmRelease document with no `metadata.namespace`
+# FAILs by name - the apiserver would default that to `default`, and checking
+# references against a guessed namespace is worse than refusing to check them.
+#
+# The HelmRelease find matches `.yml` as well as `.yaml`, for the reason
+# SECRET_FIND states above: a release authored as `p.yml` must not be able to slip
+# between the two halves of this gate. Before it matched both, such a release was
+# not scanned and not even counted in the HelmRelease total.
 #
 # Non-vacuous by the same rule as secrets-present: zero HelmReleases is a FAIL, and
 # the green line prints both counts so "0 Secret reference(s)" stays visible
@@ -263,13 +286,13 @@ secrets-list:
 # file's namespace, which silently retargets every reference it checks.
 release-secrets:
 	@joined=$$( \
-	  find apply -name '*.yaml' ! -name kustomization.yaml -print0 | sort -z | xargs -0 -r awk ' \
+	  find apply \( -name '*.yaml' -o -name '*.yml' \) ! -name kustomization.yaml -print0 | sort -z | xargs -0 -r awk ' \
 	    FNR==1 { flushdoc() } \
 	    /^---[ \t]*$$/ { flushdoc(); next } \
 	    /^kind:[ \t]*HelmRelease[ \t]*$$/ { hr++; nhr++; df=FILENAME } \
 	    /^metadata:[ \t]*$$/ { inm=1; next } \
 	    inm { if ($$0 ~ /^[^ \t]/) { inm=0 } else if ($$1=="name:" && nm=="") { nm=cap($$0) } else if ($$1=="namespace:" && ns=="") { ns=cap($$0) } } \
-	    /^ *-? *valuesFrom:[ \t]*[^ \t]/ { flow(); next } \
+	    hr && /^ *-? *valuesFrom:[ \t]*[^ \t]/ { flow(); next } \
 	    /^  valuesFrom:[ \t]*$$/ { vf=1; nextitem(); next } \
 	    vf && ( /^  [^ -]/ || /^[^ \t]/ ) { flushitem(); vf=0 } \
 	    vf && /^ *- / { flushitem() } \
@@ -277,11 +300,12 @@ release-secrets:
 	    vf && /^ *-? *kind:/ { vk=cap($$0) } \
 	    vf && /^ *-? *optional:[ \t]*true[ \t]*$$/ { vo=1 } \
 	    sr && $$0 !~ /^[ \t]*$$/ && ind($$0) <= sri { sr=0 } \
-	    /^ *-? *secretRef:[ \t]*[^ \t]/ { flow(); next } \
+	    hr && /^ *-? *secretRef:[ \t]*[^ \t]/ { flow(); next } \
+	    hr && /(valuesFrom|secretRef):[ \t]*[{[]/ { flow(); next } \
 	    /^ *-? *secretRef:[ \t]*$$/ { sr=1; sri=ind($$0); next } \
 	    sr && /^ +name:/ { v=cap($$0); if (v != "") r[++n]=v; sr=0 } \
 	    END { flushdoc(); print "N\t" nhr+0 } \
-	    function cap(line,  v) { v=line; sub(/^ *-? *[^:]+:[ \t]*/,"",v); sub(/[ \t]*$$/,"",v); gsub(/^"|"$$/,"",v); return v } \
+	    function cap(line,  v) { v=line; if (v !~ /:[ \t]*"/) sub(/[ \t]+#.*$$/,"",v); sub(/^ *-? *[^:]+:[ \t]*/,"",v); sub(/[ \t]*$$/,"",v); gsub(/^"|"$$/,"",v); return v } \
 	    function ind(line) { match(line,/^ */); return RLENGTH } \
 	    function flow(  l) { l=$$0; sub(/^[ \t]+/,"",l); gsub(/\t/," ",l); print "FLOW\t" FILENAME ":" FNR ": " l } \
 	    function nextitem() { vk="Secret"; vo=0; vfn="" } \

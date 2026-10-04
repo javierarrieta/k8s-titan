@@ -3,8 +3,9 @@
 # where 'kubectl exec psql -c CREATE ROLE' is not (spec 4 A4/A5).
 #
 # CRDs ship as chart TEMPLATES (templates/crds/crds.yaml), not in a crds/ directory, so
-# Flux manages them as ordinary resources and `install.crds: CreateReplace` - which is
-# what the cert-manager release above needs - would be a no-op here. They carry
+# Flux manages them as ordinary resources and `upgrade.crds: CreateReplace` - which is
+# what the cert-manager release sets, in its own file
+# (apply/20-infra/cert-manager/cert-manager.yaml) - would be a no-op here. They carry
 # helm.sh/resource-policy: keep, so an uninstall does not drop the CRDs and orphan every
 # Cluster in the tree.
 #

@@ -2,6 +2,12 @@
 # credential is authored instead (spec 4 A4); keeping Reflector's scope to certificates
 # is what stops it becoming a second secret-sync mechanism by accident.
 #
+# That scope is a convention, not a boundary. The chart's ClusterRole (rbac.enabled
+# defaults to true) grants `configmaps` and `secrets` with verbs ["*"], cluster-wide,
+# so the blast radius of a compromised Reflector is every Secret in the cluster, not
+# just the TLS ones. What holds it to TLS is review and the set of objects we choose
+# to annotate - never RBAC.
+#
 # This is bootstrap spec 9's deferred item, promoted on its own stated trigger ("a second
 # namespace needs titan-tls"), and promoted whole: the Certificate moves to `certificates`
 # in the same slice (spec 5.3), so `apps` stops being the cluster's certificate source.

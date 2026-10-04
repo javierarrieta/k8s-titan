@@ -1,4 +1,11 @@
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
+# This stage is `apps` and this object lives in `databases`: the stage order is what
+# puts the CNPG operator ahead of the Cluster, and a kustomize directory may span
+# namespaces (there is deliberately no top-level `namespace:` field - it rewrites them
+# all). The Cluster carries kustomize.toolkit.fluxcd.io/prune: disabled to survive a
+# git deletion, so a reorganisation that "moves the database to a databases stage"
+# deletes the manifest holding that protection - the annotation has to move in the
+# same commit, or the Cluster becomes prunable on the next bad rebase.
 resources:
   - databases/postgres.yaml

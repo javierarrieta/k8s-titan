@@ -244,8 +244,8 @@ Add to `apply/20-infra/kustomization.yaml`:
 ### Verify
 
 ```bash
-kubectl kustomize apply/20-infra | grep -c 'kind: HelmRelease'      # 4 (cert-manager, ovh-webhook, reflector, +cnpg after task 3)
-kubectl kustomize apply/00-bootstrap | grep -c 'kind: Namespace'    # 6
+kubectl kustomize apply/20-infra | grep -c 'kind: HelmRelease'      # 3 at this task (cert-manager, ovh-webhook, reflector); 4 after task 3 adds cnpg
+kubectl kustomize apply/00-bootstrap | grep -c 'kind: Namespace'    # 7 (the 6 from namespaces.yaml + flux-system from gotk-components.yaml)
 make kustomize-check
 ```
 
@@ -612,7 +612,7 @@ kind: Secret
 metadata:
   name: authentik-db-credentials
   namespace: databases
-  type: kubernetes.io/basic-auth
+type: kubernetes.io/basic-auth
 stringData:
   username: authentik
   password: "$DB_PASS"
