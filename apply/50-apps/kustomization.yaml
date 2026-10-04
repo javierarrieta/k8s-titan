@@ -9,3 +9,4 @@ kind: Kustomization
 # same commit, or the Cluster becomes prunable on the next bad rebase.
 resources:
   - databases/postgres.yaml
+  - databases/postgres-backup.yaml
