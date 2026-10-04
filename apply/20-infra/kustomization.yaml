@@ -8,3 +8,4 @@ resources:
   - k8s-reader/clusterrole.yaml
   - k8s-reader/clusterrolebinding.yaml
   - k8s-reader/serviceaccount-token.yaml
+  - reflector/reflector.yaml
