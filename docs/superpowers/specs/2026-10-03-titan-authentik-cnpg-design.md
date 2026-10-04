@@ -13,9 +13,14 @@
 ## 0. Ground rules carried forward
 
 Everything in bootstrap spec §0 applies unchanged: this repo is public, so no credentials and no
-concrete public IPv4 — write `<OVH_PUBLIC_IP>`. RFC1918 is used freely below, including
-`192.168.0.42` (casa's MinIO) and `10.62.0.0/16` (titan's pod CIDR), both of which sit inside
-`make leak-check`'s allow-list.
+concrete public IPv4 — write `<OVH_PUBLIC_IP>`. RFC1918 is used freely below — `10.62.0.0/16`,
+titan's pod CIDR — and sits inside `make leak-check`'s allow-list.
+
+An **AWS account ID is not a credential but is not secret either**, and this design publishes one:
+the backup bucket's name embeds `562256260016`, and the bucket name must appear in the
+`Cluster` manifest. It will not trip `leak-check`, and an account ID already appears in any ARN
+anywhere it has ever been pasted. Recorded here because the alternative — renaming the bucket — gets
+more expensive the moment backups exist, not after.
 
 Secrets follow the same rule: `apply/10-secrets/` only, sops-encrypted, never plaintext anywhere
 else. `make secrets-placement` enforces it.
@@ -35,7 +40,7 @@ Success looks like:
 2. One shared Postgres cluster exists, and **adding the next database is a pull request, not a
    `psql` session** — declarative `Database` and `DatabaseRole` objects, which is the whole reason
    for using an operator.
-3. The database is backed up to MinIO continuously, and **the restore has actually been performed
+3. The database is backed up to AWS S3 continuously, and **the restore has actually been performed
    once** (§7.4). A backup that has only ever been written is a hope.
 4. The wildcard TLS secret reaches a second namespace without hand-copied certificates.
 5. Nothing here requires cluster access to validate before merge — the existing offline gates still
@@ -55,7 +60,7 @@ techdelivery's apps over to titan's IdP, retiring those two instances, and monit
 | bootstrap spec §5 | The `titan-k8s` age key, `.sops.yaml` recipients, the staging flow for new secrets |
 | bootstrap spec §7, §9 | The wildcard `Certificate`, and the two deferred items this spec promotes |
 | `nixos-configurations` `hosts/titan/disko.nix` | `nvme0`+`nvme1` → mdadm RAID1 → LVM `vg0` → `root` 150 G ext4 (`/`) and `pvc` 240 G ext4 (`/var/lib/rancher/k3s/storage`) |
-| `nixos-configurations` `hosts/titan/configuration.nix` | MinIO is reachable from titan over `wg_titan`; the route to `192.168.0.0/24` was proven live 2026-10-02; etcd snapshots already ship to MinIO with a staleness monitor |
+| `nixos-configurations` `hosts/titan/configuration.nix` | etcd snapshots ship to MinIO over `wg_titan` with a staleness monitor. **That path is unchanged by this spec** — see §7.6 on why titan ends up with two backup destinations |
 | live titan cluster | All five stages `Ready=True`, `titan-wildcard` `Ready=True`, `local-path` default SC with `reclaimPolicy: Delete` and `allowVolumeExpansion: false`, **zero PVCs**, zero Ingresses |
 | `k8s-techdelivery` | `apply/50-apps/auth/authentik.yaml` (the closer template: ClusterIP + Ingress, no `nodeSelector`), `apply/20-infra/reflector.yaml`, `apply/50-apps/certificates/*.yaml` (the reflector annotation pattern), `scripts/restore-drill.sh` |
 | `k8s-casa` | `apply/50-apps/auth/authentik.yaml` at chart `2026.8.3`, `apply/50-apps/casa/postgres-backup.yaml` (the `pg_dump` CronJob shape this spec replaces) |
@@ -84,7 +89,7 @@ implementation cycle; only row 1 is in scope here.
 | # | Sub-project | Depends on | Status |
 |---|---|---|---|
 | 1 | authentik + shared Postgres + backup path on titan | — | **this spec** |
-| 2 | General PV backups (restic → MinIO, `30-backup` stage) | — | deferred, §12 |
+| 2 | General PV backups (restic → object store, `30-backup` stage) | — | deferred, §12 |
 | 3 | Populate titan's authentik with users and groups | 1 | deferred, §12.1 — mechanism undecided |
 | 4 | Per-cluster outpost cutover: casa's and techdelivery's apps → titan's IdP | 3 | deferred |
 | 5 | Retire the two old authentik instances | 4 | deferred |
@@ -111,7 +116,7 @@ downgrading, and the two siblings are pinned apart (`2026.5.2` vs `2026.8.3`).
 | A3 | IdP database | one `Database` + one `DatabaseRole` for authentik, authored next to the app | A single shared `authentik` DB inside one superuser would work and is less YAML; it also means every future workload shares one permission set. |
 | A4 | Role password | **authored by the operator**, shipped sops-encrypted, referenced via `passwordSecret` | Letting CNPG generate it puts the Secret in `databases` under operator ownership, needing Reflector to mirror a Secret we cannot annotate — the operator rewrites it. Authoring it puts the credential in `apply/10-secrets` like every other credential here. |
 | A5 | Cross-namespace TLS | **promote Reflector** (`10.0.46`) + move the `Certificate` to a `certificates` namespace | A second `Certificate` for the same wildcard doubles ACME renewals for nothing. Traefik's `TLSOption` cross-namespace reference needs Traefik CRDs and per-route config the Helm chart does not emit. Hand-copying the Secret is the thing that rots. |
-| A6 | Database backup | CNPG `barmanObjectStore` + `ScheduledBackup` → MinIO | The hand-written `pg_dump` CronJob (casa's shape) yields one restore point a day, needs an image to pin and a `.pgpass` assembled in a shell string, and needs a backup PVC. Barman gives base backups **plus WAL archives** — point-in-time recovery — in less YAML. |
+| A6 | Database backup | CNPG `barmanObjectStore` + `ScheduledBackup` → **AWS S3** | The hand-written `pg_dump` CronJob (casa's shape) yields one restore point a day, needs an image to pin and a `.pgpass` assembled in a shell string, and needs a backup PVC. Barman gives base backups **plus WAL archives** — point-in-time recovery — in less YAML. |
 | A7 | General PVC backups | **deferred, consciously overriding bootstrap spec §9's trigger** | §9 said "before any workload with data lands on titan", and an IdP is data. The override is accepted because the database has its own backup path and the restic stream stays deferred with its trigger intact. Recorded in §11 so it is not mistaken for an oversight. |
 | A8 | Storage class | keep `local-path` | See §6.4: the requested size is not enforced by anything, so switching classes buys enforcement only at the cost of a second storage system on a single node. The real boundary is the LVM volume, and it is growable. |
 | A9 | Redis | **not deployed** | §2.1. authentik 2025.10 removed it. |
@@ -138,7 +143,7 @@ created (bootstrap spec §4):
 ```
 apply/00-bootstrap/namespaces.yaml              + 4 namespaces
 apply/20-infra/reflector/reflector.yaml         HelmRepository emberstack + HelmRelease reflector 10.0.46   (ns apps)
-apply/20-infra/cnpg/operator.yaml               HelmRepository cnpg + HelmRelease cloudnative-pg 0.29.1     (ns cnpg-system)
+apply/20-infra/cnpg/operator.yaml               OCIRepository + HelmRelease cloudnative-pg 0.29.1              (ns cnpg-system)
 apply/20-infra/kustomization.yaml               + the two new files
 apply/40-certificates/titan-wildcard.yaml       MOVED to ns certificates, + secretTemplate reflector annotations
 apply/50-apps/databases/postgres.yaml           CNPG Cluster                                                    (ns databases)
@@ -147,7 +152,7 @@ apply/50-apps/auth/authentik.yaml               HelmRepository + HelmRelease aut
 apply/50-apps/auth/authentik-db.yaml            Database + DatabaseRole                                         (ns databases)
 apply/50-apps/kustomization.yaml                + the four new files
 apply/10-secrets/authentik-secrets.yaml         sops
-apply/10-secrets/minio-backup-secrets.yaml      sops
+apply/10-secrets/s3-backup-secrets.yaml         sops
 apply/10-secrets/kustomization.yaml             + the two new files
 scripts/restore-drill.sh                        the §7.4 drill
 Makefile                                        + release-secrets gate (§10.1)
@@ -207,7 +212,7 @@ metadata:
     kustomize.toolkit.fluxcd.io/prune: disabled   # §6.3
 spec:
   instances: 1
-  imageName: ghcr.io/cloudnative-pg/postgresql:<18.x pinned at implementation>
+  imageName: ghcr.io/cloudnative-pg/postgresql:18.6
   storage:
     size: 10Gi          # a label, not a limit — §6.4
     storageClass: local-path
@@ -221,9 +226,10 @@ One instance on one node is the normal shape, not a compromise: there is no seco
 replica on, and a `minSyncReplicas` of anything above zero would be unsatisfiable.
 
 `imageName` is pinned explicitly rather than inherited from the operator default, so a later
-`flux` bump of the operator cannot silently move the Postgres major version. The exact tag is
-chosen from the published `cloudnative-pg/postgresql` tags during implementation; the spec does
-not guess it.
+`flux` bump of the operator cannot silently move the Postgres major version. `18.6` is verified, not
+guessed: a manifest fetch against GHCR returns `200` for `18.6` and `404` for `18.5`, `18.7` and
+`99.9`, so `18.6` is the published 18.x at the time of writing. Operator `1.30.x` supports Postgres
+14–18, so this is inside the supported band.
 
 Sizing is deliberately modest: this node also runs etcd, the API server, Traefik and Flux, and
 Postgres is a handful of small databases, not a warehouse. No CPU or memory figure in this spec is
@@ -332,26 +338,36 @@ On the `Cluster`:
 spec:
   backup:
     barmanObjectStore:
-      destinationPath: s3://titan-k8s-pg
-      endpointURL: https://s3.l.arrieta.eu
+      destinationPath: s3://k8s-titan-pg-562256260016-eu-west-1-an
       s3Credentials:
-        accessKeyId:     {name: minio-backup-secrets, key: ACCESS_KEY_ID}
-        secretAccessKey: {name: minio-backup-secrets, key: SECRET_ACCESS_KEY}
+        accessKeyId:     {name: s3-backup-secrets, key: ACCESS_KEY_ID}
+        secretAccessKey: {name: s3-backup-secrets, key: SECRET_ACCESS_KEY}
+        region:          {name: s3-backup-secrets, key: AWS_REGION}
       retentionPolicy: 30d
 ```
 
+Three things this gets right that a first draft got wrong:
+
+- **No `endpointURL`.** Setting one is what you do for an S3-compatible store. Against real AWS it is
+  at best redundant and at worst a second thing to get wrong.
+- **Region lives in the Secret.** `s3Credentials.region` is a secret-key reference in the CRD — *"the
+  reference to the secret containing the region name"* — not a plain field. There is no EC2 instance
+  metadata on titan for barman to fall back to, so the region is required, not optional.
+- **The region is `eu-west-1`, and that was verified, not assumed.** The bucket name says
+  `eu-west-1`; the operator initially said `us-west-1`. `curl -I` on the bucket returns
+  `x-amz-bucket-region: eu-west-1` and a 307 redirect, and a bucket cannot be used from another
+  region. A wrong region here does not fail loudly: every WAL archive fails behind a redirect while
+  Postgres reports itself healthy, which is precisely the §7.5 failure. Check the bucket's region the
+  same way rather than trusting a name or a memory.
+
 `retentionPolicy` is the CRD's own pattern `^[1-9][0-9]*[dwm]$` — **`30d`, not `30 days`**. CNPG
-enforces it internally via `barman-cloud-backup-delete --retention-policy "RECOVERY WINDOW OF 30 DAYS"`.
-It is the thing that stops the bucket growing forever on casa's disk, and the easiest thing to
-forget.
+enforces it internally via `barman-cloud-backup-delete --retention-policy "RECOVERY WINDOW OF 30 DAYS"`,
+using the same credentials as everything else. It is the thing that stops the bucket growing forever,
+and the easiest thing to forget. An S3 lifecycle rule is a **backstop for noncurrent versions, not
+retention**; do not let anyone later "consolidate" the two and lose retention.
 
 WAL archiving is on by default once a `barmanObjectStore` exists, so archiving is continuous and the
 `ScheduledBackup` below is only the daily base backup.
-
-`s3.l.arrieta.eu` resolves in public DNS to `192.168.0.42`, and titan holds a live route to that
-range over `wg_titan`. So a pod reaches MinIO by hostname through ordinary CoreDNS resolution — no
-hosts file, no CoreDNS rewrite, no IP in a manifest. This was checked rather than assumed, because
-the host reaches MinIO through `extraHosts` entries that pods do not inherit.
 
 ### 7.2 Schedule
 
@@ -371,15 +387,130 @@ spec:
 `backupOwnerReference: self` keeps the backups owned by the `ScheduledBackup`, so pruning the
 schedule does not prune the backups it produced.
 
-### 7.3 Credentials, and why not the host's
+### 7.3 Credentials: a dedicated IAM user, and one lesson already paid for
 
-`minio-backup-secrets` in `databases` carries `ACCESS_KEY_ID` / `SECRET_ACCESS_KEY` for a MinIO
-access key **scoped to the `titan-k8s-pg` bucket alone**.
+`s3-backup-secrets` in `databases` carries `ACCESS_KEY_ID`, `SECRET_ACCESS_KEY` and `AWS_REGION` for
+a **dedicated IAM user** (`k8s-titan-pg-backups`) whose policy grants only this bucket.
 
-Deliberately not the host's `titan/minio_env` credentials from `nixos-configurations`. That is
-bootstrap spec §5.1's argument applied one layer down: the credential that writes backups must not
-be the credential that can read every other bucket on that server. A compromised titan pod holding
-the host key could read casa's restic repositories — every PV backup, every etcd snapshot.
+Deliberately not the host's `titan/minio_env` credentials. That is bootstrap spec §5.1's argument
+applied one layer down: the credential that writes backups must not be the credential that can read
+everything else. On MinIO that separation was a policy on a shared server; on AWS it is an IAM
+boundary, which is the stronger version of the same idea — the key that writes this bucket cannot
+read casa's restic repositories or titan's etcd snapshots, because those are not in its policy.
+
+**IAM user policy** — the set `barman-cloud-wal-archive`, `barman-cloud-backup` and
+`barman-cloud-backup-delete` need. `DeleteObject` is present because `retentionPolicy` deletes
+through the same credentials:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "BarmanObjectAccess",
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetObject", "s3:PutObject", "s3:DeleteObject",
+        "s3:ListMultipartUploadParts", "s3:AbortMultipartUpload"
+      ],
+      "Resource": "arn:aws:s3:::k8s-titan-pg-562256260016-eu-west-1-an/*"
+    },
+    {
+      "Sid": "BarmanBucketListing",
+      "Effect": "Allow",
+      "Action": ["s3:ListBucket", "s3:GetBucketLocation"],
+      "Resource": "arn:aws:s3:::k8s-titan-pg-562256260016-eu-west-1-an"
+    }
+  ]
+}
+```
+
+Narrowing to the `postgres/` prefix (CNPG's barman `serverName` defaults to the cluster name) is worth
+doing **after** the drill has proven the access pattern. Narrowing a working policy is easy;
+debugging an over-narrow one at 3 a.m. is not.
+
+**Bucket policy — and the mistake this design had to make first.** The obvious shape, *deny everyone
+except the backup user*, is a lockout waiting to happen, and it happened:
+
+```json
+"Condition": { "ArnNotLike": { "aws:PrincipalArn": "arn:aws:iam::562256260016:user/k8s-titan-pg-backups" } }
+```
+
+A resource-based policy has **no implicit owner exemption**. An explicit `Deny` with `Principal: "*"`
+applies to the account root as well — `aws:PrincipalArn` for root is `arn:aws:iam::ACCOUNT:root`,
+which is not the whitelisted ARN — so root is denied `s3:PutBucketPolicy`, the only call that could
+undo the policy. The recovery is an AWS Support case; there is no CLI workaround, because every call
+that could replace the policy is the call being denied.
+
+The correct deny scopes to **outsiders**, which structurally cannot lock out your own identities — and
+where the list *is* narrowed to one principal, **root must be in that list**. `ArnNotLike` takes a list
+and a list is an OR: if the principal matches any entry, the Deny does not apply.
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "DenyInsecureTransport",
+      "Effect": "Deny", "Principal": "*", "Action": "s3:*",
+      "Resource": [
+        "arn:aws:s3:::k8s-titan-pg-562256260016-eu-west-1-an",
+        "arn:aws:s3:::k8s-titan-pg-562256260016-eu-west-1-an/*"
+      ],
+      "Condition": { "Bool": { "aws:SecureTransport": "false" } }
+    },
+    {
+      "Sid": "DenyForeignPrincipals",
+      "Effect": "Deny", "Principal": "*", "Action": "s3:*",
+      "Resource": [
+        "arn:aws:s3:::k8s-titan-pg-562256260016-eu-west-1-an",
+        "arn:aws:s3:::k8s-titan-pg-562256260016-eu-west-1-an/*"
+      ],
+      "Condition": { "StringNotEquals": { "aws:PrincipalAccount": "562256260016" } }
+    },
+    {
+      "Sid": "DenyAnyoneNotRootOrBackupUser",
+      "Effect": "Deny", "Principal": "*", "Action": "s3:*",
+      "Resource": [
+        "arn:aws:s3:::k8s-titan-pg-562256260016-eu-west-1-an",
+        "arn:aws:s3:::k8s-titan-pg-562256260016-eu-west-1-an/*"
+      ],
+      "Condition": {
+        "ArnNotLike": {
+          "aws:PrincipalArn": [
+            "arn:aws:iam::562256260016:root",
+            "arn:aws:iam::562256260016:user/k8s-titan-pg-backups"
+          ]
+        }
+      }
+    }
+  ]
+}
+```
+
+Statements 1 and 2 are safe by construction — `aws:PrincipalAccount` scopes the deny to outsiders and
+can never touch root, admin roles, or the backup user. Statement 3 is the optional narrowing, and it
+carries the lockout risk in every future edit, so three rules about it:
+
+- **root is in the list, always.** With root whitelisted, `aws s3api delete-bucket-policy` is a
+  permanent escape hatch. Without it there is none.
+- **If administration ever moves to Identity Center or an assumed role, add `role/*` to the list
+  first.** An assumed role's `aws:PrincipalArn` is `arn:aws:iam::ACCOUNT:role/<name>`, not `:root`,
+  so the same mistake repeats.
+- The narrowing is **already** enforced by the IAM user policy, which grants only this bucket and
+  cannot lock anyone out because it grants rather than denies. Statement 3 is defence in depth
+  against a future permissive policy elsewhere in the account — not the primary control.
+
+Anonymous access needs no statement at all: a policy of only Denys grants nothing, and cross-account
+access requires an explicit Allow somewhere. Statements 1–2 are backstops against a future mistake.
+
+Two further bucket rules:
+
+- **Do not** add a "require the `x-amz-server-side-encryption` header" statement. barman does not
+  send that header — it relies on bucket default encryption — so such a rule rejects every upload
+  from the database while looking like good hygiene.
+- Block Public Access all four on, default encryption SSE-S3, versioning on with a lifecycle rule
+  expiring noncurrent versions at 35 days (backstop only, per §7.1).
 
 ### 7.4 The restore drill
 
@@ -404,13 +535,32 @@ size label is fiction.
 
 ### 7.5 The failure mode that turns into slow disk fill
 
-If MinIO becomes unreachable, `barman-cloud-wal-archive` fails and Postgres **retains WAL segments
-on the PVC** instead of shipping them. The database keeps running and reports itself healthy while
-`pg_wal` grows until `vg0/pvc` is gone — which takes every PVC on that volume down with it.
+If the object store becomes unreachable, `barman-cloud-wal-archive` fails and Postgres **retains WAL
+segments on the PVC** instead of shipping them. The database keeps running and reports itself healthy
+while `pg_wal` grows until `vg0/pvc` is gone — which takes every PVC on that volume down with it.
+
+Moving to AWS removed one trigger and left the shape intact. The path no longer depends on `wg_titan`
+— a mesh outage can no longer stop backups — but it now depends on public egress, on an IAM key that
+**can expire or be rotated without anyone telling the cluster**, and on the region being right (§7.1).
 
 Nothing in the current tree would notice. There is no Prometheus on titan, and the existing
-`k3sSnapshotMonitor` watches a different bucket on a different host. This is recorded as accepted
-risk with a named trigger in §11, not as covered.
+`k3sSnapshotMonitor` watches a different bucket on a different host and a different provider. This is
+recorded as accepted risk with a named trigger in §11, not as covered.
+
+### 7.6 Two backup destinations, deliberately
+
+After this spec titan ships backups to two places:
+
+| stream | destination | owned by |
+|---|---|---|
+| etcd snapshots (`titan-etcd`) | casa's MinIO over `wg_titan` | `nixos-configurations` |
+| Postgres base backups + WAL | AWS S3, this spec | this repo |
+
+That is not an inconsistency to be tidied away. The etcd stream exists because k3s' own
+`--etcd-s3-*` flags write it and it must be configured where k3s is configured; moving it is a
+`nixos-configurations` change with its own risk, and this slice has no business bundling it. What
+matters is that nobody discovers, during a restore, that the two streams live in different clouds and
+require different credentials to find.
 
 ---
 
@@ -484,6 +634,21 @@ a security finding either way.
   blocked mixed content, an endless spinner, or authentication errors. The pod CIDR is broader than
   ideal (any pod could in principle forge the headers), which is the accepted cost of not pinning a
   stable Traefik address; the alternative is pinning a pod IP that changes.
+
+  Two things about this setting that are easy to get wrong and were checked against the docs rather
+  than assumed:
+
+  - **The format is a comma-separated string, not a JSON list.** The chart key is
+    `authentik.listen.trusted_proxy_cidrs`, a string, and authentik's own fix for env loading
+    (goauthentik/authentik#8075) states the format is `127.0.0.0/8,::1/128` — explicitly *not*
+    `["127.0.0.0/8","::1/128"]`. A JSON list here is silently not what was asked for.
+  - **Setting it replaces the defaults**, which are `127.0.0.0/8`, `10.0.0.0/8`, `172.16.0.0/12`,
+    `192.168.0.0/16`, `fe80::/10`, `::1/128`. titan's pod CIDR `10.62.0.0/16` already falls inside
+    the default `10.0.0.0/8` — so **not setting this at all would work**. Setting it is a deliberate
+    tightening, and it must therefore carry loopback with it: the value used is
+    `10.62.0.0/16,127.0.0.0/8`, so that `kubectl port-forward` debugging still gets correct
+    headers. Tightening to the pod network alone would break the local debugging path while looking
+    like an improvement.
 - **`AUTHENTIK_WEB__BASE_URL`.** Recommended now, **required in 2026.11**. Setting it now is free
   and removes a future upgrade surprise.
 
@@ -535,18 +700,30 @@ so `metadata`, `apiVersion` and `kind` stay plaintext for review.
 Two objects, same password. CNPG's `passwordSecret` must live in the Cluster's namespace; authentik
 reads its env in `auth`. No mirroring, no operator-owned Secret to chase.
 
-### 9.2 `apply/10-secrets/minio-backup-secrets.yaml`
+### 9.2 `apply/10-secrets/s3-backup-secrets.yaml`
 
-`minio-backup-secrets` in `databases`: `ACCESS_KEY_ID`, `SECRET_ACCESS_KEY`.
+`s3-backup-secrets` in `databases`: `ACCESS_KEY_ID`, `SECRET_ACCESS_KEY`, `AWS_REGION` (`eu-west-1`).
 
 ### 9.3 Prerequisites that must exist before merge
 
 Otherwise the stages go red on first sync and a red object on a bootstrap is indistinguishable
 from a broken one.
 
-1. **On casa's MinIO:** create bucket `titan-k8s-pg`; mint an access key restricted to that bucket
-   (§7.3). Confirm the endpoint is reachable from titan: `aws s3 ls s3://titan-k8s-pg
-   --endpoint-url https://s3.l.arrieta.eu` from the host.
+1. **In AWS:** the bucket `k8s-titan-pg-562256260016-eu-west-1-an` exists in `eu-west-1`; the IAM
+   user `k8s-titan-pg-backups` carries the policy in §7.3 and an access key; the bucket policy is the
+   three-statement form in §7.3 with **root whitelisted** — a principal-scoped deny without root in
+   the list locks out the account owner; Block Public Access, default encryption and versioning set
+   as §7.3 describes. Verify from
+   the host before wiring the cluster to it:
+
+```bash
+aws s3 ls s3://k8s-titan-pg-562256260016-eu-west-1-an \
+  --region eu-west-1 --no-verify-ssl 2>&1 | head   # expect a listing, not AccessDenied
+aws s3api get-bucket-location --bucket k8s-titan-pg-562256260016-eu-west-1-an
+```
+
+   The second command is the region check. Trusting the bucket name, or a memory of it, is how §7.1's
+   redirect failure happens.
 2. **Generate the values locally** — `openssl rand -base64 32` for the secret key,
    `openssl rand -base64 24` for the passwords.
 3. **Encrypt through the documented staging flow.** The gitignored name is what keeps
@@ -589,8 +766,8 @@ are the ones the chart wants.
 
 Two assertions worth stating once so nobody "fixes" them later:
 
-- `192.168.0.42` in the MinIO endpoint is RFC1918 and inside leak-check's allow-list; it is not a
-  leak and must not be replaced with a placeholder.
+- The bucket name contains `562256260016`, an AWS account ID. It is an identifier, not a credential,
+  it is required in the manifest, and it is not a leak — it must not be replaced with a placeholder.
 - `10.62.0.0/16` in the trusted-proxy CIDR likewise.
 
 ### 10.2 Against the cluster
@@ -611,9 +788,10 @@ Then the human half:
 1. `https://auth.titan.arrieta.eu/if/flow/initial-setup/` → create `akadmin`; log out; log back in.
    That login **is** the test for `AUTHENTIK_LISTEN__TRUSTED_PROXY_CIDRS` — a wrong CIDR produces a
    redirect loop or a mixed-content block, which is far louder than a silent failure.
-2. Confirm objects actually landed in the bucket from outside the cluster (`mc ls` or the console).
-   S3 failures are exactly the kind that produce no error anywhere; that is the lesson the etcd
-   snapshot already paid for.
+2. Confirm objects actually landed in the bucket from outside the cluster — `aws s3 ls
+   s3://k8s-titan-pg-562256260016-eu-west-1-an --region eu-west-1`, or the console. S3 failures are
+   exactly the kind that produce no error anywhere; that is the lesson the etcd snapshot already paid
+   for. Expect `postgres/base/` and `postgres/wals/` under the prefix.
 3. Run `scripts/restore-drill.sh` end to end and record the output.
 
 ---
@@ -643,9 +821,10 @@ That spec is where this repo records *why*, so these are edits to it, not commen
 
 ### 11.1 Deliberate placeholders
 
-Exactly one value in this document is left unwritten on purpose: the `ghcr.io/cloudnative-pg/postgresql`
-tag in §6.2. It is chosen from the published tags during implementation, because guessing a tag here
-would be a manifest that fails at first apply. Every other value is concrete.
+**None.** Every value in this document is concrete. The one value that had been left open — the
+`ghcr.io/cloudnative-pg/postgresql` tag in §6.2 — was resolved by querying GHCR rather than guessed,
+and the bucket name and region in §7.1 were resolved the same way (§7.1 explains why the region in
+particular had to be measured and not remembered).
 
 ---
 
@@ -653,14 +832,14 @@ would be a manifest that fails at first apply. Every other value is concrete.
 
 | Item | Why not now | Trigger |
 |---|---|---|
-| General PV backups (`30-backup` stage, restic → MinIO) | §4 A7 override, recorded in §11 | Any other workload with data that is not a Postgres database |
+| General PV backups (`30-backup` stage, restic → object store) | §4 A7 override, recorded in §11 | Any other workload with data that is not a Postgres database |
 | Populating users and groups | Sub-project 3; mechanism is an open decision below | First real user needing titan's IdP |
 | Outpost cutover for casa / techdelivery apps | Sub-project 4; needs 3 | First app moving to titan's IdP |
 | Retiring the two old authentiks | Sub-project 5 | Sub-project 4 complete for that cluster |
 | authentik blueprints as declarative config | Speculative until the import mechanism is chosen | Sub-project 3 |
 | Monitoring (kube-prometheus-stack, disk + WAL-archive alerts) | Not in scope; titan has no Prometheus | Now overdue — see §11.4 |
 | A second Postgres instance / HA | One node; a replica has nowhere to live | A second node |
-| `minio-backup-secrets` rotation schedule | No rotation precedent in either sibling | First quarter of operation |
+| `s3-backup-secrets` rotation schedule, and an expiry reminder for the IAM key | No rotation precedent in either sibling; a silently expired key is §7.5's new trigger | First quarter of operation |
 
 ### 12.1 The open decision: how users and groups arrive
 
@@ -693,8 +872,8 @@ The choice is the operator's; it does not block this spec, and nothing here fore
 | D6 | Redis | Not deployed — authentik removed it in 2025.10 |
 | D7 | Cross-namespace secret replication | Reflector `10.0.46`, promoted from bootstrap §9, scoped to TLS material only |
 | D8 | Certificate placement | Moved to namespace `certificates`; reflected into `apps` and `auth`; free only because zero Ingresses exist today |
-| D9 | Database backup | `barmanObjectStore` → MinIO `titan-k8s-pg`, WAL archiving continuous, `ScheduledBackup` daily, `retentionPolicy: 30d` |
-| D10 | Backup credential | New MinIO access key scoped to that bucket; not the host's `titan/minio_env` |
+| D9 | Database backup | `barmanObjectStore` → AWS S3 `k8s-titan-pg-562256260016-eu-west-1-an` in `eu-west-1`, WAL archiving continuous, `ScheduledBackup` daily, `retentionPolicy: 30d`, no `endpointURL` |
+| D10 | Backup credential | Dedicated IAM user `k8s-titan-pg-backups` whose policy names only that bucket; not the host's `titan/minio_env`. Bucket policy must whitelist `arn:aws:iam::562256260016:root` — a principal-scoped deny without root in the list locks the account owner out of the bucket permanently (§7.3) |
 | D11 | Restore | Never in-place in CNPG; a scratch `Cluster` via `bootstrap.recovery`, scripted in `scripts/restore-drill.sh`, run once as part of done |
 | D12 | Storage | Keep `local-path`; treat the PVC size as documentation; the real boundary is `vg0/pvc` (240 G ext4, online-growable via LVM) |
 | D13 | Prune protection | `kustomize.toolkit.fluxcd.io/prune: disabled` on the `Cluster` — deleting the YAML must not delete the database |
