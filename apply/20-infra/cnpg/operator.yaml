@@ -1,0 +1,48 @@
+# CloudNativePG operator. Chosen over a hand-written StatefulSet because the databases
+# must be declarative: a Database and a DatabaseRole are manifests a reviewer can read,
+# where 'kubectl exec psql -c CREATE ROLE' is not (spec 4 A4/A5).
+#
+# CRDs ship as chart TEMPLATES (templates/crds/crds.yaml), not in a crds/ directory, so
+# Flux manages them as ordinary resources and `install.crds: CreateReplace` - which is
+# what the cert-manager release above needs - would be a no-op here. They carry
+# helm.sh/resource-policy: keep, so an uninstall does not drop the CRDs and orphan every
+# Cluster in the tree.
+#
+# The webhook is failurePolicy: Fail. While the operator is down, edits to any cnpg CR
+# are rejected cluster-wide. That is correct behaviour, but it means an operator outage
+# is also 'cannot change a database password', not only 'no new databases'.
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: OCIRepository
+metadata:
+  name: cloudnative-pg
+  namespace: cnpg-system
+spec:
+  interval: 5m
+  url: oci://ghcr.io/cloudnative-pg/charts/cloudnative-pg
+  layerSelector:
+    mediaType: "application/vnd.cncf.helm.chart.content.v1.tar+gzip"
+    operation: copy
+  ref:
+    semver: "0.29.1"
+---
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: cloudnative-pg
+  namespace: cnpg-system
+spec:
+  releaseName: cloudnative-pg
+  chartRef:
+    kind: OCIRepository
+    name: cloudnative-pg
+  interval: 30m
+  driftDetection:
+    mode: enabled
+  install:
+    strategy:
+      name: RetryOnFailure
+      retryInterval: 5m
+  upgrade:
+    strategy:
+      name: RetryOnFailure
+      retryInterval: 5m
