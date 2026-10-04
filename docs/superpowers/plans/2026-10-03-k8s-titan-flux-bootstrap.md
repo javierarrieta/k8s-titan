@@ -197,6 +197,16 @@ Expected: `FAIL: no directory under apply/ declares a kustomization.yaml`, exit 
 
 - [ ] **Step 3: Write the namespaces**
 
+> **SUPERSEDED — do not execute this snippet as written.** Two `Namespace` documents, where
+> the shipped `apply/00-bootstrap/namespaces.yaml` declares six: `apps`, `auth`,
+> `cert-manager`, `certificates`, `cnpg-system` and `databases` (`k8s-reader` is the
+> exception — its own manifest under `20-infra` creates it). This step writes the file whole,
+> so re-executing it drops four namespaces from the tree, and the `flux-system`
+> Kustomization owns `./apply/00-bootstrap` with `prune: true`: it prunes them, and deleting
+> a `Namespace` cascade-deletes everything inside it — the wildcard `Certificate` in
+> `certificates` and the Postgres `Cluster` in `databases` among them. The shipped
+> `namespaces.yaml` is the authority.
+
 `apply/00-bootstrap/namespaces.yaml`:
 
 ```yaml
@@ -578,6 +588,20 @@ as one chain so no plaintext crosses an interactive step."
 
 ### Task 5: cert-manager and the OVH DNS-01 webhook
 
+> **SUPERSEDED in its stage contents — do not execute as written.** `20-infra` is no longer
+> cert-manager alone. The shipped `apply/20-infra/kustomization.yaml` lists **nine**
+> resources, not the two **Step 4** writes: it also carries `reflector/reflector.yaml`,
+> `cnpg/operator.yaml`, and the five `k8s-reader/*` objects that are the read-only agent
+> identity (`docs/agent-read-access.md`). Step 4 writes that file whole, so re-executing it
+> replaces nine with two, and the `infra` stage runs with `prune: true` — Flux then
+> garbage-collects the two operators' `HelmRelease`s, and helm-controller uninstalls a
+> pruned release, so Reflector and the CloudNativePG operator leave the cluster with it.
+> The `Cluster` in `databases` keeps running but stops being reconciled, and `titan-tls`
+> stops reaching `auth`. **Step 5**'s expectations are stale for the same reason: the
+> HelmRelease count is `4` (cert-manager, the OVH webhook, Reflector, CloudNativePG), not
+> `2`, and "four directories build" is now five. The shipped `20-infra/kustomization.yaml` is
+> the authority.
+
 **Files:**
 - Create: `apply/20-infra/kustomization.yaml`
 - Create: `apply/20-infra/cert-manager/cert-manager.yaml`
@@ -762,11 +786,15 @@ because two webhooks share its namespace."
 > lives in `apps`: it moved to namespace `certificates`, and it *does* ship a
 > `secretTemplate` carrying Reflector's reflection annotations for `apps` and `auth`,
 > because Reflector is installed now (spec §7 as amended, D10 superseded, and
-> `2026-10-03-titan-authentik-cnpg-design.md` §5.3). Re-running the steps below would
-> create a second `Certificate` in `apps` and ship one with no allow-list, so nothing
-> reflects into `auth`. The supersession covers the **Interfaces** line below, the
-> embedded manifest's `namespace: apps`, **Step 4**'s `grep -cE 'namespace: apps'`, and
-> **Step 5**'s commit message, which argues for the `apps` placement. The shipped
+> `2026-10-03-titan-authentik-cnpg-design.md` §5.3). **Step 2** writes the very path the
+> shipped manifest now occupies, so re-running these steps does not add a second
+> `Certificate` — it overwrites that file and **undoes the move**: one `Certificate` back in
+> `apps` with no allow-list, the `certificates` one pruned by that stage's `prune: true`,
+> and `auth`'s reflected `titan-tls` left with no source to refresh. The supersession covers
+> both stale **Interfaces** bullets below — Consumes and Produces — **Step 2**'s prose
+> ("No `secretTemplate`: … the Reflector operator, which titan does not run"), the embedded
+> manifest's `namespace: apps`, **Step 4**'s `grep -cE 'namespace: apps'`, and **Step 5**'s
+> commit message, which argues for the `apps` placement. The shipped
 > `apply/40-certificates/titan-wildcard.yaml` is the authority; the reasoning below is
 > left as written because it is the reasoning the reversal argues against.
 
@@ -842,6 +870,21 @@ cluster-wide operator in search of a reason."
 
 ### Task 7: The apps stage placeholder
 
+> **SUPERSEDED in its premise — do not execute as written.** Something runs on titan now.
+> The shipped `apply/50-apps/kustomization.yaml` holds one resource, `databases/postgres.yaml`
+> — the shared Postgres `Cluster` in namespace `databases`, the identity database of every
+> workload that will ever point at it. **Step 2** writes `resources: []` over that file, which
+> drops the `Cluster` from the stage's build, and the `apps` stage runs with `prune: true`, so
+> the `Cluster` becomes a prune candidate — and **pruning it deletes the database**, because
+> CNPG deletes a `Cluster`'s PVCs with it (`2026-10-03-titan-authentik-cnpg-design.md` §6.3,
+> D13). One annotation stands between this task and that outcome:
+> `kustomize.toolkit.fluxcd.io/prune: disabled` on the shipped `Cluster`. With it intact the
+> `Cluster` is orphaned instead — left alive but out of Flux's inventory, so drift stops being
+> reconciled — and it is the only thing in git between re-executing this task and losing the
+> database. **Step 3**'s `0` lines of output is stale with it — the build emits the `Cluster`
+> — as is **Step 4**'s commit message ("Empty resources list …"), which argues for a
+> placeholder that is no longer there.
+
 **Files:**
 - Create: `apply/50-apps/kustomization.yaml`
 - Create: `apply/50-apps/.gitkeep`
@@ -914,12 +957,12 @@ first workload exists."
 > **Also superseded by the authentik/CloudNativePG slice — recorded, not rewritten.** This
 > banner's scope is the whole file, not Task 8 alone: the README and AGENTS.md text below
 > predates the certificate move, and so do the two **Global Constraints** bullets on the
-> `Certificate`'s namespace and the namespace list, **Task 6** — the task that creates
-> `titan-wildcard.yaml` — and **Task 2**'s `namespaces.yaml` snippet, which lists two
-> namespaces where the shipped file declares six. The Global Constraints bullets and Task 6
-> now carry their own markers, because a worker executes this plan one task at a time and
-> would never reach this paragraph; Task 2's snippet is named here rather than in its own
-> banner, which covers the Makefile alone. What moved:
+> `Certificate`'s namespace and the namespace list, **Task 2**'s `namespaces.yaml` snippet
+> (two namespaces where the shipped file declares six), **Task 5**'s `20-infra` kustomization
+> and Step 5 expectations, **Task 6** — the task that creates `titan-wildcard.yaml` — and
+> **Task 7**, which empties the stage that now holds the database. Every one of those sites
+> carries its own marker, because a worker executes this plan one task at a time and would
+> never reach this paragraph. What moved:
 > `titan-wildcard` now lives in namespace `certificates` rather than `apps` and carries
 > Reflector's reflection annotations under `secretTemplate`; `20-infra` also holds
 > Reflector and the CloudNativePG operator; `50-apps` holds the shared Postgres `Cluster` in
@@ -928,7 +971,9 @@ first workload exists."
 > and were reversed later, so they stay as written and the reversal is recorded where
 > reversals belong: in the shipped `AGENTS.md`, `README.md`, the bootstrap spec's §7/§9/D10,
 > and `docs/superpowers/specs/2026-10-03-titan-authentik-cnpg-design.md` §5.3. Those are
-> authoritative; re-executing Task 6 or Task 8 verbatim would undo the move.
+> authoritative; re-executing Task 5, 6, 7 or 8 verbatim would undo part of the move — Task 7
+> most destructively of all, because it writes an empty `50-apps` stage over the one holding
+> the `Cluster`.
 
 **Files:**
 - Create: `README.md`
