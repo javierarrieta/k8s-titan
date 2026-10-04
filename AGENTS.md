@@ -39,8 +39,10 @@ rotation are in `docs/agent-read-access.md`.
   `docs/ovh-dns-credential.md` for the staging flow (`sops --encrypt --in-place` on a
   git-ignored name under `apply/10-secrets/`), which exists because sops picks its
   recipients from the file's own path. Never write a plaintext Secret manifest anywhere
-  else. `make secrets-placement` enforces both halves: no `kind: Secret` outside
-  `apply/10-secrets/`, and every file there actually carrying `ENC[`.
+  else. `make secrets-placement` enforces three halves: no `kind: Secret` outside
+  `apply/10-secrets/`, every file there actually carrying `ENC[`, and every file there
+  actually listed in that directory's `kustomization.yaml` — an unlisted Secret builds
+  fine and is silently never applied.
 - The cluster key is `titan-k8s`, not the titan host key. Do not "simplify" the two
   into one: the separation is what caps a pod compromise at titan's own secrets.
 - This repo is public. No credentials, and no concrete public IPv4 — write

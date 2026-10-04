@@ -12,9 +12,10 @@ spec:
   # the END, not seconds at the front. So the familiar 5-field "0 3 * * *" is not 03:00
   # daily - it is second 0, minute 3, every hour, every day, and it fires 24 base backups
   # a day off the single primary. Verified by running v1.2.0: it yields 09:03, 10:03,
-  # 11:03. Nothing catches this on the way in - the CRD puts no pattern on spec.schedule,
-  # the admission webhook only warns, and Flux discards admission warnings - so it fails
-  # silently, which is the exact failure class this whole plan exists to close.
+  # 11:03. Nothing stops this on the way in - the CRD puts no pattern on spec.schedule,
+  # and the admission webhook only warns, so the object is admitted, the Flux reconcile
+  # goes green, and the warning lands in the kustomize-controller log nobody tails. That
+  # is the exact failure class this whole plan exists to close.
   schedule: "0 0 3 * * *"
   method: barmanObjectStore
   # 'cluster', NOT 'self'. Owner references give cascading deletion, so the value decides

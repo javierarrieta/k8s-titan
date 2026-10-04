@@ -390,7 +390,8 @@ The schedule was `"0 3 * * *"`. CNPG pins `robfig/cron` v1.2.0, whose default pa
 `Second|Minute|Hour|Dom|Month|DowOptional` — the optional field is the day of week at the *end*, not
 seconds at the front. Five fields therefore parse as second 0, minute 3, every hour: 24 base backups a
 day, not one at 03:00. Verified by running v1.2.0. The CRD sets no pattern on `spec.schedule` and the
-admission webhook only warns, and Flux discards admission warnings, so nothing catches it.
+admission webhook only warns — the object is admitted, the Flux reconcile stays green, and the
+warning reaches only the kustomize-controller log — so nothing stops it.
 
 `backupOwnerReference: self` was justified as keeping pruning from taking the backups. Owner
 references cascade, so `self` is precisely the value under which deleting the `ScheduledBackup`

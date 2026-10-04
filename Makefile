@@ -105,6 +105,12 @@ update-keys: secrets-present
 # controller fills those in-cluster, so nothing secret is in git. The exemption is
 # narrow on purpose: add a data: or stringData: block to such a file, or use any
 # other Secret type outside apply/10-secrets, and the gate fails again.
+#
+# Git-ignored files are skipped, for the same reason leak-check skips them: the sops
+# staging flow in docs/ovh-dns-credential.md deliberately writes
+# apply/10-secrets/.staging.*.yaml, and demanding that a file which is about to be
+# renamed into its real name already be listed in a kustomization would fail the
+# documented encrypt-then-move window instead of catching anything.
 secrets-placement: secrets-present
 	@fail=0; \
 	stray=""; \
@@ -115,9 +121,10 @@ secrets-placement: secrets-present
 	done; \
 	if [ -n "$$stray" ]; then echo "FAIL: Secret manifest outside apply/10-secrets:"; for s in $$stray; do echo "  $$s"; done; fail=1; fi; \
 	for f in $$($(SECRET_FIND)); do \
+	  if git check-ignore -q "$$f" 2>/dev/null; then continue; fi; \
 	  if ! grep -q 'ENC\[' "$$f"; then echo "FAIL: $$f is not sops-encrypted (no ENC[)"; fail=1; fi; \
 	  base=$$(basename "$$f"); \
-	  if ! grep -qE "^  - *$$base$$" apply/10-secrets/kustomization.yaml; then \
+	  if ! grep -qE "^ *- *(\./)?$$base$$" apply/10-secrets/kustomization.yaml; then \
 	    echo "FAIL: $$f is not listed in apply/10-secrets/kustomization.yaml - it builds fine and is silently never applied"; fail=1; fi; \
 	done; \
 	if [ "$$fail" -eq 0 ]; then echo "secrets-placement: no Secret outside apply/10-secrets, every secret encrypted and listed"; fi; \
