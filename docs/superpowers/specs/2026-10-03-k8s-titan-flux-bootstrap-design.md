@@ -173,7 +173,8 @@ k8s-titan/
 ├── docs/ovh-dns-credential.md          # issuing + rotating titan's OVH API application
 ├── docs/agent-read-access.md           # minting + verifying + rotating the read-only identity
 ├── docs/superpowers/specs/             # this file, and the authentik/CNPG spec that amends it
-├── docs/superpowers/plans/             # the implementation plan, with supersession banners
+├── docs/superpowers/plans/             # the bootstrap plan, with its supersession
+│                                       #   banners, and the authentik/CNPG plan
 └── apply/
     ├── 00-bootstrap/
     │   ├── kustomization.yaml              # namespaces + stages + flux-system/
@@ -446,9 +447,9 @@ why titan's certificate was simply placed in `apps` instead. With Reflector inst
 allowed and auto-reflected namespaces. They have to sit under `secretTemplate` and not on
 the `Certificate`'s own `metadata.annotations`: cert-manager copies the template's
 annotations onto the `Secret` it produces, and the `Secret` is the object Reflector
-reads. Annotations on the `Certificate` itself are inert while the `Certificate` still
-reports `Ready`, which is why the placement is written down rather than left to be
-rediscovered.
+reads. Annotations on the `Certificate` itself never reach the `Secret`, and the
+`Certificate` reads `Ready` either way, so a misplacement is invisible in status — which is
+why the placement is written down rather than left to be rediscovered.
 
 ---
 

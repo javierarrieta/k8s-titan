@@ -15,8 +15,8 @@
 - Flux **v2.9.6**, components `source-controller,kustomize-controller,helm-controller,notification-controller` (spec §6.2).
 - cert-manager **1.21.1** from `oci://quay.io/jetstack/charts/cert-manager`; `cert-manager-webhook-ovh` **0.6.0** from `https://aureq.github.io/cert-manager-webhook-ovh/`.
 - ACME `groupName` is exactly `acme.titan.arrieta.eu`. ClusterIssuers are exactly `le-prod-titan` and `le-staging-titan`. Registration email `javier@techdelivery.es`. `ovhEndpointName: ovh-eu`. `cnameStrategy: None`.
-- Certificate is exactly `titan-wildcard` in namespace `apps`, Secret `titan-tls`, DNS names `titan.arrieta.eu` and `*.titan.arrieta.eu`.
-- Namespaces created by this repo: `apps`, `cert-manager`. No `certificates` namespace (spec §7).
+- Certificate is exactly `titan-wildcard` in namespace `apps`, Secret `titan-tls`, DNS names `titan.arrieta.eu` and `*.titan.arrieta.eu`. **SUPERSEDED on the namespace: `titan-wildcard` now lives in `certificates`, and `titan-tls` reaches `apps` and `auth` by reflection — see the marker at Task 6 and the banner at Task 8.**
+- Namespaces created by this repo: `apps`, `cert-manager`. No `certificates` namespace (spec §7). **SUPERSEDED: `namespaces.yaml` now declares six — `apps`, `auth`, `cert-manager`, `certificates`, `cnpg-system`, `databases` — and `k8s-reader` is created by its own manifest under `20-infra`; see the banner at Task 8.**
 - Every stage directory carries a `kustomization.yaml`, and **no** `kustomization.yaml` ever sets a top-level `namespace:` transformer — these trees span multiple namespaces and that field would rewrite them all.
 - Stage `interval: 10m0s`, `prune: true`; `GitRepository` `interval: 1m0s`; `infra` additionally `wait: true` + `timeout: 10m0s`.
 - sops `encrypted_regex` is exactly `^(data|stringData)$`; the only cluster-held key is the `titan-k8s` keypair.
@@ -758,6 +758,18 @@ because two webhooks share its namespace."
 
 ### Task 6: The wildcard certificate
 
+> **SUPERSEDED in its placement — do not execute as written.** `titan-wildcard` no longer
+> lives in `apps`: it moved to namespace `certificates`, and it *does* ship a
+> `secretTemplate` carrying Reflector's reflection annotations for `apps` and `auth`,
+> because Reflector is installed now (spec §7 as amended, D10 superseded, and
+> `2026-10-03-titan-authentik-cnpg-design.md` §5.3). Re-running the steps below would
+> create a second `Certificate` in `apps` and ship one with no allow-list, so nothing
+> reflects into `auth`. The supersession covers the **Interfaces** line below, the
+> embedded manifest's `namespace: apps`, **Step 4**'s `grep -cE 'namespace: apps'`, and
+> **Step 5**'s commit message, which argues for the `apps` placement. The shipped
+> `apply/40-certificates/titan-wildcard.yaml` is the authority; the reasoning below is
+> left as written because it is the reasoning the reversal argues against.
+
 **Files:**
 - Create: `apply/40-certificates/kustomization.yaml`
 - Create: `apply/40-certificates/titan-wildcard.yaml`
@@ -899,17 +911,24 @@ first workload exists."
 > below so re-executing this task cannot reintroduce them; where this task and the
 > shipped file still differ, the shipped file is authoritative.
 >
-> **Also superseded by the authentik/CloudNativePG slice — recorded, not rewritten.** The
-> README and AGENTS.md text below predates the certificate move: `titan-wildcard` now
-> lives in namespace `certificates` rather than `apps` and carries Reflector's reflection
-> annotations under `secretTemplate`; `20-infra` also holds Reflector and the
-> CloudNativePG operator; `50-apps` holds the shared Postgres `Cluster` in namespace
-> `databases`; and `make check-ci` gained the `release-secrets` gate. Unlike the four
-> errors above, which were wrong the day they were written, these were true when shipped
+> **Also superseded by the authentik/CloudNativePG slice — recorded, not rewritten.** This
+> banner's scope is the whole file, not Task 8 alone: the README and AGENTS.md text below
+> predates the certificate move, and so do the two **Global Constraints** bullets on the
+> `Certificate`'s namespace and the namespace list, **Task 6** — the task that creates
+> `titan-wildcard.yaml` — and **Task 2**'s `namespaces.yaml` snippet, which lists two
+> namespaces where the shipped file declares six. The Global Constraints bullets and Task 6
+> now carry their own markers, because a worker executes this plan one task at a time and
+> would never reach this paragraph; Task 2's snippet is named here rather than in its own
+> banner, which covers the Makefile alone. What moved:
+> `titan-wildcard` now lives in namespace `certificates` rather than `apps` and carries
+> Reflector's reflection annotations under `secretTemplate`; `20-infra` also holds
+> Reflector and the CloudNativePG operator; `50-apps` holds the shared Postgres `Cluster` in
+> namespace `databases`; and `make check-ci` gained the `release-secrets` gate. Unlike the
+> four errors above, which were wrong the day they were written, these were true when shipped
 > and were reversed later, so they stay as written and the reversal is recorded where
 > reversals belong: in the shipped `AGENTS.md`, `README.md`, the bootstrap spec's §7/§9/D10,
 > and `docs/superpowers/specs/2026-10-03-titan-authentik-cnpg-design.md` §5.3. Those are
-> authoritative; re-executing this task verbatim would undo the move.
+> authoritative; re-executing Task 6 or Task 8 verbatim would undo the move.
 
 **Files:**
 - Create: `README.md`

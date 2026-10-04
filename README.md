@@ -9,13 +9,15 @@ reachable only over WireGuard, and ingress is k3s' bundled Traefik + ServiceLB o
 80/443.
 
 Namespaces are declared in one place — `apply/00-bootstrap/namespaces.yaml` — rather
-than inside the charts that need them: `cert-manager` (cert-manager, its OVH DNS-01
-webhook, the OVH credentials), `certificates` (the wildcard `Certificate`, and therefore
-the source of `titan-tls`), `apps` (workloads, plus Reflector's copy of `titan-tls`),
-`databases` (the shared Postgres `Cluster`), `auth` (for the identity provider, which is
-not in this tree yet), `cnpg-system` (the CloudNativePG operator). Reflector mirrors
-`titan-tls` into `apps` and `auth` and nothing else; the allow-list lives on the
-`Certificate`.
+than inside the charts that need them (the one exception is `k8s-reader`, created by its
+own manifest under `20-infra` because its identity and its namespace are one thing; see
+[`docs/agent-read-access.md`](docs/agent-read-access.md)): `cert-manager` (cert-manager,
+its OVH DNS-01 webhook, the OVH credentials), `certificates` (the wildcard `Certificate`,
+and therefore the source of `titan-tls`), `apps` (workloads, plus Reflector's copy of
+`titan-tls`), `databases` (the shared Postgres `Cluster`), `auth` (for the identity
+provider, which is not in this tree yet), `cnpg-system` (the CloudNativePG operator).
+Reflector mirrors `titan-tls` into `apps` and `auth` and nothing else; the allow-list lives
+on the `Certificate`.
 
 ## Before the first bootstrap
 
@@ -118,7 +120,8 @@ if you hand-apply something to debug, delete it yourself — Flux will not do it
                           #   + placement + release-secrets
     make check-ci         # the same without `validate` (it needs the age key): CI's set
     make leak-check       # credential/public-IPv4 shapes: the pending diff AND the whole tree
-    make release-secrets  # every Secret a HelmRelease reaches for is in apply/10-secrets
+    make release-secrets  # every Secret a HelmRelease reaches for is in
+                          #   apply/10-secrets, with a matching namespace
     make update-keys      # after rotating the age key group
     make secrets-list
 
@@ -137,7 +140,8 @@ that points at the change you are about to publish.
 
 PV restic backups, monitoring, external-dns, and tuning of the bundled Traefik — which
 k3s owns and re-applies on restart, so its values are set from `nixos-configurations`,
-not from this repo. Each has its trigger recorded in the spec's deferred table.
+not from this repo. Each has its trigger recorded in the bootstrap spec's deferred table
+(§9).
 
 Reflector is no longer on that list: it landed with the authentik/CloudNativePG slice,
 which also moved the `Certificate` into `certificates`. What that slice has *not* landed
