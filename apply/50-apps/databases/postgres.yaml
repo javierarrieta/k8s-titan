@@ -1,0 +1,34 @@
+# The one Postgres every titan workload shares. One instance on one node is the normal
+# shape, not a compromise: there is no second node to place a replica on, and any
+# minSyncReplicas above zero would be unsatisfiable (spec 6.2).
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: postgres
+  namespace: databases
+  annotations:
+    # THE ONE ANNOTATION THAT MATTERS. The apps stage runs with prune: true, so without
+    # this, deleting postgres.yaml from git - a bad rebase, a mis-scoped revert, a git rm
+    # during a reorganisation - deletes the Cluster, and CNPG deletes a Cluster's PVCs with
+    # it. That is the identity database of every service that will ever point at it
+    # (spec 6.3). Deleting it must require a deliberate `kubectl delete cluster postgres`.
+    kustomize.toolkit.fluxcd.io/prune: disabled
+spec:
+  instances: 1
+  # Pinned explicitly so a later operator bump cannot silently move the Postgres major
+  # version. 18.6 verified against GHCR: manifest fetch returns 200 for 18.6 and 404 for
+  # 18.5, 18.7 and 99.9. Operator 1.30.x supports Postgres 14-18.
+  imageName: ghcr.io/cloudnative-pg/postgresql:18.6
+  storage:
+    # A label, not a limit. local-path on k3s ignores the requested size; the real ceiling
+    # is the 240G vg0/pvc ext4 mount, and its reclaimPolicy is Delete (spec 6.4). Sizing
+    # here documents intent and nothing more.
+    size: 10Gi
+    storageClass: local-path
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi

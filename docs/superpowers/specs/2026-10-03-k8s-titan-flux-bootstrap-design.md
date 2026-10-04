@@ -167,11 +167,14 @@ k8s-titan/
 ├── AGENTS.md                           # agent-facing repo conventions
 ├── Makefile                            # check / check-ci / leak-check / kustomize-check /
 │                                       #   validate / update-keys / secrets-present /
-│                                       #   secrets-placement / scan / secrets-list
+│                                       #   secrets-placement / release-secrets / scan /
+│                                       #   secrets-list
 ├── README.md                           # the three-command runbook + follow-ups
 ├── docs/ovh-dns-credential.md          # issuing + rotating titan's OVH API application
-├── docs/superpowers/specs/             # this file
-├── docs/superpowers/plans/             # the implementation plan, with supersession banners
+├── docs/agent-read-access.md           # minting + verifying + rotating the read-only identity
+├── docs/superpowers/specs/             # this file, and the authentik/CNPG spec that amends it
+├── docs/superpowers/plans/             # the bootstrap plan, with its supersession
+│                                       #   banners, and the authentik/CNPG plan
 └── apply/
     ├── 00-bootstrap/
     │   ├── kustomization.yaml              # namespaces + stages + flux-system/
@@ -179,7 +182,8 @@ k8s-titan/
     │   │   ├── kustomization.yaml          # gotk-components + gotk-sync
     │   │   ├── gotk-components.yaml        # flux install output, DO NOT EDIT
     │   │   └── gotk-sync.yaml              # GitRepository + flux-system Kustomization
-    │   ├── namespaces.yaml                 # apps, cert-manager
+    │   ├── namespaces.yaml                 # apps, auth, cert-manager, certificates,
+    │   │                                   #   cnpg-system, databases
     │   ├── stage-secrets.yaml
     │   ├── stage-infra.yaml
     │   ├── stage-certificates.yaml
@@ -189,21 +193,35 @@ k8s-titan/
     │   └── ovh-domain-secrets.yaml         # sops-encrypted, namespace: cert-manager
     ├── 20-infra/
     │   ├── kustomization.yaml
-    │   └── cert-manager/
-    │       ├── cert-manager.yaml           # OCIRepository + HelmRelease
-    │       └── ovh-webhook.yaml            # HelmRepository + HelmRelease + ClusterIssuers
+    │   ├── cert-manager/
+    │   │   ├── cert-manager.yaml           # OCIRepository + HelmRelease
+    │   │   └── ovh-webhook.yaml            # HelmRepository + HelmRelease + ClusterIssuers
+    │   ├── k8s-reader/                     # read-only investigation identity, its own ns
+    │   ├── reflector/
+    │   │   └── reflector.yaml              # HelmRepository + HelmRelease, ns apps
+    │   └── cnpg/
+    │       └── operator.yaml               # OCIRepository + HelmRelease, ns cnpg-system
     ├── 40-certificates/
     │   ├── kustomization.yaml
-    │   └── titan-wildcard.yaml             # Certificate in ns/apps → Secret titan-tls
+    │   └── titan-wildcard.yaml             # Certificate in ns/certificates → Secret
+    │                                       #   titan-tls, + Reflector's reflection
+    │                                       #   annotations under secretTemplate (§7)
     └── 50-apps/
-        ├── kustomization.yaml              # empty resources until the first workload
-        └── .gitkeep
+        ├── kustomization.yaml
+        ├── .gitkeep
+        └── databases/
+            └── postgres.yaml               # the shared CNPG Cluster, ns databases
 ```
 
 Namespaces are created in `00-bootstrap` rather than inside the charts that need them,
-matching both siblings: `apps` and `cert-manager`. There is no `certificates`
-namespace — see §7, which places the `Certificate` in `apps` so its Secret lands where
-the Ingress can consume it.
+matching both siblings. `namespaces.yaml` now declares six — `apps`, `auth`,
+`cert-manager`, `certificates`, `cnpg-system`, `databases` — because the
+authentik/CNPG spec (`2026-10-03-titan-authentik-cnpg-design.md` §5.1) added four of
+them. That slice also
+reversed this section's original "there is no `certificates` namespace": §7 and D10
+carry the supersession and the reason. `k8s-reader` is the one namespace
+`00-bootstrap` does not create — its own manifest under `20-infra` does, because the
+identity and the namespace are a single object.
 
 No `rbac.yaml` ships under `20-infra`: the webhook chart generates the Role it needs,
 and §7 explains why the sibling's hand-written Role is not ported.
@@ -376,15 +394,33 @@ Ported from `k8s-techdelivery/apply/20-infra/cert-manager/` with titan values.
 | `groupName` | `acme.titan.arrieta.eu` — **must differ from techdelivery's `acme.techdelivery.es`**; see the APIService note below |
 | ClusterIssuers | `le-prod-titan` (real LE) + `le-staging-titan` (staging), `cnameStrategy: None`, `ovhEndpointName: ovh-eu`, email `javier@techdelivery.es`, creds from `ovh-domain-secrets` |
 | RBAC | None hand-written — the chart's own `Role <release>:secret-reader` already names `ovh-domain-secrets` from the issuer refs. techdelivery's extra Role exists only because two webhooks share its `cert-manager` namespace. |
-| Certificate | `titan-wildcard` in namespace **`apps`** → Secret `titan-tls`; DNS names `titan.arrieta.eu`, `*.titan.arrieta.eu`; issuer `le-prod-titan` |
+| Certificate | `titan-wildcard` in namespace **`certificates`** → Secret `titan-tls`, reflected into `apps` and `auth` by Reflector; DNS names `titan.arrieta.eu`, `*.titan.arrieta.eu`; issuer `le-prod-titan` |
 
-The `Certificate` lives in `apps`, not a dedicated `certificates` namespace, because a
+**Superseded on this point by
+`2026-10-03-titan-authentik-cnpg-design.md` §5.3 ("The certificate move, and why now is
+the only free moment"). The reasoning that put the `Certificate` in `apps` is kept below,
+in the past tense, because it was correct for the cluster titan had then; what changed is
+the number of consuming namespaces, not the logic.**
+
+The `Certificate` lived in `apps`, not a dedicated `certificates` namespace, because a
 `Certificate` can only produce its Secret in its **own** namespace and the Ingresses
-that consume `titan-tls` live in `apps`. `k8s-techdelivery` solves this with a
+that were to consume `titan-tls` lived in `apps`. `k8s-techdelivery` solves this with a
 `certificates` namespace plus the **Reflector** operator mirroring secrets into
-consumers — a second cluster-wide component, unjustified while titan has one
-certificate and one consuming namespace. Reflector is deferred (§9) and gets added the
-day a second namespace needs the same cert.
+consumers — a second cluster-wide component, unjustified while titan had one
+certificate and one consuming namespace.
+
+That condition expired: `auth` is now a declared second consumer of `titan-tls` — it sits
+in the `Certificate`'s reflection allow-list, and the identity provider designed for it
+(the authentik spec's §8) is the second namespace §9 was waiting for. So Reflector is installed
+(`apply/20-infra/reflector/reflector.yaml`) and the `Certificate` moved to
+`certificates` in the same change rather than half-promoted. Moving it is free **only**
+because no Ingress consumes `titan-tls` yet: Flux creates the new object and prunes the
+old, deleting the old `Certificate` deletes `apps/titan-tls`, and Reflector repopulates
+it from the new source inside the same reconcile. The identical move performed after ten
+services sit behind that Secret is a live TLS cutover with a real breakage window, which
+is why the moment was taken when it was cheap. Reflector's scope is deliberately narrow —
+it replicates TLS material and nothing else, so it cannot quietly become a general
+secret-sync path.
 
 The chart's own RBAC is sufficient here: templating `cert-manager-webhook-ovh` `0.6.0`
 with titan's values confirms it creates `Role <release>:secret-reader` with
@@ -400,10 +436,20 @@ chart creates a cluster-scoped `APIService` named `v1alpha1.<groupName>`, so reu
 Staging issuer ships alongside production deliberately: the first DNS-01 attempt
 against a new zone is the one worth burning rate limits on.
 
-No `secretTemplate` ships with titan's `Certificate`. techdelivery's certificates carry
-`reflector.v1.k8s.emberstack.com/*` annotations, which exist purely to drive the
-Reflector operator — meaningless on a cluster without it, and the reason titan's
-certificate is simply placed in `apps` instead.
+**Superseded: a `secretTemplate` now ships with titan's `Certificate`, and it is the
+mechanism, not an oversight.** Same authority as above
+(`2026-10-03-titan-authentik-cnpg-design.md` §5.3).
+
+The original reasoning was that `reflector.v1.k8s.emberstack.com/*` annotations exist
+purely to drive the Reflector operator — meaningless on a cluster without it, and part of
+why titan's certificate was simply placed in `apps` instead. With Reflector installed,
+`titan-wildcard` carries exactly those annotations, naming `apps` and `auth` as the
+allowed and auto-reflected namespaces. They have to sit under `secretTemplate` and not on
+the `Certificate`'s own `metadata.annotations`: cert-manager copies the template's
+annotations onto the `Secret` it produces, and the `Secret` is the object Reflector
+reads. Annotations on the `Certificate` itself never reach the `Secret`, and the
+`Certificate` reads `Ready` either way, so a misplacement is invisible in status — which is
+why the placement is written down rather than left to be rediscovered.
 
 ---
 
@@ -427,8 +473,12 @@ No cluster access is needed for most of it, which matters because 6443 is mesh-o
 4. `flux check --pre`.
 5. `kubectl get kustomization -A` — all five `Ready=True`.
 6. `kubectl -n cert-manager get helmrelease` — both `Ready=True`;
-   `kubectl -n cert-manager get clusterissuer` — both `Ready=True`.
-7. `kubectl -n apps get certificate titan-wildcard` → `Ready=True`, and
+   `kubectl -n cert-manager get clusterissuer` — both `Ready=True`. `kubectl get
+   helmrelease -A` shows four in total: those two, Reflector in `apps`, and the
+   CloudNativePG operator in `cnpg-system`.
+7. `kubectl -n certificates get certificate titan-wildcard` → `Ready=True`, and
+   `kubectl get secret titan-tls -A` → the source in `certificates` plus Reflector's
+   copies in `apps` and `auth`, and
    `openssl s_client -connect <OVH_PUBLIC_IP>:443 -servername anything.titan.arrieta.eu`
    presents a Let's Encrypt chain.
 8. End-to-end: a throwaway Ingress on `whoami.titan.arrieta.eu` serves HTTPS with a real
@@ -441,15 +491,20 @@ No cluster access is needed for most of it, which matters because 6443 is mesh-o
 
 | Item | Why not now | Trigger |
 |---|---|---|
-| PV backups (restic CronJobs → MinIO `titan-pvc`) | Spec §13b's second stream; needs `backup-minio-secrets` and a `30-backup` stage with `prune: false` + `deletionPolicy: Orphan` | Before any workload with data lands on titan |
+| PV backups (restic CronJobs → MinIO `titan-pvc`) | Spec §13b's second stream; needs `backup-minio-secrets` and a `30-backup` stage with `prune: false` + `deletionPolicy: Orphan` | Before any workload with data lands on titan — **that trigger has fired and the override was taken consciously**: the Postgres `Cluster` (§6 of the authentik/CNPG spec) is data and it landed without this stream. The compensation the design names is that the database carries its own backup path; that path is specified but **not in this tree yet**, so until it lands the `Cluster`'s PVC has no backup at all and that is accepted risk, named. The restic stream itself stays deferred, with this trigger intact, until a workload with data that is not that database arrives |
 | Bundled Traefik tuning (dashboard/API off, 80/443 only) | k3s owns the bundled `HelmChart` in `kube-system` and re-applies it from `/var/lib/rancher/k3s/server/manifests/` on restart, so a Flux patch is reverted. The supported lever is `--helm-chart-configdir`, which is `nixos-configurations` territory. Exposure is already bounded by the OVH Edge Network Firewall (80/443/13491/51820) and the host's default-deny. | Any change to what the dashboard/API binds, or a finding from a scan |
-| Monitoring (kube-prometheus-stack, promtail, federation) | Not in scope B | titan holds something worth alerting on |
+| Monitoring (kube-prometheus-stack, promtail, federation) | Not in scope B, and titan runs no Prometheus at all | **Trigger met.** "Something worth alerting on" is now a real `Cluster` with a real PVC on a shared filesystem. The two metrics that matter are free space on `/var/lib/rancher/k3s/storage` — the actual ceiling for every PVC, because `local-path` ignores the size a PVC asks for — and WAL-archive failure, which becomes live the moment the `Cluster` gains the object-store backup path the authentik/CNPG spec designs for it and stops being live if it never does. Neither is covered today; both are accepted risk until this row is promoted |
 | `external-dns` | The wildcard A record already resolves every service name | A service needing a record outside the wildcard |
 | Making the repo private | Would force a `secretRef` on the `GitRepository` and a deploy key on a public-internet node — decision D3 | Any secret-shaped reason to lock it down |
-| Apps under `50-apps` | Nothing to deploy yet | First workload |
-| Reflector operator + a `certificates` namespace | One certificate, one consuming namespace today; the `Certificate` sits in `apps` (§7) | A second namespace needs `titan-tls` |
+| Apps under `50-apps` | The stage is no longer empty — it carries the shared Postgres `Cluster` (`50-apps/databases/`, namespace `databases`). What is still absent is anything user-facing; authentik is designed but not in this tree | The first workload after the database |
 | `GITGUARDIAN_API_KEY` repo secret | The scan skips with a visible `::warning::` until it is set (§0.1) | Whenever the operator locates/reissues an API key with `scan` scope |
 | `.gitguardian.yaml` ignore list | Nothing to ignore: the current engine does not flag SOPS ciphertext (§0.1) | First real false positive reported by CI |
+
+One row that used to sit here has been promoted and removed rather than quietly left
+beside the thing it became: **Reflector + a `certificates` namespace**, whose stated
+trigger — a second namespace needing `titan-tls` — fired, and whose move is argued in §7
+and D10. Deleting a row from this table before its trigger fires is the failure mode the
+table exists to prevent, which is why the removal is called out instead of left silent.
 
 ---
 
@@ -466,4 +521,4 @@ No cluster access is needed for most of it, which matters because 6443 is mesh-o
 | D7 | Stage objects | Committed to git, one file per stage, `wait: true` on `infra`. Fixes the siblings' gap. |
 | D8 | Layout | Mirrors `k8s-techdelivery` numbering (`00-bootstrap`, `10-secrets`, `20-infra`, `40-certificates`, `50-apps`), not `k8s-casa`. |
 | D9 | Secret scanning | GitGuardian CI action + `make scan`, no ignore list, scan gated on a per-repo API key that is not yet set. Casa's stale SOPS ignores are not copied. |
-| D10 | Certificate placement | `Certificate` in namespace `apps` so `titan-tls` lands where the Ingresses are; no `certificates` namespace and no Reflector in v1. |
+| D10 | Certificate placement | **Superseded** by D8 of `2026-10-03-titan-authentik-cnpg-design.md`: the `Certificate` now lives in namespace `certificates` and `titan-tls` is reflected into `apps` and `auth` by Reflector. The original choice — `Certificate` in `apps` so `titan-tls` lands where the Ingresses are, no `certificates` namespace, no Reflector in v1 — was right while titan had one certificate and one consuming namespace. §9's trigger fired when `auth` arrived, and §7 explains why moving while zero Ingresses consume the Secret is the only free moment to do it. |

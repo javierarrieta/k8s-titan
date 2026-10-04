@@ -1,0 +1,47 @@
+# Reflector replicates TLS material across namespaces and nothing else. The database
+# credential is authored instead (spec 4 A4); keeping Reflector's scope to certificates
+# is what stops it becoming a second secret-sync mechanism by accident.
+#
+# That scope is a convention, not a boundary. The chart's ClusterRole (rbac.enabled
+# defaults to true) grants `configmaps` and `secrets` with verbs ["*"], cluster-wide,
+# so the blast radius of a compromised Reflector is every Secret in the cluster, not
+# just the TLS ones. What holds it to TLS is review and the set of objects we choose
+# to annotate - never RBAC.
+#
+# This is bootstrap spec 9's deferred item, promoted on its own stated trigger ("a second
+# namespace needs titan-tls"), and promoted whole: the Certificate moves to `certificates`
+# in the same slice (spec 5.3), so `apps` stops being the cluster's certificate source.
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: HelmRepository
+metadata:
+  name: emberstack
+  namespace: apps
+spec:
+  interval: 1h
+  url: https://emberstack.github.io/helm-charts
+---
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: reflector
+  namespace: apps
+spec:
+  releaseName: reflector
+  chart:
+    spec:
+      chart: reflector
+      version: "10.0.46"
+      sourceRef:
+        kind: HelmRepository
+        name: emberstack
+  interval: 30m
+  driftDetection:
+    mode: enabled
+  install:
+    strategy:
+      name: RetryOnFailure
+      retryInterval: 5m
+  upgrade:
+    strategy:
+      name: RetryOnFailure
+      retryInterval: 5m

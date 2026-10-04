@@ -2,7 +2,7 @@ apiVersion: cert-manager.io/v1
 kind: Certificate
 metadata:
   name: titan-wildcard
-  namespace: apps
+  namespace: certificates
 spec:
   secretName: titan-tls
   issuerRef:
@@ -12,3 +12,9 @@ spec:
   dnsNames:
     - titan.arrieta.eu
     - "*.titan.arrieta.eu"
+  secretTemplate:
+    annotations:
+      reflector.v1.k8s.emberstack.com/reflection-allowed: "true"
+      reflector.v1.k8s.emberstack.com/reflection-allowed-namespaces: "apps,auth"
+      reflector.v1.k8s.emberstack.com/reflection-auto-enabled: "true"
+      reflector.v1.k8s.emberstack.com/reflection-auto-namespaces: "apps,auth"

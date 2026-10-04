@@ -1,11 +1,23 @@
 # k8s-titan
 
 Flux-managed manifests for `titan`, a single-node k3s cluster on OVH bare metal.
-Design: `docs/superpowers/specs/2026-10-03-k8s-titan-flux-bootstrap-design.md`
+Design: `docs/superpowers/specs/2026-10-03-k8s-titan-flux-bootstrap-design.md`, as
+amended by `docs/superpowers/specs/2026-10-03-titan-authentik-cnpg-design.md`
 
 The cluster is public-internet-facing. SSH is on 13491, the API server on 6443 is
 reachable only over WireGuard, and ingress is k3s' bundled Traefik + ServiceLB on
 80/443.
+
+Namespaces are declared in one place — `apply/00-bootstrap/namespaces.yaml` — rather
+than inside the charts that need them (the one exception is `k8s-reader`, created by its
+own manifest under `20-infra` because its identity and its namespace are one thing; see
+[`docs/agent-read-access.md`](docs/agent-read-access.md)): `cert-manager` (cert-manager,
+its OVH DNS-01 webhook, the OVH credentials), `certificates` (the wildcard `Certificate`,
+and therefore the source of `titan-tls`), `apps` (workloads, plus Reflector's copy of
+`titan-tls`), `databases` (the shared Postgres `Cluster`), `auth` (for the identity
+provider, which is not in this tree yet), `cnpg-system` (the CloudNativePG operator).
+Reflector mirrors `titan-tls` into `apps` and `auth` and nothing else; the allow-list lives
+on the `Certificate`.
 
 ## Before the first bootstrap
 
@@ -65,12 +77,21 @@ asserts no `secretRef` exists and would otherwise fail permanently.
 ## Verifying a bootstrap
 
     kubectl get kustomization -A          # all five Ready=True
-    kubectl -n cert-manager get helmrelease,clusterissuer
-    kubectl -n apps get certificate titan-wildcard   # Ready=True
+    kubectl get helmrelease -A            # four: cert-manager and its OVH webhook in
+                                          # cert-manager, reflector in apps,
+                                          # cloudnative-pg in cnpg-system
+    kubectl -n cert-manager get clusterissuer    # both Ready=True
+    kubectl -n certificates get certificate titan-wildcard   # Ready=True
+    kubectl get secret titan-tls -A       # certificates holds the source; apps and
+                                          # auth hold Reflector's copies
 
 Then prove the whole path with a throwaway Ingress on `whoami.titan.arrieta.eu`
 and `openssl s_client -connect <OVH_PUBLIC_IP>:443 -servername
 whoami.titan.arrieta.eu`. Delete the Ingress afterwards.
+
+The `titan-tls` copies are worth checking on a fresh bootstrap: the `Certificate` can be
+`Ready` while a namespace that is missing from its allow-list silently has no Secret, and
+an Ingress then fails on a missing Secret rather than on a broken certificate.
 
 Reading a failure:
 
@@ -95,9 +116,12 @@ from what the repo says. What prune does guarantee is that anything Git owns get
 back: edit a live object and the next reconcile reverts it. So fix things in git, and
 if you hand-apply something to debug, delete it yourself — Flux will not do it for you.
 
-    make check            # leak scan + stage builds + stage paths + secrets decrypt + placement
-    make check-ci         # the keyless subset CI runs: leak scan + stage builds + placement
+    make check            # leak scan + stage builds + stage paths + secrets decrypt
+                          #   + placement + release-secrets
+    make check-ci         # the same without `validate` (it needs the age key): CI's set
     make leak-check       # credential/public-IPv4 shapes: the pending diff AND the whole tree
+    make release-secrets  # every Secret a HelmRelease reaches for is in
+                          #   apply/10-secrets, with a matching namespace
     make update-keys      # after rotating the age key group
     make secrets-list
 
@@ -114,7 +138,12 @@ that points at the change you are about to publish.
 
 ## Not here (yet)
 
-PV restic backups, monitoring, external-dns, Reflector, and tuning of the bundled
-Traefik — which k3s owns and re-applies on restart, so its values are set from
-`nixos-configurations`, not from this repo. Each has its trigger recorded in the
-spec's deferred table.
+PV restic backups, monitoring, external-dns, and tuning of the bundled Traefik — which
+k3s owns and re-applies on restart, so its values are set from `nixos-configurations`,
+not from this repo. Each has its trigger recorded in the bootstrap spec's deferred table
+(§9).
+
+Reflector is no longer on that list: it landed with the authentik/CloudNativePG slice,
+which also moved the `Certificate` into `certificates`. What that slice has *not* landed
+here yet — authentik itself, and the `Cluster`'s backup path to an object store — is
+recorded in `docs/superpowers/specs/2026-10-03-titan-authentik-cnpg-design.md`, not here.

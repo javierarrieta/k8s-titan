@@ -4,12 +4,12 @@ KUSTOMIZE_DIRS := $(shell find apply -mindepth 1 -maxdepth 2 -name kustomization
 # not be able to slip between the encryption rule and the validation glob.
 SECRET_FIND := find apply/10-secrets \( -name '*.yaml' -o -name '*.yml' \) ! -name kustomization.yaml
 
-.PHONY: check check-ci kustomize-check validate update-keys scan leak-check secrets-placement secrets-present secrets-list
+.PHONY: check check-ci kustomize-check validate update-keys scan leak-check secrets-placement secrets-present secrets-list release-secrets
 
 # leak-check runs FIRST: make has no -k, so it stops at the first failing prerequisite.
 # validate needs the age key, so an operator who forgot SOPS_AGE_KEY_FILE would never
 # reach a leak gate placed behind it.
-check: leak-check kustomize-check validate secrets-placement
+check: leak-check kustomize-check validate secrets-placement release-secrets
 	@echo "check: all offline gates passed"
 
 # The subset provable from the tree alone - no age key, no cluster, no network.
@@ -26,7 +26,7 @@ check: leak-check kustomize-check validate secrets-placement
 # what makes this worth running in CI at all.
 check-ci:
 	@rc=0; \
-	for t in leak-check kustomize-check secrets-placement; do \
+	for t in leak-check kustomize-check secrets-placement release-secrets; do \
 	  echo "--- $$t ---"; \
 	  $(MAKE) --no-print-directory $$t || rc=1; \
 	done; \
@@ -216,3 +216,126 @@ scan:
 
 secrets-list:
 	@$(SECRET_FIND) | sort
+
+# Every Secret a HelmRelease reaches for must exist in apply/10-secrets with a
+# matching namespace. Without this gate a typo'd Secret name is a red HelmRelease
+# three time zones away - the exact class of failure this repo exists to move onto
+# the laptop (authentik spec S10.1).
+#
+# Scope is deliberately narrow: `spec.valuesFrom[].name` and
+# `spec.values...envFrom[].secretRef.name`. Ingress `secretName:` is NOT scanned,
+# because those Secrets are produced in-cluster by cert-manager and Reflector and
+# never appear under apply/10-secrets - scanning them would fail forever. The
+# third form spec S10.1 names, `spec.values...existingSecret.secretName`, has no
+# arm here either: nothing in this tree uses it and the authentik spec (S8.1)
+# rejects it. That is a known, deliberate gap - the first release that reaches for
+# it adds the arm here rather than routing around this gate.
+#
+# The same narrowness is why only one of the three Secrets spec S9 adds is gated:
+# `authentik-secrets` is reached for by a HelmRelease, while `s3-backup-secrets`
+# is reached for by the Cluster CR's `s3Credentials` and `authentik-db-credentials`
+# by a DatabaseRole's `passwordSecret`, and neither of those is a HelmRelease. A
+# wrong name there surfaces as a not-Healthy Cluster or a failing DatabaseRole in
+# cluster, not on the laptop - correct per spec S10.1, which scopes this gate to
+# HelmReleases, but do not read a green gate as the database credentials checked.
+#
+# Inside `valuesFrom` only a Secret counts, because the spec scopes the gate to
+# Secrets: every `- ` item starts from Flux's own default of `kind: Secret`, an
+# explicit `kind: ConfigMap` is skipped, and an item marked `optional: true` is
+# skipped too - a missing optional Secret is not a red release. `secretRef` is a
+# core LocalObjectReference and so always names a Secret; no kind filter applies
+# there.
+#
+# Both HelmRelease arms capture through one cap(): the text after the key with a
+# leading list dash, a trailing `#` comment and surrounding double quotes stripped,
+# so `- name: x`, `name: x`, `name: "x"` and `namespace: auth  # shared with
+# authentik` all resolve to the plaintext value. A `#` only starts a YAML comment
+# when whitespace precedes it, so the strip is anchored on that, and a quoted value
+# is left alone because a `#` inside quotes is literal - leaving the comment in
+# place would check every reference in that release against a namespace of
+# `auth  # shared with authentik`. Single quotes are not stripped - such a name
+# FAILs loudly instead of passing unseen.
+#
+# What the scanner cannot read is an error, never a silent miss: inside a
+# HelmRelease document, a `valuesFrom:`/`secretRef:` carrying content on its own
+# line FAILs wherever that content sits - the line-start form (`secretRef: {name:
+# x}`) and the same key nested under another key
+# (`global: {envFrom: [{secretRef: {name: x}}]}`), which the line-start arms alone
+# walked straight past, printing `0 Secret reference(s)` over an unread release.
+# Only HelmRelease documents can trip these guards: `secretRef` is Flux's own
+# syntax elsewhere - the stage Kustomizations' `decryption.secretRef` - and none
+# of this gate's business. A HelmRelease document with no `metadata.namespace`
+# FAILs by name - the apiserver would default that to `default`, and checking
+# references against a guessed namespace is worse than refusing to check them.
+#
+# The HelmRelease find matches `.yml` as well as `.yaml`, for the reason
+# SECRET_FIND states above: a release authored as `p.yml` must not be able to slip
+# between the two halves of this gate. Before it matched both, such a release was
+# not scanned and not even counted in the HelmRelease total.
+#
+# Non-vacuous by the same rule as secrets-present: zero HelmReleases is a FAIL, and
+# the green line prints both counts so "0 Secret reference(s)" stays visible
+# instead of being dressed up as a checked tree.
+#
+# Its honest limit: it proves a name and namespace exist in the tree, NOT that the
+# keys inside are the ones the chart wants.
+#
+# The scanner is awk, not a YAML parser: this gate must run in CI with no network
+# and no extra packages. FNR==1 is load-bearing - without it awk carries state
+# across files and a HelmRelease at the top of one file inherits the previous
+# file's namespace, which silently retargets every reference it checks.
+release-secrets:
+	@joined=$$( \
+	  find apply \( -name '*.yaml' -o -name '*.yml' \) ! -name kustomization.yaml -print0 | sort -z | xargs -0 -r awk ' \
+	    FNR==1 { flushdoc() } \
+	    /^---[ \t]*$$/ { flushdoc(); next } \
+	    /^kind:[ \t]*HelmRelease[ \t]*$$/ { hr++; nhr++; df=FILENAME } \
+	    /^metadata:[ \t]*$$/ { inm=1; next } \
+	    inm { if ($$0 ~ /^[^ \t]/) { inm=0 } else if ($$1=="name:" && nm=="") { nm=cap($$0) } else if ($$1=="namespace:" && ns=="") { ns=cap($$0) } } \
+	    hr && /^ *-? *valuesFrom:[ \t]*[^ \t]/ { flow(); next } \
+	    /^  valuesFrom:[ \t]*$$/ { vf=1; nextitem(); next } \
+	    vf && ( /^  [^ -]/ || /^[^ \t]/ ) { flushitem(); vf=0 } \
+	    vf && /^ *- / { flushitem() } \
+	    vf && /^ *-? *name:/ { vfn=cap($$0) } \
+	    vf && /^ *-? *kind:/ { vk=cap($$0) } \
+	    vf && /^ *-? *optional:[ \t]*true[ \t]*$$/ { vo=1 } \
+	    sr && $$0 !~ /^[ \t]*$$/ && ind($$0) <= sri { sr=0 } \
+	    hr && /^ *-? *secretRef:[ \t]*[^ \t]/ { flow(); next } \
+	    hr && /(valuesFrom|secretRef):[ \t]*[{[]/ { flow(); next } \
+	    /^ *-? *secretRef:[ \t]*$$/ { sr=1; sri=ind($$0); next } \
+	    sr && /^ +name:/ { v=cap($$0); if (v != "") r[++n]=v; sr=0 } \
+	    END { flushdoc(); print "N\t" nhr+0 } \
+	    function cap(line,  v) { v=line; if (v !~ /:[ \t]*"/) sub(/[ \t]+#.*$$/,"",v); sub(/^ *-? *[^:]+:[ \t]*/,"",v); sub(/[ \t]*$$/,"",v); gsub(/^"|"$$/,"",v); return v } \
+	    function ind(line) { match(line,/^ */); return RLENGTH } \
+	    function flow(  l) { l=$$0; sub(/^[ \t]+/,"",l); gsub(/\t/," ",l); print "FLOW\t" FILENAME ":" FNR ": " l } \
+	    function nextitem() { vk="Secret"; vo=0; vfn="" } \
+	    function flushitem() { if (vfn != "" && vk=="Secret" && !vo) r[++n]=vfn; nextitem() } \
+	    function flushdoc(  i) { if (hr) { if (ns=="") print "NON\t" (nm!="" ? nm : "<unnamed>") " (" df ")"; else { flushitem(); for (i=1; i<=n; i++) print "R\t" ns "\t" r[i] } }; \
+	                           hr=0; ns=""; nm=""; n=0; vf=0; sr=0; sri=-1; inm=0; nextitem() } \
+	  '; \
+	  find apply/10-secrets \( -name '*.yaml' -o -name '*.yml' \) ! -name kustomization.yaml -print0 | sort -z | xargs -0 -r awk ' \
+	    FNR==1 { flushdoc() } \
+	    /^---[ \t]*$$/ { flushdoc(); next } \
+	    /^kind:[ \t]*/ { kind=$$2 } \
+	    /^metadata:[ \t]*$$/ { inm=1; next } \
+	    inm { if ($$1=="name:" && nm=="") nm=$$2; \
+	          else if ($$1=="namespace:") { ns=$$2; inm=0 } \
+	          else if ($$0 ~ /^[^ \t]/) inm=0 } \
+	    END { flushdoc() } \
+	    function flushdoc() { if (kind=="Secret" && nm!="" && ns!="") print "H\t" ns "\t" nm; kind=""; nm=""; ns=""; inm=0 } \
+	  ' \
+	); \
+	n=$$(printf '%s\n' "$$joined" | awk -F'\t' '$$1=="N"{c=$$2} END{print c+0}'); \
+	if [ "$$n" -eq 0 ]; then \
+	  echo "FAIL: no HelmRelease found under apply/ - release-secrets cannot pass vacuously"; exit 1; fi; \
+	flow=$$(printf '%s\n' "$$joined" | awk -F'\t' '$$1=="FLOW"{print "  " substr($$0, index($$0,"\t")+1)}'); \
+	if [ -n "$$flow" ]; then echo "FAIL: release-secrets cannot scan these valuesFrom/secretRef lines - use the plain block form:"; printf '%s\n' "$$flow"; exit 1; fi; \
+	nonns=$$(printf '%s\n' "$$joined" | awk -F'\t' '$$1=="NON"{print "  " substr($$0, index($$0,"\t")+1)}'); \
+	if [ -n "$$nonns" ]; then echo "FAIL: HelmRelease with no metadata.namespace - its Secret references have no namespace to check:"; printf '%s\n' "$$nonns"; exit 1; fi; \
+	refs=$$(printf '%s\n' "$$joined" | awk -F'\t' '$$1=="R"{c++} END{print c+0}'); \
+	missing=$$(printf '%s\n' "$$joined" | awk -F'\t' ' \
+	  $$1=="H" { have[$$2 "\t" $$3]=1; next } \
+	  $$1=="R" { w[++cnt]=$$2 "\t" $$3; next } \
+	  END { for (i=1; i<=cnt; i++) if (!(w[i] in have)) { split(w[i], a, "\t"); print a[1] "/" a[2] } }'); \
+	if [ -n "$$missing" ]; then echo "FAIL: HelmRelease references Secrets absent from apply/10-secrets:"; printf '%s\n' "$$missing" | sed 's/^/  /'; exit 1; fi; \
+	echo "release-secrets: $$n HelmRelease(s), $$refs Secret reference(s) scanned; every referenced Secret present with a matching namespace"

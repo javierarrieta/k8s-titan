@@ -15,3 +15,39 @@ metadata:
     name: cert-manager
   annotations:
     kubernetes.io/description: "cert-manager, its OVH DNS-01 webhook, and the OVH API credentials"
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: certificates
+  labels:
+    name: certificates
+  annotations:
+    kubernetes.io/description: "Certificates issued by cert-manager; the source of reflected TLS secrets"
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: databases
+  labels:
+    name: databases
+  annotations:
+    kubernetes.io/description: "CloudNativePG clusters and their declarative databases and roles"
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: auth
+  labels:
+    name: auth
+  annotations:
+    kubernetes.io/description: "authentik - the identity provider other clusters will federate against"
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: cnpg-system
+  labels:
+    name: cnpg-system
+  annotations:
+    kubernetes.io/description: "CloudNativePG operator"
