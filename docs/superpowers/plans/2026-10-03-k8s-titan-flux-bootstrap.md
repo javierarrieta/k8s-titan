@@ -898,6 +898,18 @@ first workload exists."
 > `SOPS_AGE_KEY_FILE`, which this task never mentioned. Corrections are applied inline
 > below so re-executing this task cannot reintroduce them; where this task and the
 > shipped file still differ, the shipped file is authoritative.
+>
+> **Also superseded by the authentik/CloudNativePG slice — recorded, not rewritten.** The
+> README and AGENTS.md text below predates the certificate move: `titan-wildcard` now
+> lives in namespace `certificates` rather than `apps` and carries Reflector's reflection
+> annotations under `secretTemplate`; `20-infra` also holds Reflector and the
+> CloudNativePG operator; `50-apps` holds the shared Postgres `Cluster` in namespace
+> `databases`; and `make check-ci` gained the `release-secrets` gate. Unlike the four
+> errors above, which were wrong the day they were written, these were true when shipped
+> and were reversed later, so they stay as written and the reversal is recorded where
+> reversals belong: in the shipped `AGENTS.md`, `README.md`, the bootstrap spec's §7/§9/D10,
+> and `docs/superpowers/specs/2026-10-03-titan-authentik-cnpg-design.md` §5.3. Those are
+> authoritative; re-executing this task verbatim would undo the move.
 
 **Files:**
 - Create: `README.md`

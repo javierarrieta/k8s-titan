@@ -8,13 +8,21 @@ made and what was deliberately left out.
 
     apply/00-bootstrap/     namespaces + the stage Kustomizations + Flux itself
     apply/10-secrets/       SOPS-encrypted Secrets (decrypted by kustomize-controller)
-    apply/20-infra/         cert-manager + OVH DNS-01 webhook + the read-only agent identity
-    apply/40-certificates/  the titan.arrieta.eu wildcard
-    apply/50-apps/          workloads (empty until the first one)
+    apply/20-infra/         cert-manager + OVH DNS-01 webhook + Reflector + the
+                            CloudNativePG operator + the read-only agent identity
+    apply/40-certificates/  the titan.arrieta.eu wildcard, in namespace `certificates`
+    apply/50-apps/          workloads — today the shared Postgres `Cluster`, in
+                            namespace `databases`
 
 Stage order: `flux-system` → `secrets` → `infra` → `certificates` → `apps`, wired by
 `dependsOn` in `apply/00-bootstrap/stage-*.yaml`. Add a stage as its own file there;
 do not merge stage objects into one file.
+
+Namespaces are declared centrally rather than inside the charts that need them:
+`apply/00-bootstrap/namespaces.yaml` holds `apps`, `auth`, `cert-manager`,
+`certificates`, `cnpg-system` and `databases`. `k8s-reader` is the one exception — its
+own manifest under `20-infra` creates it, because the identity and the namespace are one
+thing.
 
 For cluster investigation, use the `k8s-reader` ServiceAccount rather than an admin
 kubeconfig — read-only, and it cannot read Secrets. Minting, verification and
@@ -38,7 +46,12 @@ rotation are in `docs/agent-read-access.md`.
 - This repo is public. No credentials, and no concrete public IPv4 — write
   `<OVH_PUBLIC_IP>`.
 - Ingress class is k3s' bundled `traefik`, and its configuration is **not** managed
-  here. TLS for any Ingress is `secretName: titan-tls` in namespace `apps`.
+  here. `titan-tls` is produced in namespace `certificates` by the wildcard
+  `Certificate` and reflected into `apps` and `auth` by Reflector; reference it as
+  `secretName: titan-tls` from the namespace your Ingress lives in. Nothing else
+  receives it — the allow-list is the `secretTemplate` annotations on
+  `apply/40-certificates/titan-wildcard.yaml`, so a new consuming namespace means
+  editing that file, never copying the Secret by hand.
 - `make validate` deliberately fails when `apply/10-secrets` holds nothing. Do not
   soften that guard to make a check pass: a gate that passes vacuously is worse than
   no gate.
@@ -64,8 +77,12 @@ says `SKIPPED` out loud when either is missing — it no longer reports a found 
 a skip. CI runs GitGuardian on every push and warns, rather than failing, when
 `GITGUARDIAN_API_KEY` is absent from the repo.
 
-What runs automatically is `make check-ci` — leak-check, kustomize-check and
-secrets-placement, the gates provable from the tree alone, and the only control here that
-`--no-verify` cannot skip. It deliberately excludes `validate`, which needs the age
-private key; that key must never be placed in CI. So `make check` locally is still the
-full gate, and still yours to run.
+What runs automatically is `make check-ci` — leak-check, kustomize-check,
+secrets-placement and release-secrets, the gates provable from the tree alone, and the
+only control here that `--no-verify` cannot skip. `release-secrets` fails when a
+`HelmRelease` reaches for a Secret that is not in `apply/10-secrets` with a matching
+namespace, so a typo'd name surfaces on the laptop instead of as a red release three
+time zones away; its honest limit is that it proves a name and a namespace exist in the
+tree, not that the keys inside are what the chart wants. It deliberately excludes
+`validate`, which needs the age private key; that key must never be placed in CI. So
+`make check` locally is still the full gate, and still yours to run.
