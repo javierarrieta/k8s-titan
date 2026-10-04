@@ -116,8 +116,11 @@ secrets-placement: secrets-present
 	if [ -n "$$stray" ]; then echo "FAIL: Secret manifest outside apply/10-secrets:"; for s in $$stray; do echo "  $$s"; done; fail=1; fi; \
 	for f in $$($(SECRET_FIND)); do \
 	  if ! grep -q 'ENC\[' "$$f"; then echo "FAIL: $$f is not sops-encrypted (no ENC[)"; fail=1; fi; \
+	  base=$$(basename "$$f"); \
+	  if ! grep -qE "^  - *$$base$$" apply/10-secrets/kustomization.yaml; then \
+	    echo "FAIL: $$f is not listed in apply/10-secrets/kustomization.yaml - it builds fine and is silently never applied"; fail=1; fi; \
 	done; \
-	if [ "$$fail" -eq 0 ]; then echo "secrets-placement: no Secret outside apply/10-secrets, every secret encrypted"; fi; \
+	if [ "$$fail" -eq 0 ]; then echo "secrets-placement: no Secret outside apply/10-secrets, every secret encrypted and listed"; fi; \
 	exit $$fail
 
 # Spec §0's credential shapes AND its concrete-public-IPv4 check, plus the shape of the
@@ -170,9 +173,10 @@ secrets-placement: secrets-present
 leak-check:
 	@age='AGE-SECRET-KEY-1[A-Z2-9]{40,}'; pem='BEGIN [A-Z ]*PRIVATE KEY'; ssh='ssh-ed25519 AA''AA'; \
 	ovh='OVH_(APPLICATION_KEY|APPLICATION_SECRET|CONSUMER_KEY): *[A-Za-z0-9]{16,}$$'; \
+	aws='AKIA[A-Z0-9]{16}'; \
 	ip='([0-9]{1,3}\.){3}[0-9]{1,3}'; \
 	allow='(^|[^0-9.])(10\.|127\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.|100\.64\.|169\.254\.|0\.0\.0\.0|1\.1\.1\.1|8\.8\.[48]\.4|213\.186\.33\.99|224\.|255\.255\.255\.255)'; \
-	shapes="$$age|$$pem|$$ssh|$$ovh"; rc=0; \
+	shapes="$$age|$$pem|$$ssh|$$ovh|$$aws"; rc=0; \
 	if ! git rev-parse --verify HEAD >/dev/null 2>&1; then \
 	  echo "leak-check: cannot resolve HEAD - refusing to report clean"; exit 1; fi; \
 	if ! git diff --cached --quiet 2>/dev/null; then tier='staged diff'; body=$$(git diff --cached); \

@@ -486,11 +486,15 @@ metadata:
   name: postgres-daily
   namespace: databases
 spec:
-  schedule: "0 3 * * *"
+  # SIX fields. CNPG pins robfig/cron v1.2.0, whose optional field is the day of week at
+  # the END, so the 5-field "0 3 * * *" parses as second 0 / minute 3 / every hour - 24
+  # base backups a day, silently. See spec 7.2's correction.
+  schedule: "0 0 3 * * *"
   method: barmanObjectStore
-  # 'self' keeps the backups owned by this ScheduledBackup, so pruning the schedule does
-  # not prune the backups it produced.
-  backupOwnerReference: self
+  # 'cluster', not 'self': owner references cascade, so 'self' means deleting this file
+  # garbage-collects every Backup the schedule produced. 'cluster' hangs them off a
+  # Cluster that carries prune: disabled. The plan's original text had this inverted.
+  backupOwnerReference: cluster
   cluster:
     name: postgres
 ```
@@ -504,7 +508,10 @@ Append to `apply/50-apps/kustomization.yaml`:
 ### Verify
 
 ```bash
-make release-secrets        # must now report databases/s3-backup-secrets as present, not missing
+make release-secrets        # still 0 references: the Secret is reached from a CR, not a
+                            # HelmRelease, so the gate cannot see it (spec 10.1's scope).
+                            # Prove the Secret will actually be applied instead:
+kubectl kustomize apply/10-secrets | grep -q s3-backup-secrets && echo listed
 make validate
 kubectl kustomize apply/50-apps | grep -E 'destinationPath|retentionPolicy|AWS_REGION'
 ```

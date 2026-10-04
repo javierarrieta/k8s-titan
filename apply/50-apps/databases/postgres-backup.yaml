@@ -7,10 +7,15 @@ metadata:
   name: postgres-daily
   namespace: databases
 spec:
-  # robfig/cron v1.2.0, which CNPG pins, makes the leading seconds field optional, so this
-  # 5-field form parses to 03:00:00 daily. CNPG's own docs describe the 6-field form; both
-  # parse, and this one is what the plan specified.
-  schedule: "0 3 * * *"
+  # SIX fields, and that is not pedantry. CNPG pins robfig/cron v1.2.0, whose default parser
+  # is Second|Minute|Hour|Dom|Month|DowOptional: the optional field is the day of week at
+  # the END, not seconds at the front. So the familiar 5-field "0 3 * * *" is not 03:00
+  # daily - it is second 0, minute 3, every hour, every day, and it fires 24 base backups
+  # a day off the single primary. Verified by running v1.2.0: it yields 09:03, 10:03,
+  # 11:03. Nothing catches this on the way in - the CRD puts no pattern on spec.schedule,
+  # the admission webhook only warns, and Flux discards admission warnings - so it fails
+  # silently, which is the exact failure class this whole plan exists to close.
+  schedule: "0 0 3 * * *"
   method: barmanObjectStore
   # 'cluster', NOT 'self'. Owner references give cascading deletion, so the value decides
   # which git accident destroys the backup records:
@@ -20,7 +25,10 @@ spec:
   #             kustomize.toolkit.fluxcd.io/prune: disabled, so deleting this file orphans
   #             nothing. Losing the backups then requires the deliberate
   #             `kubectl delete cluster postgres` that already deletes the database.
-  #   none    - also survives, but leaves Backup CRs owned by nothing, reconciled by nobody.
+  #   none    - CNPG's default, and it survives both of those: Backup objects are resolved
+  #             from spec.cluster.name, not from owner refs, so they are reconciled fine
+  #             with no owner at all. Rejected only because they then belong to nothing and
+  #             accumulate forever, one per day, outliving everything they describe.
   # Whether the object-store data follows a deleted Backup CR is not documented upstream -
   # cloudnative-pg#2328 asks for object-store cleanup on cluster deletion and does not get
   # it - so this choice is about not destroying the records either way, not about relying
