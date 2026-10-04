@@ -1,6 +1,4 @@
-# Empty on purpose: nothing runs on titan yet. The stage exists so the `apps`
-# Kustomization in 00-bootstrap resolves to a real path; the first workload
-# adds its manifest to this list.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
-resources: []
+resources:
+  - databases/postgres.yaml
