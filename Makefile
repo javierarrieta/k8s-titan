@@ -4,12 +4,12 @@ KUSTOMIZE_DIRS := $(shell find apply -mindepth 1 -maxdepth 2 -name kustomization
 # not be able to slip between the encryption rule and the validation glob.
 SECRET_FIND := find apply/10-secrets \( -name '*.yaml' -o -name '*.yml' \) ! -name kustomization.yaml
 
-.PHONY: check check-ci kustomize-check validate update-keys scan leak-check secrets-placement secrets-present secrets-list
+.PHONY: check check-ci kustomize-check validate update-keys scan leak-check secrets-placement secrets-present secrets-list release-secrets
 
 # leak-check runs FIRST: make has no -k, so it stops at the first failing prerequisite.
 # validate needs the age key, so an operator who forgot SOPS_AGE_KEY_FILE would never
 # reach a leak gate placed behind it.
-check: leak-check kustomize-check validate secrets-placement
+check: leak-check kustomize-check validate secrets-placement release-secrets
 	@echo "check: all offline gates passed"
 
 # The subset provable from the tree alone - no age key, no cluster, no network.
@@ -26,7 +26,7 @@ check: leak-check kustomize-check validate secrets-placement
 # what makes this worth running in CI at all.
 check-ci:
 	@rc=0; \
-	for t in leak-check kustomize-check secrets-placement; do \
+	for t in leak-check kustomize-check secrets-placement release-secrets; do \
 	  echo "--- $$t ---"; \
 	  $(MAKE) --no-print-directory $$t || rc=1; \
 	done; \
@@ -216,3 +216,66 @@ scan:
 
 secrets-list:
 	@$(SECRET_FIND) | sort
+
+# Every Secret a HelmRelease reaches for must exist in apply/10-secrets with a
+# matching namespace. Without this gate a typo'd Secret name is a red HelmRelease
+# three time zones away - the exact class of failure this repo exists to move onto
+# the laptop (authentik spec S10.1).
+#
+# Scope is deliberately narrow: `spec.valuesFrom[].name` and
+# `spec.values...envFrom[].secretRef.name`. Ingress `secretName:` is NOT scanned,
+# because those Secrets are produced in-cluster by cert-manager and Reflector and
+# never appear under apply/10-secrets - scanning them would fail forever.
+#
+# The name capture accepts both `- name:` and `name:` forms and strips surrounding
+# double quotes, because the canonical Flux list form (`- kind: Secret` then
+# `name: foo`) is what Flux actually emits, and a quoted name must match the
+# plaintext Secret name rather than produce a false FAIL.
+#
+# Non-vacuous by the same rule as secrets-present: zero HelmReleases is a FAIL.
+#
+# Its honest limit: it proves a name and namespace exist in the tree, NOT that the
+# keys inside are the ones the chart wants.
+#
+# The scanner is awk, not a YAML parser: this gate must run in CI with no network
+# and no extra packages. FNR==1 is load-bearing - without it awk carries state
+# across files and a HelmRelease at the top of one file inherits the previous
+# file's namespace, which silently retargets every reference it checks.
+release-secrets:
+	@joined=$$( \
+	  find apply -name '*.yaml' ! -name kustomization.yaml -print0 | sort -z | xargs -0 awk ' \
+	    FNR==1 { flushdoc() } \
+	    /^---[ \t]*$$/ { flushdoc(); next } \
+	    /^kind:[ \t]*HelmRelease[ \t]*$$/ { hr++; nhr++ } \
+	    /^metadata:[ \t]*$$/ { inm=1; next } \
+	    inm { if ($$1=="namespace:" && ns=="") { ns=$$2; inm=0 } else if ($$0 ~ /^[^ \t]/) inm=0 } \
+	    /^  valuesFrom:[ \t]*$$/ { vf=1; next } \
+	    vf && /^  [^ -]/ { vf=0 } \
+	    vf && /^ *-? *name:[ \t]*/ { v=$$0; sub(/^ *(- *)?name:[ \t]*/,"",v); sub(/[ \t]*$$/,"",v); gsub(/^"|"$$/,"",v); r[++n]=v } \
+	    /^ *- *secretRef:[ \t]*$$/ { sr=1; next } \
+	    sr && /^ +name:[ \t]*/ { r[++n]=$$2; sr=0 } \
+	    END { flushdoc(); print "N\t" nhr+0 } \
+	    function flushdoc(  i) { if (hr && ns != "") for (i = 1; i <= n; i++) print "R\t" ns "\t" r[i]; \
+	                             hr=0; ns=""; n=0; vf=0; sr=0; inm=0 } \
+	  '; \
+	  find apply/10-secrets \( -name '*.yaml' -o -name '*.yml' \) ! -name kustomization.yaml -print0 | sort -z | xargs -0 -r awk ' \
+	    FNR==1 { flushdoc() } \
+	    /^---[ \t]*$$/ { flushdoc(); next } \
+	    /^kind:[ \t]*/ { kind=$$2 } \
+	    /^metadata:[ \t]*$$/ { inm=1; next } \
+	    inm { if ($$1=="name:" && nm=="") nm=$$2; \
+	          else if ($$1=="namespace:") { ns=$$2; inm=0 } \
+	          else if ($$0 ~ /^[^ \t]/) inm=0 } \
+	    END { flushdoc() } \
+	    function flushdoc() { if (kind=="Secret" && nm!="" && ns!="") print "H\t" ns "\t" nm; kind=""; nm=""; ns=""; inm=0 } \
+	  ' \
+	); \
+	n=$$(printf '%s\n' "$$joined" | awk -F'\t' '$$1=="N"{c=$$2} END{print c+0}'); \
+	if [ "$$n" -eq 0 ]; then \
+	  echo "FAIL: no HelmRelease found under apply/ - release-secrets cannot pass vacuously"; exit 1; fi; \
+	missing=$$(printf '%s\n' "$$joined" | awk -F'\t' ' \
+	  $$1=="H" { have[$$2 "\t" $$3]=1; next } \
+	  $$1=="R" { w[++cnt]=$$2 "\t" $$3; next } \
+	  END { for (i=1; i<=cnt; i++) if (!(w[i] in have)) { split(w[i], a, "\t"); print a[1] "/" a[2] } }'); \
+	if [ -n "$$missing" ]; then echo "FAIL: HelmRelease references Secrets absent from apply/10-secrets:"; printf '%s\n' "$$missing" | sed 's/^/  /'; exit 1; fi; \
+	echo "release-secrets: $$n HelmRelease(s) scanned; every referenced Secret present with a matching namespace"
