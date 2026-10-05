@@ -7,8 +7,8 @@ depends on it. Written against operator 1.30.1 / Postgres 18.6 on titan.
 restore drill, point-in-time recovery, the CloudNativePG operator, the shared `Cluster`, and
 authentik itself are all live on titan and were checked rather than assumed, and the first
 admin exists (§4). What is not done: the **S3 backup key is still the exposed one** (§1), and
-the restore drill has not yet **passed** against authentik's own tables — its first attempt died
- on a wrong table name, and the two bugs that hid that are in §2. Sections say which
+the restore drill has passed against authentik's own tables (§2, recorded) — after its first
+attempt died on a wrong table name and the two bugs that hid that. Sections say which
 of their claims were observed and which are reasoning.
 
 ---
@@ -155,10 +155,43 @@ cannot do that: no `akadmin` row means no rows, and the drill says
 A failed query and a mismatched value are different failures and must not look alike — see
 the two bugs above, where the first live run produced neither message.
 
-**Status of the authentik-shaped drill: attempted, not yet passed.** The first run against
-authentik's own tables died on the two bugs above, so this assertion is still owed a green
-run. The two recorded runs further down predate authentik entirely — they prove the restore
-mechanics and point-in-time recovery, not this query.
+**Status of the authentik-shaped drill: passed.** The first attempt died on the two bugs
+above; after both were fixed the same command went green on titan, 2026-10-05, operator
+1.30.1 / Postgres 18.6, `DELETE=1`:
+
+```
+== preflight
+   existing backup: drill-20261005092617 completed
+   existing backup: drill-20261005100759 completed
+   existing backup: drill-20261005104938 completed
+   existing backup: drill-20261005183440 completed
+   existing backup: postgres-manual completed
+   source postgres Ready
+   5 completed backup(s) present
+== taking Backup drill-20261005184258
+backup.postgresql.cnpg.io/drill-20261005184258 created
+backup.postgresql.cnpg.io/drill-20261005184258 condition met
+   backupId=20261005T184259 beginWal=000000010000000000000071
+== standing up scratch cluster postgres-drill from s3://k8s-titan-pg-562256260016-eu-west-1-an/postgres
+Warning: Native support for Barman Cloud backups and recovery is deprecated and will be
+completely removed in CloudNativePG 1.31.0. Found usage in:
+spec.externalClusters.0.barmanObjectStore. Please migrate existing clusters to the new
+Barman Cloud Plugin to ensure a smooth transition.
+cluster.postgresql.cnpg.io/postgres-drill created
+== waiting for postgres-drill to become Ready (recovery can take minutes)
+cluster.postgresql.cnpg.io/postgres-drill condition met
+== asserting the restore is real
+PASS: restored value matches the seeded nonce 'akadmin'
+PASS: restore drill complete - postgres-drill recovered from s3://k8s-titan-pg-562256260016-eu-west-1-an/postgres
+cleaned up scratch cluster postgres-drill
+(Backup drill-20261005184258 left in databases as the record)
+```
+
+Two notes on that block, so it reads true later. `matches the seeded nonce 'akadmin'` is
+loose wording — with `SEED=0` nothing was seeded, the value came from `EXPECT`; the script
+now says "the expected value". And this is the run the two earlier ones could not be: a row
+authentik itself created, in a real application database, came back out of the object store
+through a rebuilt cluster.
 
 Point-in-time is supported by the same script and is the drill worth doing second,
 because PITR is what an incident actually needs:
@@ -266,7 +299,8 @@ while meaning something entirely different.
 
 ### Housekeeping the drills leave behind
 
-Each run leaves a `Backup` CR in `databases` (three after the runs above) and a real base
+Each run leaves a `Backup` CR in `databases` (six after the runs recorded here — five from
+drills plus the original manual one) and a real base
 backup in the bucket. The object-store copies age out under `retentionPolicy: 30d`. Do not
 "tidy" the CRs away to match: whether deleting a `Backup` CR also removes its object-store
 data is undocumented upstream (cloudnative-pg#2328), so the CRs are the safe half.
