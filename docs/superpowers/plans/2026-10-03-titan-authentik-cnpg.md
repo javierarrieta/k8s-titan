@@ -937,6 +937,33 @@ it puts a plaintext password in a pod spec for no benefit, since the first login
 
 **Files:** `scripts/restore-drill.sh`, `docs/authentik-runbook.md`
 
+> **Four corrections found while implementing this, against the v1.30.1 CRD vendored in
+> `vendor/cnpg-crds/`. The script below is kept as written so the reasoning stays visible;
+> `scripts/restore-drill.sh` is the shipped form.**
+>
+> 1. **`bootstrap.recovery.barmanObjectStore` does not exist in 1.30.1.** `bootstrap.recovery`
+>    takes `backup | source | recoveryTarget | database | owner | secret | volumeSnapshots`.
+>    The store config goes in an `externalClusters[]` entry, and `recovery.source` names that
+>    entry — whose `name` must equal the source cluster's name, because it is also the folder
+>    under the bucket. Upstream's own `docs/src/samples/cluster-restore-external-cluster.yaml`
+>    shows this shape. The gate added in Task 5's follow-up flags the plan's version as
+>    `spec.bootstrap.recovery.barmanObjectStore: field not declared in schema`.
+> 2. **`--for=condition=Healthy` never resolves.** The condition is `Ready` in 1.30.1 (live
+>    output: `Initialized`, `ConsistentSystemID`, `Ready`, `ContinuousArchiving`). A wait on
+>    `Healthy` burns the whole 20m timeout before saying anything.
+> 3. **`grep -q Completed` never matches.** `status.phase` is lowercase `completed`, verified on
+>    the live object. The preflight would have failed forever, reporting "no Completed Backup"
+>    next to a backup that had just finished.
+> 4. **The `core_user` assertion cannot run before Task 8**, which inverts the right order: an
+>    empty database is the cheapest and safest moment to drill a restore. The assertion is now
+>    `CHECK_DB`/`CHECK_SQL`/`EXPECT`, defaulting to a nonce the drill seeds itself and drops
+>    afterwards — so it proves a *value* survived the round trip through S3 rather than proving
+>    an empty database restored. `EXPECT=absent` plus `TARGET_TIME` gives a PITR drill, which is
+>    what an incident actually needs and which a latest-recovery drill cannot demonstrate.
+>
+> Also: the preflight's hint used `kubectl create backup manual --cluster postgres`, which is
+> `kubectl cnpg` plugin syntax and does not exist in plain kubectl.
+
 CNPG recovery is **never in-place**: `bootstrap.recovery` builds a *new* cluster from a base backup
 and replays WAL. So the drill is a scratch cluster beside the live one, and the live cluster is never
 touched.
