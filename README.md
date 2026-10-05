@@ -14,10 +14,18 @@ own manifest under `20-infra` because its identity and its namespace are one thi
 [`docs/agent-read-access.md`](docs/agent-read-access.md)): `cert-manager` (cert-manager,
 its OVH DNS-01 webhook, the OVH credentials), `certificates` (the wildcard `Certificate`,
 and therefore the source of `titan-tls`), `apps` (workloads, plus Reflector's copy of
-`titan-tls`), `databases` (the shared Postgres `Cluster`), `auth` (for the identity
-provider, which is not in this tree yet), `cnpg-system` (the CloudNativePG operator).
+`titan-tls`), `databases` (the shared Postgres `Cluster`, its daily `ScheduledBackup`, and
+the declarative `Database`/`DatabaseRole` each app owns), `auth` (authentik, plus
+Reflector's copy of `titan-tls`), `cnpg-system` (the CloudNativePG operator).
 Reflector mirrors `titan-tls` into `apps` and `auth` and nothing else; the allow-list lives
 on the `Certificate`.
+
+Backups go to two places and only one of them exists. The Postgres cluster ships base
+backups and continuous WAL to `s3://k8s-titan-pg-562256260016-eu-west-1-an` (IAM user
+`k8s-titan-pg-backups`, credentials in `databases/s3-backup-secrets`); the generic PV
+stream (restic → MinIO `titan-pvc`, `backup-minio-secrets`) is still deferred — see
+[`docs/authentik-runbook.md`](docs/authentik-runbook.md) §1 for both, and for why
+`ContinuousArchiving: True` is not proof the first one is working.
 
 ## Before the first bootstrap
 
@@ -77,13 +85,23 @@ asserts no `secretRef` exists and would otherwise fail permanently.
 ## Verifying a bootstrap
 
     kubectl get kustomization -A          # all five Ready=True
-    kubectl get helmrelease -A            # four: cert-manager and its OVH webhook in
+    kubectl get helmrelease -A            # five: cert-manager and its OVH webhook in
                                           # cert-manager, reflector in apps,
-                                          # cloudnative-pg in cnpg-system
+                                          # cloudnative-pg in cnpg-system, authentik in auth
     kubectl -n cert-manager get clusterissuer    # both Ready=True
     kubectl -n certificates get certificate titan-wildcard   # Ready=True
     kubectl get secret titan-tls -A       # certificates holds the source; apps and
                                           # auth hold Reflector's copies
+    kubectl -n databases get cluster,database,databaserole,backup,scheduledbackup
+    kubectl -n auth get pods              # authentik-server + authentik-worker Running
+
+**Which of those the read-only identity can actually run.** `kubectl -n databases get
+cluster` and every `get secret` above need an admin context. The `k8s-reader` identity
+(`docs/agent-read-access.md`) is Forbidden on `postgresql.cnpg.io` and on Secrets, and
+says so rather than returning an empty list. When you only have the read-only identity,
+prove the same things by effect: `kubectl -n databases get pods,pvc` (postgres-1 Running,
+its PVC Bound), `kubectl -n auth get helmrelease,pods`, and a TLS handshake against
+`auth.titan.arrieta.eu` — a valid wildcard leaf proves the reflected Secret is there.
 
 Then prove the whole path with a throwaway Ingress on `whoami.titan.arrieta.eu`
 and `openssl s_client -connect <OVH_PUBLIC_IP>:443 -servername
@@ -117,11 +135,13 @@ back: edit a live object and the next reconcile reverts it. So fix things in git
 if you hand-apply something to debug, delete it yourself — Flux will not do it for you.
 
     make check            # leak scan + stage builds + stage paths + secrets decrypt
-                          #   + placement + release-secrets
+                          #   + placement + release-secrets + crd-check
     make check-ci         # the same without `validate` (it needs the age key): CI's set
     make leak-check       # credential/public-IPv4 shapes: the pending diff AND the whole tree
     make release-secrets  # every Secret a HelmRelease reaches for is in
                           #   apply/10-secrets, with a matching namespace
+    make crd-check        # every built CNPG object against the vendored CRDs, field by field
+    make update-cnpg-crds CNPG=vX.Y.Z   # re-vendor the schemas after an operator bump
     make update-keys      # after rotating the age key group
     make secrets-list
 
@@ -143,7 +163,20 @@ k3s owns and re-applies on restart, so its values are set from `nixos-configurat
 not from this repo. Each has its trigger recorded in the bootstrap spec's deferred table
 (§9).
 
-Reflector is no longer on that list: it landed with the authentik/CloudNativePG slice,
-which also moved the `Certificate` into `certificates`. What that slice has *not* landed
-here yet — authentik itself, and the `Cluster`'s backup path to an object store — is
-recorded in `docs/superpowers/specs/2026-10-03-titan-authentik-cnpg-design.md`, not here.
+Two things have left that list since it was written. Reflector landed with the
+authentik/CloudNativePG slice, which also moved the `Certificate` into `certificates`.
+And the Postgres backup path landed and was **drilled**, not just written: base backup +
+WAL in S3, a scratch-cluster restore that returned a value seeded seconds earlier, and a
+point-in-time recovery that proved `recoveryTarget` is honoured. The recorded output is in
+[`docs/authentik-runbook.md`](docs/authentik-runbook.md) §2, and `scripts/restore-drill.sh`
+is re-runnable.
+
+Monitoring is the deferred item that has become load-bearing rather than merely absent:
+nothing watches free space on `/var/lib/rancher/k3s/storage` — the real ceiling for every
+PVC, because `local-path` ignores the size a PVC asks for — and nothing watches WAL
+archiving, which now has somewhere to fail. Both are accepted risk with their trigger
+named, not an oversight.
+
+What is still absent from the authentik slice is anything that populates it: users and
+groups arrive by a mechanism that is still an open decision, recorded in
+`docs/superpowers/specs/2026-10-03-titan-authentik-cnpg-design.md` §12.1.

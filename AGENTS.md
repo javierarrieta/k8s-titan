@@ -11,8 +11,9 @@ made and what was deliberately left out.
     apply/20-infra/         cert-manager + OVH DNS-01 webhook + Reflector + the
                             CloudNativePG operator + the read-only agent identity
     apply/40-certificates/  the titan.arrieta.eu wildcard, in namespace `certificates`
-    apply/50-apps/          workloads — today the shared Postgres `Cluster`, in
-                            namespace `databases`
+    apply/50-apps/          workloads — the shared Postgres `Cluster` and its daily
+                            `ScheduledBackup` in namespace `databases`, and authentik with
+                            its declarative `Database`/`DatabaseRole` in namespace `auth`
 
 Stage order: `flux-system` → `secrets` → `infra` → `certificates` → `apps`, wired by
 `dependsOn` in `apply/00-bootstrap/stage-*.yaml`. Add a stage as its own file there;
@@ -26,7 +27,18 @@ thing.
 
 For cluster investigation, use the `k8s-reader` ServiceAccount rather than an admin
 kubeconfig — read-only, and it cannot read Secrets. Minting, verification and
-rotation are in `docs/agent-read-access.md`.
+rotation are in `docs/agent-read-access.md`. That identity is also Forbidden on
+`postgresql.cnpg.io`, so `get cluster`/`get database`/`get backup` need an admin context;
+`docs/authentik-runbook.md` §5 records what the read-only identity can prove by effect
+instead.
+
+Backups: the Postgres cluster ships base backups and continuous WAL to S3 and **nothing
+else does** — the generic PV stream is still deferred, so a PVC that is not that database
+has no backup. The same runbook records what has actually been drilled (a scratch-cluster
+restore and a point-in-time recovery, both passing), and the two credentials not to rotate
+casually: `AUTHENTIK_SECRET_KEY` (never — it signs sessions and derives user IDs, and the
+sops file is its only copy) and the S3 backup key (now — it was exposed in a chat
+transcript and is still the live one).
 
 ## Rules
 

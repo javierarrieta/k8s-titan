@@ -3,10 +3,12 @@
 Scope: the shared CloudNativePG `Cluster` in `databases` and the authentik install that
 depends on it. Written against operator 1.30.1 / Postgres 18.6 on titan.
 
-**Proven vs pending.** The backup and restore sections below describe a path that was
-exercised on the live cluster and is current as of this writing. The authentik sections
-describe a system that is specified but not yet deployed — Tasks 7 and 8 are open — so
-they are marked and must be verified, not trusted, until authentik is live.
+**Proven vs pending.** Everything below describes a deployed system: the backup path, the
+restore drill, point-in-time recovery, the CloudNativePG operator, the shared `Cluster`, and
+authentik itself are all live on titan and were checked rather than assumed. Two things are
+not done. The **first-admin flow has not been run** — `/if/flow/initial-setup/` still answers
+200, which is the proof nobody has completed it (§4) — and the **S3 backup key is still the
+exposed one** (§1). Sections say which of their claims were observed and which are reasoning.
 
 ---
 
@@ -106,12 +108,31 @@ Why the assertion is a parameter and not a fixed query: the plan hard-coded
 only run after Task 8 — the wrong order, since the cheapest time to drill a restore is
 while an empty database means nothing can be lost. A restore of an empty database proves
 mechanics; a restore that returns a value we deliberately wrote proves data survived the
-round trip. Point it at authentik when authentik is live:
+round trip. Now that authentik is live, this is the assertion to prefer — it checks for a
+named row in a real database rather than a nonce we planted:
 
-```bash
-# once authentik is live - assert users came back:
-CHECK_DB=authentik CHECK_SQL='select count(*) from core_user' ./scripts/restore-drill.sh
 ```
+SEED=0 CHECK_DB=authentik \
+  CHECK_SQL="select username from core_user where username='akadmin'" \
+  EXPECT=akadmin ./scripts/restore-drill.sh
+```
+
+**Do not write that assertion as `select count(*) from core_user`.** The script's bare
+assertion is "the query returned at least one row", and `count(*)` always returns exactly
+one row — holding `0`. Verified against the script with a stub `kubectl` that prints what
+real `psql` prints:
+
+```
+PASS: select count(*) from core_user returned 1 row(s): 0
+```
+
+That is a restore drill reporting success on a database with no users in it. The form above
+cannot do that: no `akadmin` row means no rows, and the drill says
+`FAIL: expected 'akadmin', got ''`. `SEED=0` because seeding a nonce would overwrite
+`EXPECT` with the nonce; the two assertion styles do not mix.
+
+Until the first admin exists (§4) this command fails, and that is the correct answer — the
+drill is asserting something that is genuinely not true yet.
 
 Point-in-time is supported by the same script and is the drill worth doing second,
 because PITR is what an incident actually needs:
@@ -241,16 +262,14 @@ the full timeout.
 
 ## 3. `AUTHENTIK_SECRET_KEY` — do not rotate
 
-*Pending Task 8; recorded now so it is not discovered the hard way.*
-
 `AUTHENTIK_SECRET_KEY` signs session cookies **and derives unique user IDs**. Changing it
 invalidates every session and changes how user IDs derive. The chart's own comment says
 do not change it after first install.
 
-It lives in `apply/10-secrets/authentik-secrets.*.sops.yaml`, and **the sops file is its
-only backup** — there is no database copy of it. Losing it means losing authentik's
-identity continuity, not just a secret. If it ever must change, that is a planned
-migration with the user-ID implications worked out first, not an incident response.
+It lives in `apply/10-secrets/authentik-secrets.yaml`, and **that sops file is its only
+backup** — there is no database copy of it. Losing it means losing authentik's identity
+continuity, not just a secret. If it ever must change, that is a planned migration with the
+user-ID implications worked out first, not an incident response.
 
 The same file holds `AUTHENTIK_POSTGRESQL__PASSWORD`. `AUTHENTIK_BOOTSTRAP_PASSWORD` is
 deliberately unused: it puts a plaintext password in a pod spec for no benefit, since the
@@ -260,14 +279,68 @@ first login is a human act anyway.
 
 ## 4. First admin
 
-*Pending Task 8 — specified, not yet verified.*
+**Still to do.** The endpoint is live and answers exactly as specified:
 
-Browser flow at `https://auth.titan.arrieta.eu/if/flow/initial-setup/` — **trailing
-slash required**, `Not Found` without it. No admin password ever enters git.
+```bash
+curl -sS -o /dev/null -w '%{http_code}\n' https://auth.titan.arrieta.eu/if/flow/initial-setup/
+# 200   — and 404 without the trailing slash, so the slash is not decoration
+```
+
+A `200` there means authentik is still serving the first-run flow, which it has no reason to
+do once an admin exists — nobody has completed it. Browser flow at
+`https://auth.titan.arrieta.eu/if/flow/initial-setup/` — **trailing slash required** —
+create `akadmin`, log out, log back in. No admin password ever enters git;
+`AUTHENTIK_BOOTSTRAP_PASSWORD` is deliberately unused (§3).
+
+That login is the intended test of `AUTHENTIK_LISTEN__TRUSTED_PROXY_CIDRS`: a wrong CIDR
+produces a redirect loop or a mixed-content block, far louder than anything in the logs.
+Part of it is already proven without a browser — see §5 — but the login itself is the
+remaining half and it has not been walked.
 
 ---
 
-## 5. Open decision carried forward
+## 5. What the read-only identity can and cannot prove
+
+`docs/agent-read-access.md` mints `k8s-reader`, and it is the right identity for a routine
+check. Its limit is worth naming, because the obvious verification command fails in a way
+that reads like a broken cluster:
+
+```
+Error from server (Forbidden): clusters.postgresql.cnpg.io "postgres" is forbidden:
+User "system:serviceaccount:k8s-reader:k8s-reader" cannot get resource "clusters" ...
+```
+
+`k8s-reader` cannot read `postgresql.cnpg.io` objects or any Secret. So `get cluster`,
+`get database`, `get backup` and `get secret titan-tls` need an admin context. Everything
+below is what the read-only identity proves by effect, recorded 2026-10-05 at
+`main@c4e683f`, and it is a genuinely strong set:
+
+| check | observed |
+|---|---|
+| `kubectl -n flux-system get kustomization` | all five stages `Ready=True`, applied at `main@c4e683f` |
+| `kubectl get helmrelease -A` | five `Ready=True`: cert-manager, its OVH webhook, reflector, cloudnative-pg, authentik |
+| `kubectl -n certificates get certificate` | `titan-wildcard Ready=True` → `titan-tls` |
+| TLS handshake to `auth.titan.arrieta.eu:443` | leaf `CN=titan.arrieta.eu`, SAN `*.titan.arrieta.eu` + `titan.arrieta.eu`, issuer Let's Encrypt, verifies against the system CA — so Reflector's copy in `auth` exists and is current |
+| `kubectl -n databases get pods,pvc` | `postgres-1` `1/1 Running`, PVC `Bound` 10Gi `local-path`, **zero Warning events** in the namespace |
+| `kubectl -n auth get pods` | `authentik-server` + `authentik-worker` `1/1 Running` |
+| `https://auth.titan.arrieta.eu/` | `302 → /setup`, `/setup` `302 → /if/flow/initial-setup/`, that `200` |
+| server access log | `"scheme": "https"` on a request that arrived through Traefik from the pod CIDR |
+
+That last row is the trusted-proxy proof. authentik 2026.8 honours `X-Forwarded-Proto`
+only from listed CIDRs, and a wrong list makes it see plain HTTP behind TLS — which shows
+up as a redirect loop or a mixed-content block rather than as a log line. The log saying
+`scheme: https` for a proxied request means `10.62.0.0/16` is being trusted, which is the
+value in `apply/50-apps/auth/authentik.yaml`.
+
+What the read-only identity cannot reach, and so is **not** proven by this table: the
+`Cluster`'s own conditions, `Database`/`DatabaseRole` `Synced`, and whether WAL is still
+reaching the bucket. For the first two, an admin context, or `kubectl -n databases exec
+postgres-1 -c postgres -- psql -U postgres -c '\du authentik'`. For the last, list the
+bucket (§1) — never the `ContinuousArchiving` condition.
+
+---
+
+## 6. Open decision carried forward
 
 *Sub-project 3, so it is not re-derived from scratch next session.*
 

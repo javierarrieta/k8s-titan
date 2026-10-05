@@ -17,8 +17,16 @@
 # which is the wrong order: the cheapest moment to drill a restore is while the database
 # is empty and nothing can be lost. Default here is a nonce the seed step writes itself,
 # so the drill proves a value survived the round trip through S3 rather than proving an
-# empty database restored. Point CHECK_DB/CHECK_SQL at authentik's core_user once
-# authentik is live.
+# empty database restored.
+#
+# The count(*) form is a trap, and the plan's original line had it. With no EXPECT set the
+# assertion below is "the query returned at least one row", and `select count(*) from
+# core_user` always returns exactly one row - holding 0. So it passes on a database with no
+# users. Point it at a named row instead, and pin EXPECT:
+#   SEED=0 CHECK_DB=authentik \
+#     CHECK_SQL="select username from core_user where username='akadmin'" EXPECT=akadmin
+# SEED=0 because seeding overwrites EXPECT with the nonce; the two styles do not mix.
+# Worked example in docs/authentik-runbook.md §2.
 #
 # WHY THE RECOVERY SHAPE LOOKS LIKE THIS. The plan used
 # bootstrap.recovery.barmanObjectStore, which does not exist in the 1.30.1 CRD -
@@ -203,6 +211,10 @@ elif [ -n "$EXPECT" ]; then
   [ "$got" = "$EXPECT" ] || { say "FAIL: expected '$EXPECT', got '$got'"; exit 1; }
   say "PASS: restored value matches the seeded nonce '$got'"
 else
+  # "At least one row" is the weakest of the three branches: a query that always returns a
+  # row (count(*), show_settings, anything aggregate) passes here even when it reports
+  # nothing worth finding. Prefer EXPECT=<value> against a query that returns no rows when
+  # the thing you care about is absent.
   [ "$rows" -ge 1 ] || { say "FAIL: $CHECK_SQL returned no rows in the restored cluster"; exit 1; }
   say "PASS: $CHECK_SQL returned $rows row(s): $got"
 fi
