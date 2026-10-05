@@ -978,6 +978,15 @@ it puts a plaintext password in a pod spec for no benefit, since the first login
 >    afterwards — so it proves a *value* survived the round trip through S3 rather than proving
 >    an empty database restored. `EXPECT=absent` plus `TARGET_TIME` gives a PITR drill, which is
 >    what an incident actually needs and which a latest-recovery drill cannot demonstrate.
+> 5. **`count(*)` is a vacuous assertion**, found later while writing the authentik form of the
+>    command. With `EXPECT` unset the shipped script asserts "the query returned at least one
+>    row", and `select count(*) from core_user` always returns exactly one row — holding `0`.
+>    Proven against the script with a stub `kubectl` printing what real `psql` prints:
+>    `PASS: select count(*) from core_user returned 1 row(s): 0` on a database with no users.
+>    The non-vacuous form asserts a named row and pins `EXPECT`:
+>    `SEED=0 CHECK_DB=authentik CHECK_SQL="select username from core_user where username='akadmin'" EXPECT=akadmin`.
+>    `SEED=0` because seeding overwrites `EXPECT` with the nonce. Recorded in
+>    `docs/authentik-runbook.md` §2 and in the script's own header.
 >
 > Also: the preflight's hint used `kubectl create backup manual --cluster postgres`, which is
 > `kubectl cnpg` plugin syntax and does not exist in plain kubectl.
@@ -1088,6 +1097,17 @@ hope — the etcd snapshot in `nixos-configurations` failed silently for four ni
 
 ## Task 10 — documentation reconciliation
 
+> **Ran twice, and the second run was this task's own fault for being written the way it was.**
+> The first pass executed while Tasks 5–9 were still open, and was ruled to "document only what
+> the branch makes true" — so it wrote prose like *authentik is not in this tree yet* and
+> *no restore drill has been run*. When Tasks 5, 7, 8 and 9 landed, that prose became exactly
+> the lie class this task exists to remove. A second pass corrected `README.md`,
+> `docs/authentik-runbook.md`, bootstrap spec §4/§8/§9 and `AGENTS.md`, and deleted the
+> `50-apps/.gitkeep` that the layout tree had started to document. **A re-executor must read
+> the current docs before rewriting them from the list below**: items 1–5 are done, and the
+> "what runs where" line the second pass added names both backup destinations and which of
+> them exists.
+
 **Files:** `AGENTS.md`, `docs/superpowers/specs/2026-10-03-k8s-titan-flux-bootstrap-design.md`,
 `README.md`
 
@@ -1120,6 +1140,15 @@ backup destinations.
 ---
 
 ## Task 11 — post-merge verification
+
+> **The `k8s-reader` identity runs most of this and is Forbidden on three of the lines.**
+> `get cluster`, `get database,databaserole` and `get secret titan-tls` answer
+> `Forbidden: User "system:serviceaccount:k8s-reader:k8s-reader"` — that is the identity's
+> scope, not a broken cluster, and it is documented in `docs/authentik-runbook.md` §5 with
+> what to prove by effect instead (TLS leaf for the reflected Secret, `get pods,pvc` plus
+> zero Warning events for the `Cluster`, authentik's own readiness for the `Database`).
+> Half of this list was run that way on 2026-10-05 at `main@c4e683f`; the CNPG and Secret
+> lines and the bucket listing still need an admin context.
 
 Operator, after merge to `main`:
 

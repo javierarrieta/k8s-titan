@@ -1,7 +1,10 @@
 # titan — authentik as the shared identity provider, on CloudNativePG
 
 - **Date:** 2026-10-03
-- **Status:** approved design — implementation plan to follow
+- **Status:** implemented on titan. The backup path has been drilled (restore and
+  point-in-time, both recorded in `docs/authentik-runbook.md` §2) and authentik serves
+  `https://auth.titan.arrieta.eu/`. Two items stay open: the first-admin flow (§10) and the
+  exposed-key rotation (§12).
 - **Repo:** `javierarrieta/k8s-titan` (public)
 - **Cluster:** `titan` — single-node k3s on OVH bare metal, NixOS-managed, live and green
 - **Builds on:** `2026-10-03-k8s-titan-flux-bootstrap-design.md` (the bootstrap spec). That document

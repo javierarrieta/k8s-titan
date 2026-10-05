@@ -167,11 +167,17 @@ k8s-titan/
 ├── AGENTS.md                           # agent-facing repo conventions
 ├── Makefile                            # check / check-ci / leak-check / kustomize-check /
 │                                       #   validate / update-keys / secrets-present /
-│                                       #   secrets-placement / release-secrets / scan /
-│                                       #   secrets-list
+│                                       #   secrets-placement / release-secrets / crd-check /
+│                                       #   update-cnpg-crds / scan / secrets-list
 ├── README.md                           # the three-command runbook + follow-ups
 ├── docs/ovh-dns-credential.md          # issuing + rotating titan's OVH API application
 ├── docs/agent-read-access.md           # minting + verifying + rotating the read-only identity
+├── docs/authentik-runbook.md           # backup topology, restore drill + recorded output,
+│                                       #   first admin, what k8s-reader cannot prove
+├── scripts/restore-drill.sh            # scratch-cluster restore from the object store
+├── tools/crd-field-check.py            # the validator behind `make crd-check`
+├── vendor/cnpg-crds/                   # CNPG CRDs pinned to the operator version, so the
+│                                       #   gate can run offline
 ├── docs/superpowers/specs/             # this file, and the authentik/CNPG spec that amends it
 ├── docs/superpowers/plans/             # the bootstrap plan, with its supersession
 │                                       #   banners, and the authentik/CNPG plan
@@ -190,7 +196,11 @@ k8s-titan/
     │   └── stage-apps.yaml
     ├── 10-secrets/
     │   ├── kustomization.yaml
-    │   └── ovh-domain-secrets.yaml         # sops-encrypted, namespace: cert-manager
+    │   ├── ovh-domain-secrets.yaml         # sops-encrypted, namespace: cert-manager
+    │   ├── s3-backup-secrets.yaml          # sops-encrypted, ns databases: the IAM pair +
+    │   │                                   #   AWS_REGION that open the backup bucket
+    │   └── authentik-secrets.yaml          # sops-encrypted: authentik's own Secret and the
+    │                                       #   `authentik` role's basic-auth credentials
     ├── 20-infra/
     │   ├── kustomization.yaml
     │   ├── cert-manager/
@@ -208,9 +218,14 @@ k8s-titan/
     │                                       #   annotations under secretTemplate (§7)
     └── 50-apps/
         ├── kustomization.yaml
-        ├── .gitkeep
-        └── databases/
-            └── postgres.yaml               # the shared CNPG Cluster, ns databases
+        ├── databases/
+        │   ├── postgres.yaml               # the shared CNPG Cluster, ns databases,
+        │   │                               #   carrying prune: disabled (§9's override)
+        │   └── postgres-backup.yaml        # ScheduledBackup: the daily base backup; WAL
+        │                                   #   archiving is continuous and implicit
+        └── auth/
+            ├── authentik-db.yaml           # Database + DatabaseRole for authentik, ns databases
+            └── authentik.yaml              # HelmRepository + HelmRelease, ns auth
 ```
 
 Namespaces are created in `00-bootstrap` rather than inside the charts that need them,
@@ -474,11 +489,15 @@ No cluster access is needed for most of it, which matters because 6443 is mesh-o
 5. `kubectl get kustomization -A` — all five `Ready=True`.
 6. `kubectl -n cert-manager get helmrelease` — both `Ready=True`;
    `kubectl -n cert-manager get clusterissuer` — both `Ready=True`. `kubectl get
-   helmrelease -A` shows four in total: those two, Reflector in `apps`, and the
-   CloudNativePG operator in `cnpg-system`.
+   helmrelease -A` shows five in total: those two, Reflector in `apps`, the
+   CloudNativePG operator in `cnpg-system`, and authentik in `auth`.
 7. `kubectl -n certificates get certificate titan-wildcard` → `Ready=True`, and
-   `kubectl get secret titan-tls -A` → the source in `certificates` plus Reflector's
-   copies in `apps` and `auth`, and
+   `kubectl -n <ns> get secret titan-tls` for each of `certificates`, `apps` and `auth` →
+   the source plus Reflector's two copies. Not `get secret titan-tls -A`: kubectl refuses a
+   resource name together with `--all-namespaces` ("a resource cannot be retrieved by name
+   across all namespaces"), so that form errors out and proves nothing either way. And
+   `openssl s_client -connect <OVH_PUBLIC_IP>:443 -servername anything.titan.arrieta.eu`
+   presents a Let's Encrypt chain.
    `openssl s_client -connect <OVH_PUBLIC_IP>:443 -servername anything.titan.arrieta.eu`
    presents a Let's Encrypt chain.
 8. End-to-end: a throwaway Ingress on `whoami.titan.arrieta.eu` serves HTTPS with a real
@@ -491,20 +510,23 @@ No cluster access is needed for most of it, which matters because 6443 is mesh-o
 
 | Item | Why not now | Trigger |
 |---|---|---|
-| PV backups (restic CronJobs → MinIO `titan-pvc`) | Spec §13b's second stream; needs `backup-minio-secrets` and a `30-backup` stage with `prune: false` + `deletionPolicy: Orphan` | Before any workload with data lands on titan — **that trigger has fired and the override was taken consciously**: the Postgres `Cluster` (§6 of the authentik/CNPG spec) is data and it landed without this stream. The compensation the design names is that the database carries its own backup path; that path **has since landed and was verified on titan** — a base backup and continuous WAL in `s3://k8s-titan-pg-562256260016-eu-west-1-an` (`postgres/base/…`, `postgres/wals/…`, both observed as objects, not inferred from a `ContinuousArchiving` condition that predates the configuration) — so the override is **compensated**, not merely accepted. What is *not* proven is the restore side: no restore drill has been run, so "the backup is restorable" remains an assumption until Task 9 closes it. The restic stream itself stays deferred, with this trigger intact, until a workload with data that is not that database arrives |
+| PV backups (restic CronJobs → MinIO `titan-pvc`) | Spec §13b's second stream; needs `backup-minio-secrets` and a `30-backup` stage with `prune: false` + `deletionPolicy: Orphan` | Before any workload with data lands on titan — **that trigger has fired and the override was taken consciously**: the Postgres `Cluster` (§6 of the authentik/CNPG spec) is data and it landed without this stream. The compensation the design names is that the database carries its own backup path; that path **has since landed and was verified on titan** — a base backup and continuous WAL in `s3://k8s-titan-pg-562256260016-eu-west-1-an` (`postgres/base/…`, `postgres/wals/…`, both observed as objects, not inferred from a `ContinuousArchiving` condition that predates the configuration) — so the override is **compensated**, not merely accepted. The restore side is proven too, which is the half a written backup never demonstrates: `scripts/restore-drill.sh` recovered a scratch `Cluster` from that bucket and returned a value seeded seconds before the backup, and a paired run to an earlier `recoveryTarget` proved point-in-time recovery is honoured rather than ignored. Both runs are recorded verbatim in `docs/authentik-runbook.md` §2. The restic stream itself stays deferred, with this trigger intact, until a workload with data that is not that database arrives |
 | Bundled Traefik tuning (dashboard/API off, 80/443 only) | k3s owns the bundled `HelmChart` in `kube-system` and re-applies it from `/var/lib/rancher/k3s/server/manifests/` on restart, so a Flux patch is reverted. The supported lever is `--helm-chart-configdir`, which is `nixos-configurations` territory. Exposure is already bounded by the OVH Edge Network Firewall (80/443/13491/51820) and the host's default-deny. | Any change to what the dashboard/API binds, or a finding from a scan |
-| Monitoring (kube-prometheus-stack, promtail, federation) | Not in scope B, and titan runs no Prometheus at all | **Trigger met.** "Something worth alerting on" is now a real `Cluster` with a real PVC on a shared filesystem. The two metrics that matter are free space on `/var/lib/rancher/k3s/storage` — the actual ceiling for every PVC, because `local-path` ignores the size a PVC asks for — and WAL-archive failure, which becomes live the moment the `Cluster` gains the object-store backup path the authentik/CNPG spec designs for it and stops being live if it never does. Neither is covered today; both are accepted risk until this row is promoted |
+| Monitoring (kube-prometheus-stack, promtail, federation) | Not in scope B, and titan runs no Prometheus at all | **Trigger met.** "Something worth alerting on" is now a real `Cluster` with a real PVC on a shared filesystem. The two metrics that matter are free space on `/var/lib/rancher/k3s/storage` — the actual ceiling for every PVC, because `local-path` ignores the size a PVC asks for — and WAL-archive failure, **which is live now** that the `Cluster` ships base backups and WAL to S3: a failed archive raises no error and accumulates WAL on exactly the filesystem that is going unwatched. Neither is covered today; both are accepted risk until this row is promoted, and together they are what makes this the most overdue row in the table |
 | `external-dns` | The wildcard A record already resolves every service name | A service needing a record outside the wildcard |
 | Making the repo private | Would force a `secretRef` on the `GitRepository` and a deploy key on a public-internet node — decision D3 | Any secret-shaped reason to lock it down |
-| Apps under `50-apps` | The stage is no longer empty — it carries the shared Postgres `Cluster` (`50-apps/databases/`, namespace `databases`). What is still absent is anything user-facing; authentik is designed but not in this tree | The first workload after the database |
 | `GITGUARDIAN_API_KEY` repo secret | The scan skips with a visible `::warning::` until it is set (§0.1) | Whenever the operator locates/reissues an API key with `scan` scope |
 | `.gitguardian.yaml` ignore list | Nothing to ignore: the current engine does not flag SOPS ciphertext (§0.1) | First real false positive reported by CI |
 
 One row that used to sit here has been promoted and removed rather than quietly left
 beside the thing it became: **Reflector + a `certificates` namespace**, whose stated
 trigger — a second namespace needing `titan-tls` — fired, and whose move is argued in §7
-and D10. Deleting a row from this table before its trigger fires is the failure mode the
-table exists to prevent, which is why the removal is called out instead of left silent.
+and D10. A second row has gone the same way since: **apps under `50-apps`**, promoted by
+the first workload after the database, which is exactly the trigger that row named. The
+stage now carries the shared Postgres `Cluster` and its `ScheduledBackup` in `databases`,
+and authentik with its declarative `Database`/`DatabaseRole` in `auth` (§4). Deleting a
+row from this table before its trigger fires is the failure mode the table exists to
+prevent, which is why each removal is called out instead of left silent.
 
 ---
 
