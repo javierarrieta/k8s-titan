@@ -807,10 +807,14 @@ Then the human half:
 1. `https://auth.titan.arrieta.eu/if/flow/initial-setup/` → create `akadmin`; log out; log back in.
    That login **is** the test for `AUTHENTIK_LISTEN__TRUSTED_PROXY_CIDRS` — a wrong CIDR produces a
    redirect loop or a mixed-content block, which is far louder than a silent failure.
-2. Confirm objects actually landed in the bucket from outside the cluster — `aws s3 ls
-   s3://k8s-titan-pg-562256260016-eu-west-1-an --region eu-west-1`, or the console. S3 failures are
-   exactly the kind that produce no error anywhere; that is the lesson the etcd snapshot already paid
-   for. Expect `postgres/base/` and `postgres/wals/` under the prefix.
+2. Confirm WAL is actually shipping. The primary check needs only kubectl: `pg_stat_archiver`
+   through `psql` on the instance, with `pg_switch_wal()` to force the question — see
+   `docs/authentik-runbook.md` §1, which also explains why `ContinuousArchiving: True` proves
+   nothing. The independent confirmation is listing the bucket from outside the cluster
+   (`aws s3 ls s3://k8s-titan-pg-562256260016-eu-west-1-an --region eu-west-1`, or the console)
+   and expecting `postgres/base/` and `postgres/wals/` under the prefix — worth doing from
+   wherever the AWS CLI exists, since titan itself has none. S3 failures are exactly the kind
+   that produce no error anywhere; that is the lesson the etcd snapshot already paid for.
 3. Run `scripts/restore-drill.sh` end to end and record the output.
 
 ---

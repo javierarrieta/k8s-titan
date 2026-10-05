@@ -121,15 +121,26 @@ secret-key reference, and there is no instance metadata for barman to fall back 
 you confirm you encrypted the key you meant to without printing a secret. The whole block
 was dry-run with a fake AKIA-shaped pair before being written down.
 
-Then `make check`, commit, merge, and do step 3 for real:
+Step 3 also gets a concrete command instead of "roll the instance pods". Note the counters
+**before** you merge, from §1:
 
 ```bash
-aws s3 ls s3://k8s-titan-pg-562256260016-eu-west-1-an --region eu-west-1 --recursive \
-  | sort -k1 | tail -5          # a segment newer than the merge means WAL is moving
+kubectl -n databases exec postgres-1 -c postgres -- \
+  psql -U postgres -Atc "select archived_count, failed_count from pg_stat_archiver"
 ```
 
-If nothing new appears, the instance manager is still holding the old credentials
-(cloudnative-pg#4914). Recreate the instance pod:
+After the merge, force a segment switch and look again:
+
+```bash
+kubectl -n databases exec postgres-1 -c postgres -- psql -U postgres -Atc "select pg_switch_wal()"
+sleep 20
+kubectl -n databases exec postgres-1 -c postgres -- \
+  psql -U postgres -Atc "select archived_count, last_archived_wal, last_archived_time,
+                                failed_count, last_failed_time from pg_stat_archiver"
+```
+
+`archived_count` up and `failed_count` unchanged is the new credential working. `failed_count`
+moving means the instance manager is still holding the old one (cloudnative-pg#4914):
 
 ```bash
 kubectl -n databases delete pod postgres-1
@@ -137,8 +148,8 @@ kubectl -n databases delete pod postgres-1
 
 That is a single-instance cluster, so it is a write outage of a few seconds and authentik
 will error during it — which is why it is a response to stalled archiving and not a
-reflex after a merge. Watch `kubectl -n databases get cluster postgres -o
-jsonpath='{.status.conditions}'` and re-list the bucket.
+reflex after a merge. Re-run the `pg_stat_archiver` query, and when the counters move, the
+old key can finally be deleted in IAM.
 
 Deleting the old key first leaves the cluster archiving to a bucket it can no longer write
 to, and the failure is silent — see the next subsection.
@@ -148,11 +159,37 @@ to, and the failure is silent — see the next subsection.
 `ContinuousArchiving: True` is not evidence that WAL is reaching the bucket. Before the
 backup configuration existed, that condition was `True` on a cluster that was archiving
 nothing — with no barman destination the archiver skips and still reports success. Trust
-the object listing:
+the archiver's own counters instead, which need nothing but kubectl and psql:
 
 ```bash
-aws s3 ls s3://k8s-titan-pg-562256260016-eu-west-1-an --region eu-west-1 --recursive
+kubectl -n databases exec postgres-1 -c postgres -- \
+  psql -U postgres -Atc "select archived_count, last_archived_wal, last_archived_time,
+                                failed_count, last_failed_time from pg_stat_archiver"
 ```
+
+CNPG ships WAL through `archive_command` calling `barman-cloud-wal-archive`, and Postgres
+records every attempt there — so `archived_count` climbing and `failed_count` flat is the
+credential working, and it is a strictly better signal than a bucket listing: it is the
+archiver's own bookkeeping, it names the failing WAL, and it does not require the AWS CLI
+on the machine you happen to be sitting at. (Needs pod `exec`, so an admin context —
+`k8s-reader` cannot run it.)
+
+Nothing to archive looks identical to archiving working, so force the question:
+
+```bash
+kubectl -n databases exec postgres-1 -c postgres -- \
+  psql -U postgres -Atc "select pg_switch_wal()" && sleep 20
+# …then re-run the query above: archived_count must have moved.
+```
+
+If you do have the AWS CLI somewhere, the object listing is still the independent
+confirmation — `aws s3 ls s3://k8s-titan-pg-562256260016-eu-west-1-an --region eu-west-1
+--recursive` — and it is the only check that proves the bytes landed where you think they
+did rather than that Postgres believes they did.
+
+One caveat to re-check at the 1.31 migration: `pg_stat_archiver` reflects `archive_command`,
+and the Barman Cloud Plugin may not report through it the same way. See the deprecation
+note in §2.
 
 Also watch the PVC. Failed archiving does not raise an error; it accumulates WAL on a
 volume whose `reclaimPolicy` is `Delete`.
