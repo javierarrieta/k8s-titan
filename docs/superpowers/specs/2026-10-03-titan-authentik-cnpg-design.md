@@ -343,7 +343,12 @@ spec:
         accessKeyId:     {name: s3-backup-secrets, key: ACCESS_KEY_ID}
         secretAccessKey: {name: s3-backup-secrets, key: SECRET_ACCESS_KEY}
         region:          {name: s3-backup-secrets, key: AWS_REGION}
-      retentionPolicy: 30d
+    # CORRECTED during implementation: retentionPolicy is a child of spec.backup, not of
+    # barmanObjectStore. Nested one level deep it made the API server reject the whole
+    # Cluster with "field not declared in schema", failing the dry-run and blocking the
+    # entire apps stage. The CRD's spec.backup.properties are barmanObjectStore,
+    # retentionPolicy, target, volumeSnapshot.
+    retentionPolicy: 30d
 ```
 
 Three things this gets right that a first draft got wrong:

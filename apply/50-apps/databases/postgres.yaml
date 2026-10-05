@@ -53,8 +53,14 @@ spec:
         # to the secret containing the region name". There is no EC2 instance metadata on
         # titan for barman to fall back to, so AWS_REGION is required, not optional.
         region:          {name: s3-backup-secrets, key: AWS_REGION}
-      # CRD pattern is ^[1-9][0-9]*[dwm]$ - '30d', NOT '30 days'. CNPG enforces retention
-      # through barman-cloud-backup-delete with these same credentials, so an S3 lifecycle
-      # rule is a backstop for noncurrent versions, not retention. Do not let anyone later
-      # consolidate the two and lose retention.
-      retentionPolicy: 30d
+    # retentionPolicy is a child of spec.backup, NOT of barmanObjectStore. The plan nested
+    # it one level too deep; the API server then rejected the whole Cluster with "field not
+    # declared in schema", the dry-run failed, and every manifest in the apps stage was
+    # blocked behind it. Verified against the v1.30.1 CRD: spec.backup.properties is
+    # barmanObjectStore, retentionPolicy, target, volumeSnapshot.
+    #
+    # CRD pattern is ^[1-9][0-9]*[dwm]$ - '30d', NOT '30 days'. CNPG enforces retention
+    # through barman-cloud-backup-delete with these same credentials, so an S3 lifecycle
+    # rule is a backstop for noncurrent versions, not retention. Do not let anyone later
+    # consolidate the two and lose retention.
+    retentionPolicy: 30d
