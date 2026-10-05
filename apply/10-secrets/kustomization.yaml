@@ -5,3 +5,13 @@ resources:
   # Referenced by the Cluster's s3Credentials, not by a HelmRelease, so `make
   # release-secrets` cannot vouch for it - see the gate's own comment in Makefile.
   - s3-backup-secrets.yaml
+  # Two Secrets in one file, one value shared between them: DatabaseRole needs the password
+  # to ALTER ROLE, authentik needs it to connect, and Reflector is deliberately scoped to
+  # TLS only (spec 5.3) so it cannot carry a credential across namespaces. Duplicating one
+  # value inside one sops file is cheaper than widening Reflector. If they ever drift,
+  # authentik gets "password authentication failed" and the HelmRelease goes red - loud,
+  # not silent.
+  #
+  # authentik-db-credentials is referenced by a DatabaseRole, not a HelmRelease, so
+  # `make release-secrets` cannot vouch for that name the way it does for the others.
+  - authentik-secrets.yaml

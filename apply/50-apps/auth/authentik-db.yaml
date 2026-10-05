@@ -1,0 +1,44 @@
+# authentik's database and role, authored next to the app that owns them so a reviewer
+# sees the whole dependency in one directory (spec 4 A4/A5). Both live in `databases`:
+# a CNPG Database must share a namespace with its Cluster, so "where the app lives" loses
+# to "where the cluster lives" and that is not negotiable.
+#
+# The password is NOT here. It is in apply/10-secrets/authentik-secrets.yaml, encrypted,
+# and referenced by name. This file is safe to read in a public repo because it holds no
+# credential - which is the whole reason DatabaseRole exists as a separate kind.
+apiVersion: postgresql.cnpg.io/v1
+kind: Database
+metadata:
+  name: authentik
+  namespace: databases
+spec:
+  name: authentik
+  owner: authentik
+  cluster:
+    name: postgres
+---
+# Exactly one DatabaseRole may exist for this role. The plan's staging snippet also
+# carried one, so that the shape was visible while authoring the encrypted Secret;
+# committing both makes CNPG reject the duplicate. The committed copy is this one, in git,
+# unencrypted, where a reviewer can read it.
+#
+# DatabaseRole has no `managePassword` field - it takes `passwordSecret`, and that Secret
+# must be kubernetes.io/basic-auth (username + password keys), which is why
+# authentik-db-credentials is that type rather than Opaque.
+#
+# The reload label is what makes a password rotation actually take effect: without it CNPG
+# does not re-apply the role's password when the Secret changes, and the failure shows up
+# later as authentik failing to authenticate - three namespaces away from the cause.
+apiVersion: postgresql.cnpg.io/v1
+kind: DatabaseRole
+metadata:
+  name: authentik
+  namespace: databases
+  labels:
+    cnpg.io/reload: "true"
+spec:
+  name: authentik
+  cluster:
+    name: postgres
+  passwordSecret:
+    name: authentik-db-credentials

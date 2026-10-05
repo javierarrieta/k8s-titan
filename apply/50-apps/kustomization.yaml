@@ -10,3 +10,8 @@ kind: Kustomization
 resources:
   - databases/postgres.yaml
   - databases/postgres-backup.yaml
+  # After the Cluster it depends on: a CNPG Database cannot resolve its clusterRef until
+  # the Cluster exists, and file order here is the apply order Flux uses. The Database may
+  # report Reconciling for a moment before the role lands - that is CNPG retrying, and it
+  # must converge. Still not Synced after a minute is a real failure, not a race.
+  - auth/authentik-db.yaml
