@@ -104,13 +104,59 @@ tell you.
 
 ### Recorded output from the first successful run
 
-> PASTE HERE. Definition of done for this section is that real output from
-> `./scripts/restore-drill.sh` on titan sits in this block. Until it does, this document
-> describes a restore that has only ever been written, and the etcd snapshot in
-> `nixos-configurations` failed silently for four nights for exactly that reason.
+Run on titan, 2026-10-05, operator 1.30.1 / Postgres 18.6, `DELETE=1`:
 
 ```
-(not yet run on the live cluster)
+== preflight
+   existing backup: postgres-manual completed
+   source postgres Ready
+   1 completed backup(s) present
+== seeding a nonce into postgres so the restore has something to prove
+NOTICE:  database "drill" does not exist, skipping
+INSERT 0 1
+   seeded nonce: drill-20261005092617-353645
+== taking Backup drill-20261005092617
+backup.postgresql.cnpg.io/drill-20261005092617 created
+backup.postgresql.cnpg.io/drill-20261005092617 condition met
+   backupId=20261005T092619 beginWal=00000001000000000000000B
+== standing up scratch cluster postgres-drill from s3://k8s-titan-pg-562256260016-eu-west-1-an/postgres
+Warning: Native support for Barman Cloud backups and recovery is deprecated and will be
+completely removed in CloudNativePG 1.31.0. Found usage in:
+spec.externalClusters.0.barmanObjectStore. Please migrate existing clusters to the new
+Barman Cloud Plugin to ensure a smooth transition.
+cluster.postgresql.cnpg.io/postgres-drill created
+== waiting for postgres-drill to become Ready (recovery can take minutes)
+cluster.postgresql.cnpg.io/postgres-drill condition met
+== asserting the restore is real
+PASS: restored value matches the seeded nonce 'drill-20261005092617-353645'
+PASS: restore drill complete - postgres-drill recovered from s3://k8s-titan-pg-562256260016-eu-west-1-an/postgres
+cleaned up scratch cluster postgres-drill
+(Backup drill-20261005092617 left in databases as the record)
+```
+
+A value written seconds earlier came back out of the object store through a rebuilt
+cluster. That is the claim the whole backup section was making.
+
+### The deprecation warning in that log is real debt
+
+The webhook says native Barman Cloud support is removed in **1.31.0** — not "a future
+release". The operator pin is 1.30.1, so this works today, but the migration to the
+Barman Cloud Plugin is a prerequisite for the next operator minor, touching the
+`Cluster`, the `ScheduledBackup`, and this drill's `externalClusters` entry at once. It is
+tracked as forward debt in `apply/50-apps/databases/postgres.yaml`; it is not a drive-by
+edit and should not be attempted as a side effect of something else.
+
+### Point-in-time, still to run
+
+The drill above recovers to *latest*, which cannot tell you whether `recoveryTarget` is
+honoured or ignored. The PITR variant restores to before the marker existed and asserts it
+is absent. It needs a target after the earliest base backup and a query that survives the
+marker not existing yet:
+
+```bash
+TARGET_TIME="$(date -u -d '-40 minutes' +%FT%T+00:00)" SEED=0 EXPECT=absent \
+  CHECK_DB=postgres CHECK_SQL="select datname from pg_database where datname='drill'" \
+  ./scripts/restore-drill.sh
 ```
 
 ### Offline checks that do not prove the restore works
