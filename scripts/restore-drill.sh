@@ -227,7 +227,7 @@ if [ "$EXPECT" = "absent" ]; then
   say "PASS: $CHECK_SQL returned no rows at target ${TARGET_TIME:-latest}, as expected"
 elif [ -n "$EXPECT" ]; then
   [ "$got" = "$EXPECT" ] || { say "FAIL: expected '$EXPECT', got '$got'"; exit 1; }
-  say "PASS: restored value matches the seeded nonce '$got'"
+  say "PASS: restored value matches the expected value '$got'"
 else
   # "At least one row" is the weakest of the three branches: a query that always returns a
   # row (count(*), show_settings, anything aggregate) passes here even when it reports
