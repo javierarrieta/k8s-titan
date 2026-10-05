@@ -997,7 +997,10 @@ it puts a plaintext password in a pod spec for no benefit, since the first login
 >    `if ! got=$(…)` so a failed query reports psql's own text instead of vanishing. Plus an
 >    `ERR` trap, so no future abort is silent. Lesson: an assertion that cannot distinguish "the
 >    query broke" from "the value is wrong" is not an assertion, and the plan's own PITR section
->    already warned about exactly that confusion while committing it here.
+>    already warned about exactly that confusion while committing it here. **The drill has since
+>    gone green on titan** with `authentik_core_user` — recorded verbatim in
+>    `docs/authentik-runbook.md` §2, which is the first restore proven against a row authentik
+>    itself wrote rather than a nonce the drill planted.
 >
 > Also: the preflight's hint used `kubectl create backup manual --cluster postgres`, which is
 > `kubectl cnpg` plugin syntax and does not exist in plain kubectl.
