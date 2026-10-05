@@ -601,6 +601,24 @@ produces; a typo there is invisible in the Certificate's own status.
 **Files:** `apply/10-secrets/authentik-secrets.yaml`, `apply/10-secrets/kustomization.yaml`,
 `apply/50-apps/auth/authentik-db.yaml`, `apply/50-apps/kustomization.yaml`
 
+> **Two corrections found on the live cluster; the shipped form is `apply/50-apps/auth/authentik-db.yaml`.**
+>
+> 1. **`login: true` was missing from the snippet below.** The design spec has it (§5, the
+>    `DatabaseRole` block); this plan dropped it. CNPG creates the role **NOLOGIN** when `login`
+>    is absent — the CRD declares no default — so the role exists, the `Database` accepts it as
+>    owner, and every connection fails with "not permitted to connect". Live symptom: `\du authentik`
+>    reported `Cannot login` and the `Database` sat on `role "authentik" does not exist`.
+> 2. **`cnpg.io/reload: "true"` is on the wrong object below.** It belongs on the referenced
+>    **Secret**, not on the `DatabaseRole`. Upstream `declarative_role_management.md` (v1.30.1):
+>    "Password changes in labeled Secrets are applied immediately, while changes in unlabeled
+>    Secrets are only applied at a subsequent reconciliation." On the `DatabaseRole` it does nothing
+>    at all, so a password rotation would silently not take effect — the exact class of deferred,
+>    far-from-the-cause failure this plan is supposed to be closing.
+>
+> Also: the staging flow below uses `openssl rand`, which is not present on every workstation. It
+> produced two **empty** passwords on the first attempt, silently. Guard the generated values with a
+> length check before encrypting.
+
 ```bash
 export SOPS_AGE_KEY_FILE=$HOME/.config/sops/age/titan-k8s-key.txt
 stage=apply/10-secrets/.staging.authentik.yaml

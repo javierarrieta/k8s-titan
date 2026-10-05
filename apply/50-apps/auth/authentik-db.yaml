@@ -24,21 +24,28 @@ spec:
 #
 # DatabaseRole has no `managePassword` field - it takes `passwordSecret`, and that Secret
 # must be kubernetes.io/basic-auth (username + password keys), which is why
-# authentik-db-credentials is that type rather than Opaque.
+# authentik-db-credentials is that type rather than Opaque. The username in that Secret must
+# match the role name, or the password is set for a role nobody connects as.
 #
-# The reload label is what makes a password rotation actually take effect: without it CNPG
-# does not re-apply the role's password when the Secret changes, and the failure shows up
-# later as authentik failing to authenticate - three namespaces away from the cause.
+# NOTE ON THE MISSING cnpg.io/reload LABEL: it belongs on the referenced *Secret*, not on
+# the DatabaseRole. Upstream (declarative_role_management.md, v1.30.1): "Password changes
+# in labeled Secrets are applied immediately, while changes in unlabeled Secrets are only
+# applied at a subsequent reconciliation." The plan had it here, which does nothing. The
+# label is on authentik-db-credentials in apply/10-secrets/, where it actually works.
 apiVersion: postgresql.cnpg.io/v1
 kind: DatabaseRole
 metadata:
   name: authentik
   namespace: databases
-  labels:
-    cnpg.io/reload: "true"
 spec:
   name: authentik
   cluster:
     name: postgres
+  # Required, and easy to miss because nothing complains when it is absent. CNPG creates the
+  # role NOLOGIN by default - the CRD has no default for `login` - so without this the role
+  # exists, the Database reports it as its owner, and every connection attempt fails with
+  # "role authentik is not permitted to connect". Observed live: `\du authentik` returned
+  # "Cannot login" and the Database was stuck on `role "authentik" does not exist`.
+  login: true
   passwordSecret:
     name: authentik-db-credentials
