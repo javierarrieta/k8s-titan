@@ -378,14 +378,25 @@ metadata:
   name: postgres-daily
   namespace: databases
 spec:
-  schedule: "0 3 * * *"
+  schedule: "0 0 3 * * *"
   method: barmanObjectStore
-  backupOwnerReference: self
+  backupOwnerReference: cluster
   cluster: {name: postgres}
 ```
 
-`backupOwnerReference: self` keeps the backups owned by the `ScheduledBackup`, so pruning the
-schedule does not prune the backups it produced.
+**Corrected during implementation; the original text here was wrong in two ways, both silent.**
+
+The schedule was `"0 3 * * *"`. CNPG pins `robfig/cron` v1.2.0, whose default parser is
+`Second|Minute|Hour|Dom|Month|DowOptional` — the optional field is the day of week at the *end*, not
+seconds at the front. Five fields therefore parse as second 0, minute 3, every hour: 24 base backups a
+day, not one at 03:00. Verified by running v1.2.0. The CRD sets no pattern on `spec.schedule` and the
+admission webhook only warns — the object is admitted, the Flux reconcile stays green, and the
+warning reaches only the kustomize-controller log — so nothing stops it.
+
+`backupOwnerReference: self` was justified as keeping pruning from taking the backups. Owner
+references cascade, so `self` is precisely the value under which deleting the `ScheduledBackup`
+garbage-collects every `Backup` it produced. `cluster` ties them to the `Cluster`, which carries
+`kustomize.toolkit.fluxcd.io/prune: disabled`.
 
 ### 7.3 Credentials: a dedicated IAM user, and one lesson already paid for
 

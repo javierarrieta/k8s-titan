@@ -2,3 +2,6 @@ apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:
   - ovh-domain-secrets.yaml
+  # Referenced by the Cluster's s3Credentials, not by a HelmRelease, so `make
+  # release-secrets` cannot vouch for it - see the gate's own comment in Makefile.
+  - s3-backup-secrets.yaml

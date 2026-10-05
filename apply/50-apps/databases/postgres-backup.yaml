@@ -1,0 +1,39 @@
+# The daily base backup. WAL archiving is continuous and implicit the moment a
+# barmanObjectStore exists, so this file is only the base-backup schedule - the WAL
+# between 03:00 and the failure is already shipped (spec 7.1).
+apiVersion: postgresql.cnpg.io/v1
+kind: ScheduledBackup
+metadata:
+  name: postgres-daily
+  namespace: databases
+spec:
+  # SIX fields, and that is not pedantry. CNPG pins robfig/cron v1.2.0, whose default parser
+  # is Second|Minute|Hour|Dom|Month|DowOptional: the optional field is the day of week at
+  # the END, not seconds at the front. So the familiar 5-field "0 3 * * *" is not 03:00
+  # daily - it is second 0, minute 3, every hour, every day, and it fires 24 base backups
+  # a day off the single primary. Verified by running v1.2.0: it yields 09:03, 10:03,
+  # 11:03. Nothing stops this on the way in - the CRD puts no pattern on spec.schedule,
+  # and the admission webhook only warns, so the object is admitted, the Flux reconcile
+  # goes green, and the warning lands in the kustomize-controller log nobody tails. That
+  # is the exact failure class this whole plan exists to close.
+  schedule: "0 0 3 * * *"
+  method: barmanObjectStore
+  # 'cluster', NOT 'self'. Owner references give cascading deletion, so the value decides
+  # which git accident destroys the backup records:
+  #   self    - the ScheduledBackup owns the Backups, so deleting THIS file garbage-collects
+  #             every Backup it produced. That is the value to avoid, not the safe one.
+  #   cluster - the Cluster owns them, and the Cluster carries
+  #             kustomize.toolkit.fluxcd.io/prune: disabled, so deleting this file orphans
+  #             nothing. Losing the backups then requires the deliberate
+  #             `kubectl delete cluster postgres` that already deletes the database.
+  #   none    - CNPG's default, and it survives both of those: Backup objects are resolved
+  #             from spec.cluster.name, not from owner refs, so they are reconciled fine
+  #             with no owner at all. Rejected only because they then belong to nothing and
+  #             accumulate forever, one per day, outliving everything they describe.
+  # Whether the object-store data follows a deleted Backup CR is not documented upstream -
+  # cloudnative-pg#2328 asks for object-store cleanup on cluster deletion and does not get
+  # it - so this choice is about not destroying the records either way, not about relying
+  # on the S3 side surviving.
+  backupOwnerReference: cluster
+  cluster:
+    name: postgres
