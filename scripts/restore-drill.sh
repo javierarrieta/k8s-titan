@@ -50,8 +50,15 @@ TARGET_TIME=${TARGET_TIME:-}   # ISO8601 UTC for a point-in-time drill, empty = 
 WAIT=${WAIT:-20m}
 DELETE=${DELETE:-1}
 
-NONCE="drill-$(date -u +%Y%m%dT%H%M%SZ)-$$"
-BACKUP="drill-$(date -u +%Y%m%dT%H%M%SZ)"
+# Object names must be lowercase RFC 1123. `date +%Y%m%dT%H%M%SZ` emits an uppercase T and
+# Z, and the API server rejects the Backup with "a lowercase RFC 1123 subdomain must
+# consist of..." - which is exactly the kind of thing a stub harness cannot catch, since
+# it is validation the API server does. Found on the first live run.
+NOW=$(date -u +%Y%m%d%H%M%S)
+NONCE="drill-${NOW}-$$"
+BACKUP="drill-${NOW}"
+
+CREATED=0
 
 say() { printf '%s\n' "$*"; }
 
@@ -66,7 +73,10 @@ cleanup() {
       kubectl -n "$NS" exec "$SRC-1" -c postgres -- \
         psql -U postgres -Atc 'drop database if exists drill' >/dev/null 2>&1 || true
     fi
-    say "cleaned up scratch cluster $DRILL (Backup $BACKUP left in $NS as the record)"
+    if [ "$CREATED" = "1" ]; then
+      say "cleaned up scratch cluster $DRILL"
+    fi
+    say "(Backup $BACKUP left in $NS as the record)"
   else
     say "DELETE=0: leaving $DRILL and the seeded drill database in place"
   fi
@@ -95,10 +105,18 @@ if ! printf '%s\n' "$phases" | grep -q '[Cc]ompleted'; then
   exit 1
 fi
 printf '%s\n' "$phases" | sed 's/^/   existing backup: /'
-kubectl -n "$NS" get cluster "$SRC" -o jsonpath='{.status.conditions}' \
-  | grep -q '"type":"Ready","status":"True"' \
-  || say "WARN: source cluster $SRC is not Ready; continuing anyway"
-say "   source $SRC ok, $(printf '%s\n' "$phases" | grep -c '[Cc]ompleted') completed backup(s) present"
+# Ask for the one field, do not grep the serialised JSON: kubectl emits condition keys in
+# alphabetical order, so status precedes type and a pattern like
+# '"type":"Ready","status":"True"' never matches a cluster that is perfectly healthy. It
+# warned on a Ready cluster on the first live run. A jsonpath filter cannot get that wrong.
+ready=$(kubectl -n "$NS" get cluster "$SRC" \
+  -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || true)
+if [ "$ready" != "True" ]; then
+  say "WARN: source cluster $SRC is not Ready (condition says '${ready:-absent}'); continuing anyway"
+else
+  say "   source $SRC Ready"
+fi
+say "   $(printf '%s\n' "$phases" | grep -c '[Cc]ompleted') completed backup(s) present"
 
 if [ "$SEED" = "1" ]; then
   say "== seeding a nonce into $SRC so the restore has something to prove"
@@ -167,6 +185,7 @@ $( [ -n "$TARGET_TIME" ] && printf '      recoveryTarget:\n        targetTime: %
           secretAccessKey: {name: $BACKUP_SECRET, key: SECRET_ACCESS_KEY}
           region:          {name: $BACKUP_SECRET, key: AWS_REGION}
 EOF
+CREATED=1
 
 say "== waiting for $DRILL to become Ready (recovery can take minutes)"
 kubectl -n "$NS" wait --for=condition=Ready "cluster/$DRILL" --timeout="$WAIT"
