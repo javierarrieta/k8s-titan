@@ -15,3 +15,6 @@ resources:
   # report Reconciling for a moment before the role lands - that is CNPG retrying, and it
   # must converge. Still not Synced after a minute is a real failure, not a race.
   - auth/authentik-db.yaml
+  # After the Database and DatabaseRole it connects with. The HelmRelease would install and
+  # authentik would crash-loop on a missing role, so ordering here is cheap insurance.
+  - auth/authentik.yaml
