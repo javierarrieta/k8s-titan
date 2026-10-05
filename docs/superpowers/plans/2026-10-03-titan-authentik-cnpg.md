@@ -987,6 +987,17 @@ it puts a plaintext password in a pod spec for no benefit, since the first login
 >    `SEED=0 CHECK_DB=authentik CHECK_SQL="select username from core_user where username='akadmin'" EXPECT=akadmin`.
 >    `SEED=0` because seeding overwrites `EXPECT` with the nonce. Recorded in
 >    `docs/authentik-runbook.md` §2 and in the script's own header.
+> 6. **`core_user` is not a table, and the script hid the fact.** Found on the first live run of
+>    the authentik-shaped drill: psql answered `relation "core_user" does not exist`, and the
+>    drill printed its `== asserting` header, ran cleanup, and exited 1 with no verdict — under
+>    `set -e` the failing `got=$(kubectl exec … 2>&1)` aborted before any comparison, and the
+>    `EXIT` trap deleted the scratch cluster behind it. Two fixes: the table is
+>    `authentik_core_user` (Django default `<app_label>_<model>`; authentik's core app label is
+>    `authentik_core`, and `User.Meta` sets no `db_table`), and the assertion now runs under
+>    `if ! got=$(…)` so a failed query reports psql's own text instead of vanishing. Plus an
+>    `ERR` trap, so no future abort is silent. Lesson: an assertion that cannot distinguish "the
+>    query broke" from "the value is wrong" is not an assertion, and the plan's own PITR section
+>    already warned about exactly that confusion while committing it here.
 >
 > Also: the preflight's hint used `kubectl create backup manual --cluster postgres`, which is
 > `kubectl cnpg` plugin syntax and does not exist in plain kubectl.
