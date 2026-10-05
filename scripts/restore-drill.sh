@@ -20,13 +20,14 @@
 # empty database restored.
 #
 # The count(*) form is a trap, and the plan's original line had it. With no EXPECT set the
-# assertion below is "the query returned at least one row", and `select count(*) from
-# core_user` always returns exactly one row - holding 0. So it passes on a database with no
-# users. Point it at a named row instead, and pin EXPECT:
+# assertion below is "the query returned at least one row", and count(*) always returns
+# exactly one row - holding 0. So it passes on a database with no users. Point it at a named
+# row instead, and pin EXPECT:
 #   SEED=0 CHECK_DB=authentik \
-#     CHECK_SQL="select username from core_user where username='akadmin'" EXPECT=akadmin
-# SEED=0 because seeding overwrites EXPECT with the nonce; the two styles do not mix.
-# Worked example in docs/authentik-runbook.md §2.
+#     CHECK_SQL="select username from authentik_core_user where username='akadmin'" EXPECT=akadmin
+# authentik_core_user, not core_user: Django's default table is <app_label>_<model> and
+# authentik's core app label is authentik_core. SEED=0 because seeding overwrites EXPECT with
+# the nonce; the two styles do not mix. Worked example in docs/authentik-runbook.md §2.
 #
 # WHY THE RECOVERY SHAPE LOOKS LIKE THIS. The plan used
 # bootstrap.recovery.barmanObjectStore, which does not exist in the 1.30.1 CRD -
@@ -90,6 +91,9 @@ cleanup() {
   fi
 }
 trap cleanup EXIT
+# No silent exits. `set -e` alone can abort between two `say` lines with no explanation at
+# all - that is how the assertion bug above presented - so any abort names itself first.
+trap 'rc=$?; [ "$rc" -ne 0 ] && say "FAIL: drill aborted (exit $rc) at line $LINENO"' ERR
 
 say "== preflight"
 command -v kubectl >/dev/null 2>&1 || { say "FAIL: kubectl not on PATH"; exit 1; }
@@ -201,7 +205,21 @@ kubectl -n "$NS" wait --for=condition=Ready "cluster/$DRILL" --timeout="$WAIT"
 say "== asserting the restore is real"
 # CNPG's condition is Ready, not Healthy; --for=condition=Healthy never resolves and
 # you find out only after the whole timeout has burned.
-got=$(kubectl -n "$NS" exec "$DRILL-1" -c postgres -- psql -U postgres -d "$CHECK_DB" -Atc "$CHECK_SQL" 2>&1)
+#
+# `if !` instead of a bare assignment, and this is the bug it fixes: under `set -e` a
+# non-zero psql aborts the script at the assignment, the EXIT trap deletes the scratch
+# cluster behind it, and the drill prints its "== asserting" header and then nothing - no
+# PASS, no FAIL, just a non-zero exit. Observed on titan 2026-10-05. The `2>&1` was always
+# meant to bring psql's error text into the report; without the guard that text is captured
+# into a variable that is never printed. A broken query must not look like a finished drill.
+if ! got=$(kubectl -n "$NS" exec "$DRILL-1" -c postgres -- \
+    psql -U postgres -d "$CHECK_DB" -Atc "$CHECK_SQL" 2>&1); then
+  say "FAIL: the assertion query itself failed - this is NOT a value mismatch. psql said:"
+  printf '%s\n' "$got" | sed 's/^/     /'
+  say "      A missing table or database here means CHECK_DB/CHECK_SQL are wrong, not that"
+  say "      the restore is broken. See docs/authentik-runbook.md §2."
+  exit 1
+fi
 rows=$(printf '%s\n' "$got" | sed '/^$/d' | wc -l | tr -d ' ')
 
 if [ "$EXPECT" = "absent" ]; then

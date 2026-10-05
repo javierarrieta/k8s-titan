@@ -2,8 +2,8 @@
 
 - **Date:** 2026-10-03
 - **Status:** implemented on titan. The backup path has been drilled (restore and
-  point-in-time, both recorded in `docs/authentik-runbook.md` §2) and authentik serves
-  `https://auth.titan.arrieta.eu/`. Two items stay open: the first-admin flow (§10) and the
+  point-in-time, both recorded in `docs/authentik-runbook.md` §2), authentik serves
+  `https://auth.titan.arrieta.eu/`, and its first admin exists. One item stays open: the
   exposed-key rotation (§12).
 - **Repo:** `javierarrieta/k8s-titan` (public)
 - **Cluster:** `titan` — single-node k3s on OVH bare metal, NixOS-managed, live and green

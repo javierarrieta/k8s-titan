@@ -5,10 +5,11 @@ depends on it. Written against operator 1.30.1 / Postgres 18.6 on titan.
 
 **Proven vs pending.** Everything below describes a deployed system: the backup path, the
 restore drill, point-in-time recovery, the CloudNativePG operator, the shared `Cluster`, and
-authentik itself are all live on titan and were checked rather than assumed. Two things are
-not done. The **first-admin flow has not been run** — `/if/flow/initial-setup/` still answers
-200, which is the proof nobody has completed it (§4) — and the **S3 backup key is still the
-exposed one** (§1). Sections say which of their claims were observed and which are reasoning.
+authentik itself are all live on titan and were checked rather than assumed, and the first
+admin exists (§4). What is not done: the **S3 backup key is still the exposed one** (§1), and
+the restore drill has not yet **passed** against authentik's own tables — its first attempt died
+ on a wrong table name, and the two bugs that hid that are in §2. Sections say which
+of their claims were observed and which are reasoning.
 
 ---
 
@@ -113,9 +114,26 @@ named row in a real database rather than a nonce we planted:
 
 ```
 SEED=0 CHECK_DB=authentik \
-  CHECK_SQL="select username from core_user where username='akadmin'" \
+  CHECK_SQL="select username from authentik_core_user where username='akadmin'" \
   EXPECT=akadmin ./scripts/restore-drill.sh
 ```
+
+**The table is `authentik_core_user`, not `core_user`.** The first live run of this command
+failed, and the reason was a wrong table name carried in from the plan, never checked. It is
+knowable from authentik's own source: `authentik/core/apps.py` sets `label =
+"authentik_core"`, the `User` model's `Meta` sets no `db_table`, so Django's default
+`<app_label>_<model>` applies — and the sibling models in `core/models.py` that *do* set
+`db_table` (`authentik_core_groupparentage`, `authentik_core_groupancestry`) confirm the
+convention. Query `core_user` and psql answers `relation "core_user" does not exist`.
+
+And the drill did not say that. It printed `== asserting the restore is real`, then cleanup,
+and exited 1 with no verdict at all: under `set -e` the failing `got=$(kubectl exec … 2>&1)`
+aborted the script before any comparison, and the `EXIT` trap deleted the scratch cluster
+behind it. The `2>&1` had been capturing psql's error into a variable nothing ever printed.
+Reproduced with a stub `kubectl` that exits non-zero, fixed with `if ! got=$(…)`, and the
+three assertion paths are exercised again: a failed query now prints
+`FAIL: the assertion query itself failed - this is NOT a value mismatch` followed by psql's
+own text, which is the distinction the PITR section below spends a paragraph on.
 
 **Do not write that assertion as `select count(*) from core_user`.** The script's bare
 assertion is "the query returned at least one row", and `count(*)` always returns exactly
@@ -126,13 +144,21 @@ real `psql` prints:
 PASS: select count(*) from core_user returned 1 row(s): 0
 ```
 
+(That stub run predates the table-name correction above; the vacuousness is the finding, not
+the table.)
+
 That is a restore drill reporting success on a database with no users in it. The form above
 cannot do that: no `akadmin` row means no rows, and the drill says
 `FAIL: expected 'akadmin', got ''`. `SEED=0` because seeding a nonce would overwrite
 `EXPECT` with the nonce; the two assertion styles do not mix.
 
-Until the first admin exists (§4) this command fails, and that is the correct answer — the
-drill is asserting something that is genuinely not true yet.
+A failed query and a mismatched value are different failures and must not look alike — see
+the two bugs above, where the first live run produced neither message.
+
+**Status of the authentik-shaped drill: attempted, not yet passed.** The first run against
+authentik's own tables died on the two bugs above, so this assertion is still owed a green
+run. The two recorded runs further down predate authentik entirely — they prove the restore
+mechanics and point-in-time recovery, not this query.
 
 Point-in-time is supported by the same script and is the drill worth doing second,
 because PITR is what an incident actually needs:
@@ -279,23 +305,35 @@ first login is a human act anyway.
 
 ## 4. First admin
 
-**Still to do.** The endpoint is live and answers exactly as specified:
+**Done — `akadmin` exists**, created through the browser flow on 2026-10-05. No admin
+password ever entered git, and `AUTHENTIK_BOOTSTRAP_PASSWORD` remains deliberately unused
+(§3).
+
+How to tell from outside, without a credential: watch where `/` sends you.
 
 ```bash
-curl -sS -o /dev/null -w '%{http_code}\n' https://auth.titan.arrieta.eu/if/flow/initial-setup/
-# 200   — and 404 without the trailing slash, so the slash is not decoration
+curl -sS -o /dev/null -w '%{redirect_url}\n' https://auth.titan.arrieta.eu/
+# before the admin existed:  .../setup      (and /setup bounced to /if/flow/initial-setup/)
+# now:                      .../flows/-/default/authentication/?next=/
 ```
 
-A `200` there means authentik is still serving the first-run flow, which it has no reason to
-do once an admin exists — nobody has completed it. Browser flow at
-`https://auth.titan.arrieta.eu/if/flow/initial-setup/` — **trailing slash required** —
-create `akadmin`, log out, log back in. No admin password ever enters git;
-`AUTHENTIK_BOOTSTRAP_PASSWORD` is deliberately unused (§3).
+That chain ends at `/if/flow/default-authentication-flow/` with a `200`, which is the login
+page, and it is the observable difference between an empty authentik and a provisioned one.
 
-That login is the intended test of `AUTHENTIK_LISTEN__TRUSTED_PROXY_CIDRS`: a wrong CIDR
-produces a redirect loop or a mixed-content block, far louder than anything in the logs.
-Part of it is already proven without a browser — see §5 — but the login itself is the
-remaining half and it has not been walked.
+**A correction to what this section said when it was written.** It claimed that
+`/if/flow/initial-setup/` answering `200` was the evidence no admin existed. Wrong, and it
+was wrong the whole time: that path serves authentik's SPA shell — about 6 KB, `title:
+authentik`, stage state resolved client-side — so its status code says nothing about whether
+an admin exists. It answers `200` today with an admin in place. The redirect target of `/`
+is the signal; the initial-setup status is not. The trailing slash really is required (404
+without it), but that was about reaching the flow at all, and it still holds.
+
+The log-out-and-log-back-in half of the flow is the intended test of
+`AUTHENTIK_LISTEN__TRUSTED_PROXY_CIDRS`: a wrong CIDR produces a redirect loop or a
+mixed-content block, far louder than anything in the logs. Much of it is already proven
+without a browser — authentik's own access log records `scheme: https` for proxied requests
+(§5) — but a real round trip through the login page is the half that exercises a session
+cookie, and it is worth walking once deliberately rather than discovering on a phone.
 
 ---
 
@@ -323,7 +361,7 @@ below is what the read-only identity proves by effect, recorded 2026-10-05 at
 | TLS handshake to `auth.titan.arrieta.eu:443` | leaf `CN=titan.arrieta.eu`, SAN `*.titan.arrieta.eu` + `titan.arrieta.eu`, issuer Let's Encrypt, verifies against the system CA — so Reflector's copy in `auth` exists and is current |
 | `kubectl -n databases get pods,pvc` | `postgres-1` `1/1 Running`, PVC `Bound` 10Gi `local-path`, **zero Warning events** in the namespace |
 | `kubectl -n auth get pods` | `authentik-server` + `authentik-worker` `1/1 Running` |
-| `https://auth.titan.arrieta.eu/` | `302 → /setup`, `/setup` `302 → /if/flow/initial-setup/`, that `200` |
+| `https://auth.titan.arrieta.eu/` | `302 → /setup`, `/setup` `302 → /if/flow/initial-setup/`, that `200` — the *no admin yet* shape; see §4 for what it looks like now |
 | server access log | `"scheme": "https"` on a request that arrived through Traefik from the pod CIDR |
 
 That last row is the trusted-proxy proof. authentik 2026.8 honours `X-Forwarded-Proto`
