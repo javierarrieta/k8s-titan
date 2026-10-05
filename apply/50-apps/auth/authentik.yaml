@@ -1,0 +1,102 @@
+# authentik, the reason this cluster exists. Chart 2026.8.3 verified by pulling it:
+# Chart.yaml appVersion 2026.8.3, and `grep -ci redis values.yaml` returns 0 - Redis was
+# removed in authentik 2025.10, so a redis: block would be dead weight that reads as if
+# something needed it.
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: HelmRepository
+metadata:
+  name: authentik-repo
+  namespace: auth
+spec:
+  interval: 12h
+  url: https://charts.goauthentik.io
+---
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: authentik
+  namespace: auth
+spec:
+  releaseName: authentik
+  interval: 30m
+  timeout: 10m
+  chart:
+    spec:
+      chart: authentik
+      version: "2026.8.3"
+      sourceRef:
+        kind: HelmRepository
+        name: authentik-repo
+  driftDetection:
+    mode: enabled
+  install:
+    strategy:
+      name: RetryOnFailure
+      retryInterval: 5m
+  upgrade:
+    strategy:
+      name: RetryOnFailure
+      retryInterval: 5m
+  values:
+    authentik:
+      log_level: info
+      error_reporting:
+        # Sends stack traces to authentik's own Sentry. Opt-in, and off here.
+        enabled: false
+      listen:
+        # 2026.8 is a breaking change: forwarded headers (X-Forwarded-For/-Proto/-Host) are
+        # honoured ONLY from listed CIDRs. Get this wrong and HTTPS is interpreted as HTTP -
+        # blocked mixed content, an endless spinner, or an auth error, with nothing in the logs.
+        #
+        # Two traps, both checked against the docs rather than assumed:
+        #   * the format is a COMMA-SEPARATED STRING, not a JSON list. authentik's own fix
+        #     (goauthentik/authentik#8075) says the format is '127.0.0.0/8,::1/128' and
+        #     explicitly not '["127.0.0.0/8","::1/128"]'.
+        #   * setting this REPLACES the defaults, which already include 10.0.0.0/8 - and
+        #     titan's pod CIDR 10.62.0.0/16 sits inside it. So not setting it at all would
+        #     work. This is a deliberate tightening, which is why loopback rides along:
+        #     without 127.0.0.0/8, `kubectl port-forward` debugging gets no forwarded headers.
+        trusted_proxy_cidrs: "10.62.0.0/16,127.0.0.0/8"
+      web:
+        path: /
+        # Recommended now, REQUIRED in 2026.11. Free to set today, removes an upgrade surprise.
+        base_url: https://auth.titan.arrieta.eu/
+      postgresql:
+        # CNPG's read-write service. The chart's own default is '{{ .Release.Name }}-postgresql',
+        # i.e. the bundled subchart we are not using.
+        host: postgres-rw.databases.svc.cluster.local
+        port: 5432
+        name: authentik
+        user: authentik
+        # password deliberately absent - empty values are skipped by the chart's env helper,
+        # so it comes from the Secret below and nothing else can shadow it.
+    global:
+      # The chart's own mechanism for injecting env from a Secret. There is deliberately NO
+      # valuesFrom here: Flux's default valuesKey is values.yaml, and a Secret reference
+      # without that key fails the release with "key not found" - which looks like a Flux bug
+      # rather than a misconfiguration. `make release-secrets` scans this exact path so the
+      # Secret name is still checked offline.
+      envFrom:
+        - secretRef:
+            name: authentik-secrets
+    postgresql:
+      # The bundled Bitnami subchart. Off: the database is the shared CNPG Cluster.
+      enabled: false
+    server:
+      replicas: 1
+      service:
+        type: ClusterIP
+      ingress:
+        enabled: true
+        ingressClassName: traefik
+        hosts:
+          - auth.titan.arrieta.eu
+        tls:
+          - hosts:
+              - auth.titan.arrieta.eu
+            # Reflector's copy of the Certificate from `certificates` (Task 6). Not created
+            # by this release, and NOT checked by make release-secrets - the gate scans
+            # valuesFrom and envFrom.secretRef, never ingress secretName, on purpose.
+            secretName: titan-tls
+    worker:
+      replicas: 1
