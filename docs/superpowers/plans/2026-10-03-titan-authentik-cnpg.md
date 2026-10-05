@@ -471,7 +471,10 @@ Extend the `Cluster` spec from Task 4:
       # through barman-cloud-backup-delete with these same credentials, so an S3 lifecycle
       # rule is a backstop for noncurrent versions, not retention. Do not let anyone later
       # consolidate the two and lose retention.
-      retentionPolicy: 30d
+      # CORRECTED: retentionPolicy is a child of spec.backup, not of barmanObjectStore.
+      # Nested here it made the API server reject the whole Cluster ("field not declared in
+      # schema"), the dry-run failed, and the entire apps stage was blocked.
+    retentionPolicy: 30d
 ```
 
 `apply/50-apps/databases/postgres-backup.yaml`:
