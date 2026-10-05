@@ -146,18 +146,61 @@ Barman Cloud Plugin is a prerequisite for the next operator minor, touching the
 tracked as forward debt in `apply/50-apps/databases/postgres.yaml`; it is not a drive-by
 edit and should not be attempted as a side effect of something else.
 
-### Point-in-time, still to run
+### Point-in-time — recorded
 
-The drill above recovers to *latest*, which cannot tell you whether `recoveryTarget` is
-honoured or ignored. The PITR variant restores to before the marker existed and asserts it
-is absent. It needs a target after the earliest base backup and a query that survives the
-marker not existing yet:
+A latest-recovery drill cannot tell you whether `recoveryTarget` is honoured or ignored.
+This is the pair that proves it: same bucket, same base backups, different target,
+**opposite answers**.
 
-```bash
-TARGET_TIME="$(date -u -d '-40 minutes' +%FT%T+00:00)" SEED=0 EXPECT=absent \
-  CHECK_DB=postgres CHECK_SQL="select datname from pg_database where datname='drill'" \
-  ./scripts/restore-drill.sh
+Target `2026-10-05T09:00:00+00:00`, before the marker existed, asserting absence:
+
 ```
+== preflight
+   existing backup: drill-20261005092617 completed
+   existing backup: drill-20261005100759 completed
+   existing backup: postgres-manual completed
+   source postgres Ready
+   3 completed backup(s) present
+== taking Backup drill-20261005104938
+   backupId=20261005T104940 beginWal=000000010000000000000012
+== standing up scratch cluster postgres-drill from s3://k8s-titan-pg-562256260016-eu-west-1-an/postgres
+   recovering to a point in time: 2026-10-05T09:00:00+00:00 (exclusive)
+cluster.postgresql.cnpg.io/postgres-drill created
+== waiting for postgres-drill to become Ready (recovery can take minutes)
+cluster.postgresql.cnpg.io/postgres-drill condition met
+== asserting the restore is real
+PASS: select datname from pg_database where datname='drill' returned no rows at target 2026-10-05T09:00:00+00:00, as expected
+PASS: restore drill complete - postgres-drill recovered from s3://k8s-titan-pg-562256260016-eu-west-1-an/postgres
+```
+
+It restored from the 08:27 base backup and replayed WAL to 09:00, landing on a state where
+the marker database had never been created. Combined with the latest-recovery run above,
+where the same marker **is** present, `recoveryTarget` is demonstrably honoured.
+
+**Choosing the target — a footgun I walked straight into.** The target must be *before the
+marker was written* and *after the base backup it will restore from*. The seeded nonce
+carries its own timestamp (`drill-20261005092617-353645` → 09:26:17), so read it off the
+seed line rather than guessing. A first attempt used `date -d '-40 minutes'`, landed at
+09:27:59 — 82 seconds *after* the marker — and correctly reported:
+
+```
+FAIL: expected no rows at this target, got: drill
+```
+
+That failure was the assertion working, not the restore failing. A relative "recently" is
+the wrong frame of reference; the marker's own timestamp is the right one.
+
+Also note the query: `select datname from pg_database where datname='drill'`, **not**
+`psql -d drill`. At a target before the marker the database does not exist, and the
+obvious query dies with a psql connection error that looks exactly like a broken restore
+while meaning something entirely different.
+
+### Housekeeping the drills leave behind
+
+Each run leaves a `Backup` CR in `databases` (three after the runs above) and a real base
+backup in the bucket. The object-store copies age out under `retentionPolicy: 30d`. Do not
+"tidy" the CRs away to match: whether deleting a `Backup` CR also removes its object-store
+data is undocumented upstream (cloudnative-pg#2328), so the CRs are the safe half.
 
 ### Offline checks that do not prove the restore works
 
