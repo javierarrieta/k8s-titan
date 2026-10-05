@@ -855,7 +855,7 @@ particular had to be measured and not remembered).
 | authentik blueprints as declarative config | Speculative until the import mechanism is chosen | Sub-project 3 |
 | Monitoring (kube-prometheus-stack, disk + WAL-archive alerts) | Not in scope; titan has no Prometheus | Now overdue — see §11.4 |
 | A second Postgres instance / HA | One node; a replica has nowhere to live | A second node |
-| `s3-backup-secrets` rotation schedule, and an expiry reminder for the IAM key | No rotation precedent in either sibling; a silently expired key is §7.5's new trigger | First quarter of operation |
+| `s3-backup-secrets` rotation schedule, and an expiry reminder for the IAM key. **Do not read this row as covering the outstanding rotation**: the key provisioned in Task 5 was pasted into a chat transcript while the Secret was being authored, and has not been swapped since. That is not a scheduling question, it is "treat it as exposed until it is replaced" — see `docs/authentik-runbook.md` §1 | No rotation precedent in either sibling; a silently expired key is §7.5's new trigger | Exposed-key rotation: **now, not later**. Rotation *schedule*: first quarter of operation |
 
 ### 12.1 The open decision: how users and groups arrive
 
