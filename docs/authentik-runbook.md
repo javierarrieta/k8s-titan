@@ -42,6 +42,28 @@ because CNPG pins robfig/cron v1.2.0 where the optional field is day-of-week at 
 so the familiar five-field form fires hourly; and `retentionPolicy` is a child of
 `spec.backup`, not of `barmanObjectStore`.
 
+### The backup credential is exposed — rotate it before trusting it
+
+The IAM access key behind `s3-backup-secrets` (user `k8s-titan-pg-backups`) was pasted into
+a chat transcript while the Secret was being authored, so that the Secret could be
+sops-encrypted from it. The committed Secret is fine; the transcript is not, and the key has
+not been swapped. Until it is, treat this credential as **exposed**, not as merely
+unscheduled-for-rotation. The bucket policy is object-scoped to this one bucket, which caps
+the blast radius at this bucket rather than the account — that limits the damage and does
+not make the key safe.
+
+Rotate create-then-delete, never delete-then-create:
+
+1. Create a second access key for `k8s-titan-pg-backups` in IAM.
+2. Re-sops `apply/10-secrets/s3-backup-secrets.yaml` with the new pair, `make check`, merge.
+3. Prove archiving is still advancing — a fresh segment under `postgres/wals/`, or a clean
+   `./scripts/restore-drill.sh`. CNPG does not reliably pick up a changed backup Secret on
+   its own (cloudnative-pg#4914); if WAL stops shipping, roll the instance pods.
+4. Only after step 3 passes, delete the old key.
+
+Deleting first leaves the cluster archiving to a bucket it can no longer write to, and the
+failure is silent — see the next subsection.
+
 ### What "healthy" does not mean
 
 `ContinuousArchiving: True` is not evidence that WAL is reaching the bucket. Before the
