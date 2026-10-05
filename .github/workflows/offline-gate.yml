@@ -29,9 +29,16 @@ jobs:
           fi
           kubectl version --client=true 2>/dev/null | head -1
 
-      # Runs leak-check, kustomize-check, secrets-placement and release-secrets, and
-      # deliberately NOT validate: that needs the sops age private key, which must never
-      # be placed in CI. This is the only control in this repo that cannot be skipped
-      # with --no-verify.
+      # crd-check parses built YAML with python3 + PyYAML. ubuntu-latest ships python3,
+      # but PyYAML is not guaranteed, and a gate that silently skips a missing dependency
+      # is worse than no gate - so install it, and let crd-check itself fail loudly if it
+      # is somehow still absent.
+      - name: Ensure PyYAML (for crd-check)
+        run: python3 -c 'import yaml' 2>/dev/null || pip install --quiet pyyaml
+
+      # Runs leak-check, kustomize-check, secrets-placement, release-secrets and
+      # crd-check, and deliberately NOT validate: that needs the sops age private key,
+      # which must never be placed in CI. This is the only control in this repo that
+      # cannot be skipped with --no-verify.
       - name: make check-ci
         run: make check-ci
