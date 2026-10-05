@@ -64,8 +64,84 @@ Rotate create-then-delete, never delete-then-create:
    its own (cloudnative-pg#4914); if WAL stops shipping, roll the instance pods.
 4. Only after step 3 passes, delete the old key.
 
-Deleting first leaves the cluster archiving to a bucket it can no longer write to, and the
-failure is silent — see the next subsection.
+### Step 2, as a block you can paste
+
+Run it wherever the `titan-k8s` age key lives, in a checkout of this repo. **Read the new
+pair from your own terminal.** Pasting a credential into a chat or an agent transcript is
+how the current key got into the state this section exists to fix — the transcript is the
+leak, not the repo.
+
+```bash
+export SOPS_AGE_KEY_FILE=$HOME/.config/sops/age/titan-k8s-key.txt
+
+read -rs -p "new ACCESS_KEY_ID: "       AKID;   echo
+read -rs -p "new SECRET_ACCESS_KEY: "   ASecret; echo
+
+# Guard before encrypting. A truncated or empty value encrypts perfectly and fails three
+# namespaces away; the same class produced two empty authentik passwords once (plan Task 7).
+[[ "$AKID"   =~ ^AKIA[0-9A-Z]{16}$   ]] || { echo "ACCESS_KEY_ID is not AKIA+16 (${#AKID} chars)"; exit 1; }
+[[ "$ASecret" =~ ^[A-Za-z0-9/+=]{40}$ ]] || { echo "SECRET_ACCESS_KEY is not 40 chars (${#ASecret})"; exit 1; }
+
+stage=apply/10-secrets/.staging.s3-backup.yaml   # git-ignored, matches .sops.yaml path_regex
+cat > "$stage" <<EOF
+apiVersion: v1
+kind: Secret
+metadata:
+  name: s3-backup-secrets
+  namespace: databases
+type: Opaque
+stringData:
+  ACCESS_KEY_ID: "$AKID"
+  SECRET_ACCESS_KEY: "$ASecret"
+  AWS_REGION: eu-west-1
+EOF
+
+sops --encrypt --in-place "$stage"
+mv "$stage" apply/10-secrets/s3-backup-secrets.yaml
+unset AKID ASecret
+```
+
+Then verify by decrypting, and print **shapes and lengths only** — never the values:
+
+```bash
+sops -d apply/10-secrets/s3-backup-secrets.yaml | python3 -c '
+import sys, yaml, re
+d  = yaml.safe_load(sys.stdin.read()); sd = d["stringData"]
+ak, sk, rg = sd["ACCESS_KEY_ID"], sd["SECRET_ACCESS_KEY"], sd["AWS_REGION"]
+print("ACCESS_KEY_ID    ", "AKIA+16 OK" if re.fullmatch(r"AKIA[0-9A-Z]{16}", ak) else "BAD SHAPE", f"({len(ak)} chars, ends {ak[-4:]})")
+print("SECRET_ACCESS_KEY", "40 chars OK" if len(sk) == 40 else f"BAD ({len(sk)} chars)")
+print("AWS_REGION       ", rg)
+print("name/ns/type     ", d["metadata"]["name"] + "/" + d["metadata"]["namespace"], d["type"])
+'
+```
+
+`AWS_REGION` is not optional and must survive the rewrite — `s3Credentials.region` is a
+secret-key reference, and there is no instance metadata for barman to fall back to. The
+`ends <last4>` echo is deliberate: an access key ID is an identifier, and the tail is how
+you confirm you encrypted the key you meant to without printing a secret. The whole block
+was dry-run with a fake AKIA-shaped pair before being written down.
+
+Then `make check`, commit, merge, and do step 3 for real:
+
+```bash
+aws s3 ls s3://k8s-titan-pg-562256260016-eu-west-1-an --region eu-west-1 --recursive \
+  | sort -k1 | tail -5          # a segment newer than the merge means WAL is moving
+```
+
+If nothing new appears, the instance manager is still holding the old credentials
+(cloudnative-pg#4914). Recreate the instance pod:
+
+```bash
+kubectl -n databases delete pod postgres-1
+```
+
+That is a single-instance cluster, so it is a write outage of a few seconds and authentik
+will error during it — which is why it is a response to stalled archiving and not a
+reflex after a merge. Watch `kubectl -n databases get cluster postgres -o
+jsonpath='{.status.conditions}'` and re-list the bucket.
+
+Deleting the old key first leaves the cluster archiving to a bucket it can no longer write
+to, and the failure is silent — see the next subsection.
 
 ### What "healthy" does not mean
 
