@@ -80,11 +80,18 @@ a skip. CI runs GitGuardian on every push and warns, rather than failing, when
 `GITGUARDIAN_API_KEY` is absent from the repo.
 
 What runs automatically is `make check-ci` — leak-check, kustomize-check,
-secrets-placement and release-secrets, the gates provable from the tree alone, and the
-only control here that `--no-verify` cannot skip. `release-secrets` fails when a
+secrets-placement, release-secrets and crd-check, the gates provable from the tree alone,
+and the only control here that `--no-verify` cannot skip. `release-secrets` fails when a
 `HelmRelease` reaches for a Secret that is not in `apply/10-secrets` with a matching
 namespace, so a typo'd name surfaces on the laptop instead of as a red release three
 time zones away; its honest limit is that it proves a name and a namespace exist in the
-tree, not that the keys inside are what the chart wants. It deliberately excludes
+tree, not that the keys inside are what the chart wants. `crd-check` walks every built
+object against the CRDs vendored in `vendor/cnpg-crds/` and rejects any field the schema
+does not declare at that position — which is the class of error a normal schema validator
+waves through, because the CNPG CRDs set no `additionalProperties: false` anywhere, and
+the reason a mis-nested `retentionPolicy` once blocked the whole `apps` stage on the live
+cluster after a green build. Refresh those CRDs with `make update-cnpg-crds CNPG=vX.Y.Z`
+whenever the operator pin moves: a stale schema answers confidently and wrongly. It
+deliberately excludes
 `validate`, which needs the age private key; that key must never be placed in CI. So
 `make check` locally is still the full gate, and still yours to run.

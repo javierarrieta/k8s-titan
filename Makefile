@@ -4,12 +4,12 @@ KUSTOMIZE_DIRS := $(shell find apply -mindepth 1 -maxdepth 2 -name kustomization
 # not be able to slip between the encryption rule and the validation glob.
 SECRET_FIND := find apply/10-secrets \( -name '*.yaml' -o -name '*.yml' \) ! -name kustomization.yaml
 
-.PHONY: check check-ci kustomize-check validate update-keys scan leak-check secrets-placement secrets-present secrets-list release-secrets
+.PHONY: check check-ci kustomize-check validate update-keys scan leak-check secrets-placement secrets-present secrets-list release-secrets crd-check update-cnpg-crds
 
 # leak-check runs FIRST: make has no -k, so it stops at the first failing prerequisite.
 # validate needs the age key, so an operator who forgot SOPS_AGE_KEY_FILE would never
 # reach a leak gate placed behind it.
-check: leak-check kustomize-check validate secrets-placement release-secrets
+check: leak-check kustomize-check validate secrets-placement release-secrets crd-check
 	@echo "check: all offline gates passed"
 
 # The subset provable from the tree alone - no age key, no cluster, no network.
@@ -26,7 +26,7 @@ check: leak-check kustomize-check validate secrets-placement release-secrets
 # what makes this worth running in CI at all.
 check-ci:
 	@rc=0; \
-	for t in leak-check kustomize-check secrets-placement release-secrets; do \
+	for t in leak-check kustomize-check secrets-placement release-secrets crd-check; do \
 	  echo "--- $$t ---"; \
 	  $(MAKE) --no-print-directory $$t || rc=1; \
 	done; \
@@ -40,6 +40,39 @@ check-ci:
 # The build loop enumerates directories that DECLARE a kustomization.yaml, not every
 # directory under apply/: plain-directory fallback still works at runtime, but it
 # cannot be built offline, and offline validation is the only kind this repo can run.
+# Why this gate exists, and why it is not a jsonschema validation: the CNPG CRDs declare
+# no additionalProperties: false anywhere, so validating a manifest against them reports a
+# mis-nested field as VALID. Only the API server's typed-patch path rejects it, and it
+# does that at reconcile time - a retentionPolicy nested under barmanObjectStore instead
+# of spec.backup blocked every manifest in the apps stage on a live cluster, with a green
+# build and a green `make check` beforehand. This walks each built object against the
+# vendored CRD and prints the same path the server prints.
+#
+# The CRDs are vendored rather than fetched so the gate stays offline and deterministic -
+# offline is the only kind of validation this repo can run. A stale schema gives
+# confidently wrong answers, so refresh with `make update-cnpg-crds CNPG=vX.Y.Z` whenever
+# the operator pin in apply/20-infra/cnpg/operator.yaml moves. Provenance is recorded in
+# vendor/cnpg-crds/VERSION.
+crd-check:
+	@command -v python3 >/dev/null 2>&1 \
+	  || { echo "crd-check: python3 is missing - refusing to report clean"; exit 1; }; \
+	python3 -c 'import yaml' >/dev/null 2>&1 \
+	  || { echo "crd-check: PyYAML is missing (pip install pyyaml) - refusing to report clean"; exit 1; }; \
+	{ for d in $(KUSTOMIZE_DIRS); do kubectl kustomize "$$d" || exit 1; done; } \
+	  | python3 tools/crd-field-check.py vendor/cnpg-crds
+
+# Re-vendor the CRDs against a specific operator tag. The names match the plural resource
+# names, which is exactly how upstream spells the file names.
+CNPG_TAG ?= v1.30.1
+update-cnpg-crds:
+	@for k in clusters scheduledbackups databases databaseroles; do \
+	  if ! curl -fsSL -o vendor/cnpg-crds/$$k.yaml \
+	       "https://raw.githubusercontent.com/cloudnative-pg/cloudnative-pg/$(CNPG_TAG)/config/crd/bases/postgresql.cnpg.io_$$k.yaml"; \
+	  then echo "update-cnpg-crds: failed to fetch $$k at $(CNPG_TAG)"; rm -f vendor/cnpg-crds/$$k.yaml; exit 1; fi; \
+	done; \
+	echo "vendored CNPG CRDs from cloudnative-pg $(CNPG_TAG)" > vendor/cnpg-crds/VERSION; \
+	echo "update-cnpg-crds: wrote 4 CRDs from $(CNPG_TAG)"
+
 kustomize-check:
 	@fail=0; \
 	for d in $(KUSTOMIZE_DIRS); do \
