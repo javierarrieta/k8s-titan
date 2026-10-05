@@ -492,8 +492,12 @@ No cluster access is needed for most of it, which matters because 6443 is mesh-o
    helmrelease -A` shows five in total: those two, Reflector in `apps`, the
    CloudNativePG operator in `cnpg-system`, and authentik in `auth`.
 7. `kubectl -n certificates get certificate titan-wildcard` → `Ready=True`, and
-   `kubectl get secret titan-tls -A` → the source in `certificates` plus Reflector's
-   copies in `apps` and `auth`, and
+   `kubectl -n <ns> get secret titan-tls` for each of `certificates`, `apps` and `auth` →
+   the source plus Reflector's two copies. Not `get secret titan-tls -A`: kubectl refuses a
+   resource name together with `--all-namespaces` ("a resource cannot be retrieved by name
+   across all namespaces"), so that form errors out and proves nothing either way. And
+   `openssl s_client -connect <OVH_PUBLIC_IP>:443 -servername anything.titan.arrieta.eu`
+   presents a Let's Encrypt chain.
    `openssl s_client -connect <OVH_PUBLIC_IP>:443 -servername anything.titan.arrieta.eu`
    presents a Let's Encrypt chain.
 8. End-to-end: a throwaway Ingress on `whoami.titan.arrieta.eu` serves HTTPS with a real

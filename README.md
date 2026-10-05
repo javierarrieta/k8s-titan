@@ -90,8 +90,12 @@ asserts no `secretRef` exists and would otherwise fail permanently.
                                           # cloudnative-pg in cnpg-system, authentik in auth
     kubectl -n cert-manager get clusterissuer    # both Ready=True
     kubectl -n certificates get certificate titan-wildcard   # Ready=True
-    kubectl get secret titan-tls -A       # certificates holds the source; apps and
-                                          # auth hold Reflector's copies
+    for ns in certificates apps auth; do kubectl -n $ns get secret titan-tls; done
+                                          # certificates holds the source; apps and
+                                          # auth hold Reflector's copies. Not
+                                          # `get secret titan-tls -A` — kubectl rejects a
+                                          # name together with --all-namespaces, so that
+                                          # form errors out and proves nothing.
     kubectl -n databases get cluster,database,databaserole,backup,scheduledbackup
     kubectl -n auth get pods              # authentik-server + authentik-worker Running
 
