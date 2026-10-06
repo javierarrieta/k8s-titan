@@ -662,7 +662,7 @@ Expected: `Ready True`, the Secret present in `coder` only, and a SAN list conta
 
 **Files:**
 - Create: `apply/50-apps/coder/coder-db.yaml`
-- Create: `apply/50-apps/auth/blueprints/coder.yaml` (reviewed template, placeholders only)
+- Create: `authentik/blueprints-coder.yaml` (reviewed template, placeholders only)
 - Create: `apply/10-secrets/coder-secrets.yaml`, `apply/10-secrets/coder-db-credentials.yaml`, `apply/10-secrets/authentik-coder-blueprint.yaml` (rendered + sops-encrypted by `scripts/setup-coder-secrets.sh`)
 - Modify: `apply/50-apps/kustomization.yaml`, `apply/10-secrets/kustomization.yaml`, `apply/50-apps/auth/authentik.yaml`
 

@@ -11,7 +11,7 @@
 # NOTHING IS PROMPTED ANYMORE, AND THAT IS THE POINT.
 # The original design had you create the OIDC application in authentik's UI and paste the client in.
 # authentik takes that configuration as a blueprint - see
-# apply/50-apps/auth/blueprints/coder.yaml for why, and what is not proven about it - so the client
+# authentik/blueprints-coder.yaml for why, and what is not proven about it - so the client
 # is generated here and handed to both sides. No UI click, nothing to paste into a chat transcript,
 # and a rebuilt authentik gets coder's client back from git instead of from someone's memory.
 #
@@ -31,7 +31,7 @@ cd "$REPO"
 DB_SECRET=apply/10-secrets/coder-db-credentials.yaml
 APP_SECRET=apply/10-secrets/coder-secrets.yaml
 BP_SECRET=apply/10-secrets/authentik-coder-blueprint.yaml
-TEMPLATE=apply/50-apps/auth/blueprints/coder.yaml
+TEMPLATE=authentik/blueprints-coder.yaml
 STAGE_DB=apply/10-secrets/.staging.coder-db-credentials.yaml
 STAGE_APP=apply/10-secrets/.staging.coder.yaml
 STAGE_BP=apply/10-secrets/.staging.authentik-coder-blueprint.yaml

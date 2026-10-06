@@ -15,6 +15,12 @@ resources:
   # report Reconciling for a moment before the role lands - that is CNPG retrying, and it
   # must converge. Still not Synced after a minute is a real failure, not a race.
   - auth/authentik-db.yaml
+  - coder/coder-db.yaml
+  # coder's Database and DatabaseRole, same shape and same namespace rule as authentik's: a CNPG
+  # Database must share a namespace with its Cluster, so these live in `databases` while the app
+  # that owns them lives in `coder`. It was written, committed, and left out of this list - where it
+  # would have built green and been silently never applied, which is the failure mode
+  # `make kustomize-listing` was added to close.
   # After the Database and DatabaseRole it connects with. The HelmRelease would install and
   # authentik would crash-loop on a missing role, so ordering here is cheap insurance.
   - auth/authentik.yaml

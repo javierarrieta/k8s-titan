@@ -316,7 +316,7 @@ thing it would configure.
 
 **Blueprints are the first-party path.** They are authentik's own infrastructure-as-code format —
 YAML the worker applies against its own API — and the chart mounts them from a Secret
-(`values.yaml:220`, `blueprints.secrets`). So `apply/50-apps/auth/blueprints/coder.yaml` is the
+(`values.yaml:220`, `blueprints.secrets`). So `authentik/blueprints-coder.yaml` is the
 reviewed source, `scripts/setup-coder-secrets.sh` renders it with the generated client, and the
 worker applies it.
 

@@ -2,7 +2,7 @@
 """oidc-check: coder's OIDC client, coder's own copy of it, and authentik's mount, all agreeing.
 
 The declarative version of coder's OIDC client is a blueprint template committed in git
-(apply/50-apps/auth/blueprints/coder.yaml). It carries two placeholders; scripts/setup-coder-secrets.sh
+(authentik/blueprints-coder.yaml). It carries two placeholders; scripts/setup-coder-secrets.sh
 substitutes them and writes a sops-encrypted Secret that the authentik worker mounts and applies.
 Coder is separately given the same client ID and secret in coder-secrets.
 
@@ -30,7 +30,7 @@ from sopsload import find, load_docs, load_text, secret_key  # noqa: E402
 
 import yaml  # noqa: E402
 
-TEMPLATE = "apply/50-apps/auth/blueprints/coder.yaml"
+TEMPLATE = "authentik/blueprints-coder.yaml"
 PLACEHOLDERS = ("CODER_OIDC_CLIENT_ID", "CODER_OIDC_CLIENT_SECRET")
 CALLBACK = "https://coder.titan.arrieta.eu/api/v2/users/oidc/callback"
 BLUEPRINT_SECRET = "authentik-coder-blueprint"
