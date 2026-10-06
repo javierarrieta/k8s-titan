@@ -11,6 +11,12 @@ the restore drill has passed against authentik's own tables (§2, recorded) — 
 attempt died on a wrong table name and the two bugs that hid that. Sections say which
 of their claims were observed and which are reasoning.
 
+**A shell note, because it bites twice here.** The operator's login shell is fish, and several
+blocks below use `VAR=value command`, which is bash — fish parses that as a command literally
+named `VAR=value`. Prefix with `env` and it works in any shell: `env SEED=0 DELETE=1
+./scripts/restore-drill.sh`. The scripts themselves are fine from any shell; they carry a bash
+shebang, which is why the rotation is a script rather than a paste-able block.
+
 ---
 
 ## 1. Backup topology
@@ -64,62 +70,40 @@ Rotate create-then-delete, never delete-then-create:
    its own (cloudnative-pg#4914); if WAL stops shipping, roll the instance pods.
 4. Only after step 3 passes, delete the old key.
 
-### Step 2, as a block you can paste
+### Step 2: `./scripts/rotate-s3-backup-key.sh`
 
-Run it wherever the `titan-k8s` age key lives, in a checkout of this repo. **Read the new
-pair from your own terminal.** Pasting a credential into a chat or an agent transcript is
-how the current key got into the state this section exists to fix — the transcript is the
-leak, not the repo.
+Run the script. It prompts for both values, so **read the new pair from your own terminal —
+never from a paste.** Pasting a credential into a chat or an agent transcript is how the
+current key got into the state this section exists to fix: the transcript is the leak, not
+the repo.
 
-```bash
-export SOPS_AGE_KEY_FILE=$HOME/.config/sops/age/titan-k8s-key.txt
+It is a script rather than a block to paste because the operator's shell is **fish**, and the
+bash form of this — `export VAR=`, `read -rs -p`, `[[ =~ ]]` — either means something
+different or means nothing there. A shebang makes the login shell irrelevant.
 
-read -rs -p "new ACCESS_KEY_ID: "       AKID;   echo
-read -rs -p "new SECRET_ACCESS_KEY: "   ASecret; echo
+What it does, in order:
 
-# Guard before encrypting. A truncated or empty value encrypts perfectly and fails three
-# namespaces away; the same class produced two empty authentik passwords once (plan Task 7).
-[[ "$AKID"   =~ ^AKIA[0-9A-Z]{16}$   ]] || { echo "ACCESS_KEY_ID is not AKIA+16 (${#AKID} chars)"; exit 1; }
-[[ "$ASecret" =~ ^[A-Za-z0-9/+=]{40}$ ]] || { echo "SECRET_ACCESS_KEY is not 40 chars (${#ASecret})"; exit 1; }
+- fingerprints the credential currently in the file: the access key ID in full (it is an
+  identifier) and a truncated SHA-256 of the secret access key. A comparison handle, never
+  the value — so "did the rotation actually land" is answerable without printing anything.
+- prompts with `read -rs`, then **guards the shapes before encrypting**: `AKIA` + 16
+  uppercase alphanumerics, and 40 chars of `[A-Za-z0-9/+=]`. An empty or truncated value
+  encrypts perfectly and fails three namespaces away — the same class that produced two empty
+  authentik passwords in Task 7. A rejected key leaves the Secret byte-identical; that was
+  checked, not assumed.
+- writes `apply/10-secrets/.staging.s3-backup.yaml` — git-ignored, and under
+  `apply/10-secrets/` so `.sops.yaml`'s `path_regex` picks the right recipients, because sops
+  chooses recipients from the file's own path rather than from your intent — encrypts it in
+  place, and moves it over the real file. A `trap` removes the plaintext staging file on any
+  exit path.
+- carries `AWS_REGION: eu-west-1` forward deliberately: `s3Credentials.region` is a
+  secret-key reference and there is no instance metadata on titan for barman to fall back to,
+  so a rewrite that drops it breaks archiving while looking like a clean diff.
+- prints the remaining steps, including step 3 below, so the create-then-delete order is in
+  front of you at the moment you need it.
 
-stage=apply/10-secrets/.staging.s3-backup.yaml   # git-ignored, matches .sops.yaml path_regex
-cat > "$stage" <<EOF
-apiVersion: v1
-kind: Secret
-metadata:
-  name: s3-backup-secrets
-  namespace: databases
-type: Opaque
-stringData:
-  ACCESS_KEY_ID: "$AKID"
-  SECRET_ACCESS_KEY: "$ASecret"
-  AWS_REGION: eu-west-1
-EOF
-
-sops --encrypt --in-place "$stage"
-mv "$stage" apply/10-secrets/s3-backup-secrets.yaml
-unset AKID ASecret
-```
-
-Then verify by decrypting, and print **shapes and lengths only** — never the values:
-
-```bash
-sops -d apply/10-secrets/s3-backup-secrets.yaml | python3 -c '
-import sys, yaml, re
-d  = yaml.safe_load(sys.stdin.read()); sd = d["stringData"]
-ak, sk, rg = sd["ACCESS_KEY_ID"], sd["SECRET_ACCESS_KEY"], sd["AWS_REGION"]
-print("ACCESS_KEY_ID    ", "AKIA+16 OK" if re.fullmatch(r"AKIA[0-9A-Z]{16}", ak) else "BAD SHAPE", f"({len(ak)} chars, ends {ak[-4:]})")
-print("SECRET_ACCESS_KEY", "40 chars OK" if len(sk) == 40 else f"BAD ({len(sk)} chars)")
-print("AWS_REGION       ", rg)
-print("name/ns/type     ", d["metadata"]["name"] + "/" + d["metadata"]["namespace"], d["type"])
-'
-```
-
-`AWS_REGION` is not optional and must survive the rewrite — `s3Credentials.region` is a
-secret-key reference, and there is no instance metadata for barman to fall back to. The
-`ends <last4>` echo is deliberate: an access key ID is an identifier, and the tail is how
-you confirm you encrypted the key you meant to without printing a secret. The whole block
-was dry-run with a fake AKIA-shaped pair before being written down.
+The whole script was dry-run against a throwaway copy of the Secret with a fake AKIA-shaped
+pair before being committed.
 
 Step 3 also gets a concrete command instead of "roll the instance pods". Note the counters
 **before** you merge, from §1:
@@ -209,7 +193,7 @@ into a throwaway `drill` database that is dropped on the way out.
 Run it:
 
 ```bash
-DELETE=1 ./scripts/restore-drill.sh 2>&1 | tee /tmp/restore-drill-$(date +%F).log
+env DELETE=1 ./scripts/restore-drill.sh 2>&1 | tee /tmp/restore-drill-$(date +%F).log
 ```
 
 What it does, in order: preflight (can this identity create Clusters? is there a
@@ -226,7 +210,7 @@ round trip. Now that authentik is live, this is the assertion to prefer — it c
 named row in a real database rather than a nonce we planted:
 
 ```
-SEED=0 CHECK_DB=authentik \
+env SEED=0 CHECK_DB=authentik \
   CHECK_SQL="select username from authentik_core_user where username='akadmin'" \
   EXPECT=akadmin ./scripts/restore-drill.sh
 ```
@@ -310,7 +294,7 @@ Point-in-time is supported by the same script and is the drill worth doing secon
 because PITR is what an incident actually needs:
 
 ```bash
-TARGET_TIME='2026-10-05T09:00:00+00:00' EXPECT=absent SEED=0 ./scripts/restore-drill.sh
+env TARGET_TIME='2026-10-05T09:00:00+00:00' EXPECT=absent SEED=0 ./scripts/restore-drill.sh
 ```
 
 That restores to before the nonce existed and asserts it is **absent** — proving
