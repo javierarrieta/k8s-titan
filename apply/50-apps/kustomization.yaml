@@ -18,3 +18,8 @@ resources:
   # After the Database and DatabaseRole it connects with. The HelmRelease would install and
   # authentik would crash-loop on a missing role, so ordering here is cheap insurance.
   - auth/authentik.yaml
+  # Quota, limit range and the provisioner Role, all in coder-workspaces. They precede coder's
+  # HelmRelease because a workspace built before the quota exists is a workspace the quota never
+  # saw - and the quota is the only thing standing between a third workspace and the Postgres
+  # every other app here depends on.
+  - coder/workspaces.yaml

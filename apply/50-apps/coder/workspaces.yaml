@@ -1,0 +1,94 @@
+# Two workspaces at 4 CPU / 8 Gi / 40 Gi, and nothing more. The quota is not tidiness: a
+# coder workspace is the first thing on this cluster that can request arbitrary CPU from a
+# node that also runs the Postgres that both coder and authentik depend on. A third workspace
+# must sit Pending - a legible failure - rather than squeeze the database into a slow
+# degradation nobody can attribute.
+#
+# requests.storage sums PVC requests in the namespace; persistentvolumeclaims caps the count
+# so two half-built workspaces cannot quietly become five.
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: coder-workspaces
+  namespace: coder-workspaces
+spec:
+  hard:
+    requests.cpu: "8"
+    requests.memory: 16Gi
+    limits.cpu: "8"
+    limits.memory: 16Gi
+    persistentvolumeclaims: "2"
+    requests.storage: 80Gi
+---
+# The quota is charged against *requests*, and an unset request is a small one. Without this
+# LimitRange a workspace that declares nothing is charged almost nothing and the quota above
+# stops meaning anything. Defaults are half the per-workspace budget so a template that
+# declares nothing still fits two at a time.
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: coder-workspaces
+  namespace: coder-workspaces
+spec:
+  limits:
+    - type: Container
+      default:
+        cpu: 2000m
+        memory: 4Gi
+      defaultRequest:
+        cpu: 500m
+        memory: 1Gi
+    - type: PersistentVolumeClaim
+      default:
+        storage: 40Gi
+---
+# Coder's Kubernetes provider creates the workspace objects, and this Role is the whole of what
+# it may do outside coder's own namespace. The fence is the point: it cannot reach databases or
+# auth, which is what makes handing a workload pod-creation rights acceptable at all.
+#
+# Scoped to what the template in coder/templates/ actually builds - one Pod and one PVC - plus
+# the two things coder's own UI needs against a running workspace: pods/log for the Logs tab and
+# pods/exec for the terminal. Read off the chart rather than guessed at; see below.
+#
+# Deliberately absent, each for a reason:
+#   services, secrets   the template creates neither. A coder server that can mint Secrets in a
+#                       namespace is a workspace that hands itself credentials, and no feature
+#                       here needs it. A future template that wants a Service gets a Forbidden
+#                       naming the missing verb, which is a legible failure and a two-line fix.
+#   deletecollection    bulk delete is the verb you reach for by accident, and workspace teardown
+#                       deletes named objects one at a time.
+#
+# The coder chart ships its own workspace RBAC (libcoder grants pods and persistentvolumeclaims,
+# plus deployments when enableDeployments is set). It is NOT used here: coder.serviceAccount.
+# workspaceNamespaces stays empty, so the chart grants coder's ServiceAccount only inside coder's
+# own namespace and this Role is the single readable grant in coder-workspaces. Two overlapping
+# RoleBindings, one of them generated, is how an effective policy stops being reviewable.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: coder-workspace-provisioner
+  namespace: coder-workspaces
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "pods/log", "persistentvolumeclaims"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create"]
+---
+# Bound to the coder server's own ServiceAccount. coder.serviceAccount.name defaults to `coder`
+# in chart 2.37.4 - checked in the packaged values.yaml, not assumed - so the chart creates
+# exactly this name in namespace coder and no chart-side override is needed to match it.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: coder-workspace-provisioner
+  namespace: coder-workspaces
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: coder-workspace-provisioner
+subjects:
+  - kind: ServiceAccount
+    name: coder
+    namespace: coder
