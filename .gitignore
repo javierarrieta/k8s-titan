@@ -24,3 +24,9 @@ apply/10-secrets/.staging.*.yaml
 # Re-run `tofu init && tofu validate` in the template directory to reproduce the check.
 coder/templates/**/.terraform/
 coder/templates/**/.terraform.lock.hcl
+
+# Compiled Python. The gate tools are plain scripts under tools/, so running `make check`
+# drops a __pycache__ next to them; one got committed via `git add -A` and then every later
+# `make check` showed a dirty tree. Artifacts are not source.
+__pycache__/
+*.pyc
