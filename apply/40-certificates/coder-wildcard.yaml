@@ -1,0 +1,33 @@
+# A second wildcard, deliberately not a third dnsName on titan-wildcard (spec C4). Adding it
+# there would mean editing the reflector allow-list that AGENTS.md treats as the controlled
+# mechanism, and every coder renewal would reissue the whole cluster wildcard.
+#
+# DNS needs nothing: ../public-dns-tf declares `*.titan` as an A record, and OVH's wildcard
+# answers at any depth, so `x.coder.titan.arrieta.eu` already resolves - re-checked live before
+# this file was written, and it answered. What DNS gives us and X.509 does not is label depth: a
+# certificate wildcard matches exactly one label, which is why the existing `*.titan.arrieta.eu`
+# cannot serve workspace hosts and a second certificate has to exist.
+#
+# The allow-list is `coder` alone. coder's Ingress lives in `coder` and nothing else consumes this
+# Secret, so the narrowest possible list is also the correct one - widening it later is an edit to
+# this file, which is the point.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: coder-wildcard
+  namespace: certificates
+spec:
+  secretName: coder-tls
+  issuerRef:
+    kind: ClusterIssuer
+    name: le-prod-titan
+  commonName: coder.titan.arrieta.eu
+  dnsNames:
+    - coder.titan.arrieta.eu
+    - "*.coder.titan.arrieta.eu"
+  secretTemplate:
+    annotations:
+      reflector.v1.k8s.emberstack.com/reflection-allowed: "true"
+      reflector.v1.k8s.emberstack.com/reflection-allowed-namespaces: "coder"
+      reflector.v1.k8s.emberstack.com/reflection-auto-enabled: "true"
+      reflector.v1.k8s.emberstack.com/reflection-auto-namespaces: "coder"
