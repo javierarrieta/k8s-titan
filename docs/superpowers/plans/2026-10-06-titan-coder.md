@@ -490,7 +490,17 @@ spec:
     - type: PersistentVolumeClaim
       default:
         storage: 40Gi
+      max:
+        storage: 40Gi
 ```
+
+> **Correction, found live after merge.** This snippet as written is invalid and took the whole `apps`
+> stage down. A `PersistentVolumeClaim` limit requires `min` or `max`; `default` alone is rejected with
+> `spec.limits[1].limits: Required value: either minimum or maximum storage value is required`. The
+> Container limit above it does *not* carry that requirement — the API server rejected `limits[1]` and
+> only `limits[1]`, which was read from the full untruncated condition message rather than assumed.
+> `max: 40Gi` is kept rather than dropped, because it makes spec §9.1's per-workspace budget something
+> the API server enforces instead of a convention the template happens to honour.
 
 - [ ] **Step 2: Write the scoped RBAC**
 

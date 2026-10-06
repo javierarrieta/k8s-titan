@@ -93,7 +93,7 @@ says `SKIPPED` out loud when either is missing — it no longer reports a found 
 a skip. CI runs GitGuardian on every push and warns, rather than failing, when
 `GITGUARDIAN_API_KEY` is absent from the repo.
 
-What runs automatically is `make check-ci` — leak-check, kustomize-check,
+What runs automatically is `make check-ci` — leak-check, kustomize-check, kustomize-listing,
 secrets-placement, release-secrets and crd-check, the gates provable from the tree alone,
 and the only control here that `--no-verify` cannot skip. `release-secrets` fails when a
 `HelmRelease` reaches for a Secret that is not in `apply/10-secrets` with a matching
@@ -109,3 +109,23 @@ whenever the operator pin moves: a stale schema answers confidently and wrongly.
 deliberately excludes
 `validate`, which needs the age private key; that key must never be placed in CI. So
 `make check` locally is still the full gate, and still yours to run.
+
+Two gates exist because coder stores one credential in files nothing else ties together.
+`db-url-check` fails when the Postgres URL in `coder-secrets` and the password CNPG owns in
+`coder-db-credentials` disagree — one password kept twice is one rotation away from a silent split.
+`oidc-check` goes further: coder's copy, the authentik blueprint's copy, the reviewed template, and
+whether the HelmRelease actually mounts that blueprint all have to agree, because an unmounted
+blueprint is indistinguishable from one never written. Both read sops-encrypted values, so both are
+in `check` and not `check-ci` — the same rule that keeps `validate` out. `db-url-check` is
+reference-driven, so a tree with no references reports zero instead of passing vacuously.
+
+`make kustomize-listing` is in both, and it is not stylistic: `apply/50-apps/coder/coder-db.yaml` was
+committed, built green, reviewed green, and named by no kustomization, so Flux would never have
+applied it. A manifest nobody lists is a manifest that does not exist.
+
+`make dry-run DRYRUN_CONTEXT=<admin context>` is the only check that asks the live API server, and it
+is the one `make check` cannot do: core-type validation rules live in the API server, not in any
+schema vendored here. A `PersistentVolumeClaim` LimitRange carrying `default` and no `max` is the
+true story — it passed every offline gate and took the `apps` stage down on merge. It skips out loud
+without an admin context; the read-only `k8s-reader` identity is Forbidden for it, which was checked
+rather than assumed.
