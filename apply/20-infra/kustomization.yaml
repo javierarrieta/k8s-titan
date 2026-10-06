@@ -10,3 +10,4 @@ resources:
   - k8s-reader/serviceaccount-token.yaml
   - reflector/reflector.yaml
   - cnpg/operator.yaml
+  - storage-retain.yaml
