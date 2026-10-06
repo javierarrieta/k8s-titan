@@ -16,6 +16,11 @@ resources:
   # must converge. Still not Synced after a minute is a real failure, not a race.
   - auth/authentik-db.yaml
   - coder/coder-db.yaml
+  # The server, last: it reads coder-secrets (Task 6) and coder-tls (Task 5, reflected), and it
+  # provisions into coder-workspaces under the Role above. Ordering here only decides what Flux
+  # tries first, but a HelmRelease that installs before its Secret exists comes up crash-looping,
+  # which reads as a coder bug rather than a missing file.
+  - coder/coder.yaml
   # coder's Database and DatabaseRole, same shape and same namespace rule as authentik's: a CNPG
   # Database must share a namespace with its Cluster, so these live in `databases` while the app
   # that owns them lives in `coder`. It was written, committed, and left out of this list - where it
