@@ -1,0 +1,409 @@
+# titan — Coder as the first in-cluster workload with persistent homes
+
+- **Date:** 2026-10-06
+- **Status:** design approved in conversation; not implemented. No manifest for this exists yet.
+- **Repo:** `javierarrieta/k8s-titan` (public)
+- **Cluster:** `titan` — single-node k3s on OVH bare metal, NixOS-managed, live and green
+- **Builds on:** `2026-10-03-k8s-titan-flux-bootstrap-design.md` (stages, sops, age key, certificate
+  path) and `2026-10-03-titan-authentik-cnpg-design.md` (the shared `Cluster`, declarative
+  per-app databases, the reflector path, authentik as identity provider). This spec **adds a
+  second uncompensated backup override** and says so in §13 rather than absorbing it.
+- **Modelled on:** `../k8s-casa`'s Coder install, deliberately diverging where casa's choices do
+  not transfer (§2.3).
+
+---
+
+## 0. Ground rules carried forward
+
+Everything in bootstrap spec §0 applies unchanged: this repo is public, so no credentials and no
+concrete public IPv4 — write `<OVH_PUBLIC_IP>`. Secrets live only in `apply/10-secrets/`, sops-
+encrypted, and every file there is listed in that directory's `kustomization.yaml`. Stage order is
+`flux-system → secrets → infra → certificates → apps`, wired by `dependsOn`. No top-level
+`namespace:` in any `kustomization.yaml`.
+
+This spec adds no stage. Everything it creates lands in the existing `certificates` and `apps`
+stages, plus two namespaces.
+
+---
+
+## 1. Intent and success criteria
+
+**Intent.** Give one person a remote, rebuildable development environment on titan, with a home
+directory that survives a workspace restart, authenticated by titan's own identity provider rather
+than a second password.
+
+Success is:
+
+1. `https://coder.titan.arrieta.eu/` serves Coder and logs in through authentik.
+2. A workspace builds from a Terraform template that exists in this repo, lands in
+   `coder-workspaces`, and mounts a 40 G home PVC.
+3. Two such workspaces run at once without the control plane noticing. A third refuses to schedule
+   visibly rather than degrading the database invisibly.
+4. Deleting a workspace's PVC does not erase its bytes (§9.2 — this is the mitigation, and it is
+   proven, not assumed).
+5. Coder's own state — templates, users, workspace metadata — is recoverable through the existing,
+   already-drilled Postgres restore path.
+
+**Explicitly not in scope**, named so it is not silently dropped (§14): backups of workspace home
+directories, automatic template deployment, a break-glass local login, and monitoring.
+
+---
+
+## 2. Context this design inherits, and what was checked
+
+### 2.1 Verified against the live cluster and DNS, not assumed
+
+| Fact | How it was checked |
+|---|---|
+| `*.titan.arrieta.eu` resolves at **any depth** — `a.b.titan.arrieta.eu` answers | DNS-over-HTTPS query against `dns.google/resolve`; Status 0 with an answer |
+| Therefore `*.coder.titan.arrieta.eu` needs **no DNS record** | Same check; OVH's wildcard is not limited to one label (the common "one label only" reading of RFC 4592 is wrong — a wildcard matches any descendant with no closer node) |
+| An X.509 wildcard matches **exactly one label**, so the existing `*.titan.arrieta.eu` SAN will not cover `x.coder.titan.arrieta.eu` | RFC 6125 §6.4.3 / certificate semantics. This is the opposite of the DNS rule above, and the asymmetry is the whole reason §7 exists |
+| titan allocates **12 CPU / 131,793,372 Ki (~126 Gi) / 110 pods** | `kubectl get node -o jsonpath` with the read-only `k8s-reader` identity |
+| The only StorageClass is `local-path` (rancher.io/local-path), `reclaimPolicy: Delete`, `allowVolumeExpansion: false` | `kubectl get storageclass` |
+| Latest Coder Helm chart is **2.37.4** | `curl https://helm.coder.com/v2/index.yaml`, highest `version: 2.x.y` |
+| The reflector allow-list on `titan-wildcard` is currently `apps,auth` | Read from `apply/40-certificates/titan-wildcard.yaml` |
+
+### 2.2 The pattern this copies, verbatim
+
+`apply/50-apps/auth/authentik-db.yaml` already establishes how an app gets a database here, and
+its comments record why each field is load-bearing: a CNPG `Database` must share a namespace with
+its `Cluster` (so "where the app lives" loses to "where the cluster lives"); `DatabaseRole` needs
+`login: true` or the role is created NOLOGIN and every connection fails with a message that points
+somewhere else; `passwordSecret` must be `kubernetes.io/basic-auth`; and the `cnpg.io/reload`
+label belongs on the referenced **Secret**, not on the `DatabaseRole`. Coder follows this exactly.
+
+### 2.3 What casa does, and the three places that does not transfer
+
+casa's `apply/50-apps/casa/coder.yaml` is a 127-line HelmRelease on chart `2.35.1`, with
+`CODER_PG_CONNECTION_URL`, `CODER_OIDC_*`, an Ingress, and podman **client** TLS certs
+(`ca.pem`/`cert.pem`/`key.pem`) mounted at `/run/secrets/`. No PVC, and no Terraform anywhere in
+that repo.
+
+| casa | titan, and why |
+|---|---|
+| Workspaces build on a **remote podman host** over TLS | Workspaces build **in-cluster** on titan. titan has 12 CPU and 126 Gi sitting mostly idle, and adding a second host to administer to reach them is the worse trade |
+| OIDC against Keycloak at `/application/o/coder/` | authentik, which exposes the **same-shaped** path. The env var names transfer nearly unchanged; the issuer host does |
+| Templates exist only in coder's database | Templates live in this repo (§10). Casa can afford that because its homes are disposable; here the template is the definition of what gets a PVC that is not backed up |
+| Everything in one shared `casa` namespace | Two namespaces (§5.1), because coder needs RBAC that creates pods and PVCs and that capability should be fenced |
+
+---
+
+## 3. Program decomposition
+
+This is one slice. It is not the backup work, and it does not pretend to be.
+
+| # | Piece | Depends on | Status |
+|---|---|---|---|
+| 1 | Coder server + DB + OIDC + workspaces, as specified here | authentik + CNPG (both live) | **this spec** |
+| 2 | General PV backups (`30-backup` stage, restic → object store) | — | deferred, §14; **its trigger has now fired a second time** |
+| 3 | Automatic template deployment (git push → `coder templates push`) | 1 | deferred, §14 |
+| 4 | Populating authentik with more than one user | — | deferred, authentik spec §12.1 |
+
+---
+
+## 4. Decisions and rejected alternatives
+
+| # | Decision | Rejected alternative, and why |
+|---|---|---|
+| C1 | Workspaces run **in-cluster** with **persistent** homes | Disposable homes (no new backup obligation) or off-cluster podman like casa. Persistent won because a dev environment that loses `/home` on rebuild is not a dev environment; the backup cost is taken as an explicit override (§13), not hidden |
+| C2 | **No backup** for workspace homes | Build `30-backup` first. Rejected as a sequencing preference: the data is a cache of a person's working state, the mitigation in §9.2 covers the realistic accident, and the override is recorded where it will be found |
+| C3 | `local-path-retain` StorageClass for homes | Accepting `Delete` on an unbacked volume. A four-line manifest converts "deleted the wrong PVC" from data loss into "recreate the PV object" |
+| C4 | **Separate** `coder-wildcard` Certificate → `coder-tls` | Adding `*.coder.titan.arrieta.eu` as a third SAN on `titan-wildcard`. That was the first instinct and it is worse: it forces an edit to the reflector allow-list AGENTS.md treats as the controlled mechanism, and it re-issues the whole cluster wildcard every time coder's cert renews. Separate object, separate Secret, `titan-wildcard.yaml` untouched |
+| C5 | **Path-free wildcard** workspace hostnames (`CODER_WILDCARD_ACCESS_URL`) | Path-based `/@owner/@workspace/@app`. Zero cert work, but apps that emit absolute redirects or assume a host-per-port fail in ways discovered mid-worksession, not at deploy time |
+| C6 | authentik OIDC only, **no local admin** | Coder-local password, or OIDC plus break-glass. A second credential with its own rotation story is the thing this cluster already has too few of. The lockout risk this creates is named in §8.4 and is an open item, not an oversight |
+| C7 | Templates in git, **pushed by hand** | Templates only in coder's UI (invisible to review and to every gate here) or automatic push (a Terraform-executing CI path against a live cluster — its own spec, §14) |
+| C8 | Two workspaces at 4 CPU / 8 Gi / 40 G, quota 8 CPU / 16 Gi / 80 G | One generous, or three or four small. Two leaves the control plane comfortable and makes "the third one is Pending" an explainable outcome |
+| C9 | Chart pinned at `2.37.4` | casa's `2.35.1` (two minors stale) or floating. Every other chart here is pinned |
+
+---
+
+## 5. Architecture
+
+### 5.1 Namespaces
+
+Both declared in `apply/00-bootstrap/namespaces.yaml`, which stays the only place namespaces are
+declared:
+
+- **`coder`** — the Coder server, its Ingress, its Secrets. Receives `coder-tls` by reflection.
+- **`coder-workspaces`** — everything coder creates. A `ResourceQuota` and a `LimitRange` live
+  here. Coder's service account is RBAC-bound to this namespace and to nothing else; it cannot
+  reach `databases` or `auth`, which is the property that makes it safe to give pod-creation rights
+  at all.
+
+### 5.2 New and changed files
+
+```
+apply/00-bootstrap/namespaces.yaml            + coder, coder-workspaces
+apply/40-certificates/coder-wildcard.yaml     new Certificate → coder-tls, reflected to coder
+apply/50-apps/kustomization.yaml              + coder/coder-db.yaml, coder/coder.yaml (in order)
+apply/50-apps/coder/coder-db.yaml             CNPG Database + DatabaseRole, namespace databases
+apply/50-apps/coder/coder.yaml                HelmRepository + HelmRelease + Ingress, ns coder
+apply/10-secrets/coder-secrets.yaml           db-url, oidc-client-id, oidc-client-secret
+apply/10-secrets/coder-db-credentials.yaml    kubernetes.io/basic-auth, cnpg.io/reload: "true"
+coder/templates/dev/main.tf                   the workspace template (repo root, not apply/)
+Makefile                                      + db-url-check (§6.3)
+```
+
+`coder/` at the repo root rather than under `apply/` is deliberate: `apply/` stays pure Kubernetes
+manifests, so `kustomize-check`, `secrets-placement` and `crd-check` never have to reason about
+Terraform, and `leak-check` still scans it like everything else.
+
+Ordering in `apply/50-apps/kustomization.yaml` matters and is commented in place, as it already is
+for authentik: the `Database` cannot resolve its `clusterRef` before the `Cluster`, and the
+HelmRelease would install and crash-loop before the role exists.
+
+---
+
+## 6. Database layer
+
+### 6.1 The CRs
+
+`Database coder` (name `coder`, owner `coder`, cluster `postgres`) and `DatabaseRole coder`
+(`login: true`, `passwordSecret: coder-db-credentials`), both in namespace `databases`, both
+copied from the authentik pair including the comments explaining `login: true` and the label
+placement.
+
+### 6.2 The duplication this design is forced into
+
+Coder accepts exactly one knob, `CODER_PG_CONNECTION_URL` — a full URL with the password inline.
+CNPG's declarative role takes a `kubernetes.io/basic-auth` Secret. Neither can be derived from the
+other at apply time: kustomize cannot read one Secret and template it into another, and there is no
+init-container trick worth its complexity here. So the same password is stored twice, in two
+sops-encrypted files.
+
+That is a drift hazard with a quiet failure mode: rotate one, forget the other, and coder fails to
+start with an authentication error that reads like a database problem.
+
+### 6.3 The gate that closes it
+
+`make db-url-check`, offline, following `release-secrets`' design so it cannot pass vacuously:
+
+- It is driven by **references found in built output**, not by a list of files. For every
+  `HelmRelease` that reads a secret key whose value looks like a Postgres URL
+  (`postgres://` / `postgresql://`), it resolves that Secret and key in `apply/10-secrets/`.
+- It decrypts that Secret and the `DatabaseRole`'s `passwordSecret` for the matching role, and
+  asserts the URL's password equals the basic-auth password, and that the URL's user equals the
+  role name.
+- It reports what it checked — `db-url-check: 1 URL reference(s) checked, 0 mismatch(es)` — so a
+  silent no-op is visible, which is the failure mode `make validate` already refuses to have.
+- It needs the age key, so it joins `check`, not `check-ci`.
+
+This joins the six offline gates the repo already has (`leak-check`, `kustomize-check`, `validate`,
+`secrets-placement`, `release-secrets`, `crd-check`), and it exists for the same reason they do:
+the class of error it catches is one a normal schema validator waves through.
+
+---
+
+## 7. Certificates, DNS and ingress
+
+- **DNS: nothing to do.** Verified in §2.1 — the wildcard answers at any depth.
+- **`coder-wildcard` Certificate** in namespace `certificates`: `commonName: coder.titan.arrieta.eu`,
+  `dnsNames: [coder.titan.arrieta.eu, "*.coder.titan.arrieta.eu"]`, `issuerRef: le-prod-titan`,
+  `secretName: coder-tls`, and a `secretTemplate` whose Reflector annotations allow-list **only**
+  `coder`. This is the pattern `titan-wildcard.yaml` already uses; the allow-list is the mechanism
+  and it is not to be bypassed by copying a Secret.
+- **Ingress** in `coder`: host `coder.titan.arrieta.eu`, `ingressClassName: traefik`,
+  `secretName: coder-tls`. A second rule (or a second Ingress) for `*.coder.titan.arrieta.eu`
+  pointing at the same service, which is how coder's wildcard mode expects to be fronted.
+- **Unverified, must be observed:** that the OVH DNS-01 solver issues a second wildcard without
+  complaint. It should — same zone, same solver, and DNS-01 does not care about label depth — but
+  "should" is what the plan is for.
+
+Traefik's configuration remains unmanaged by this repo, as the bootstrap spec established.
+
+---
+
+## 8. Coder layer
+
+### 8.1 Values
+
+HelmRelease `coder` in namespace `coder`, chart `coder` version `2.37.4` from
+`https://helm.coder.com/v2`. `coder.env` carries:
+
+| Variable | Source |
+|---|---|
+| `CODER_ACCESS_URL` | literal `https://coder.titan.arrieta.eu` |
+| `CODER_WILDCARD_ACCESS_URL` | literal `https://*.coder.titan.arrieta.eu` |
+| `CODER_PG_CONNECTION_URL` | `secretKeyRef` → `coder-secrets/db-url` |
+| `CODER_OIDC_ISSUER_URL` | literal `https://auth.titan.arrieta.eu/application/o/coder/` |
+| `CODER_OIDC_CLIENT_ID` / `_CLIENT_SECRET` | `secretKeyRef` → `coder-secrets` |
+| `CODER_OIDC_EMAIL_FIELD` / `USERNAME_FIELD` / `SCOPES` / `IGNORE_EMAIL_VERIFIED` | literals, per casa's working set |
+
+Resources: requests 100m/512Mi, limits 2000m/1024Mi — same as casa, which is a known-good shape
+rather than a guess.
+
+### 8.2 The authentik side is a manual operator step
+
+authentik blueprints are deferred (authentik spec A10), so the Application and OAuth2/OIDC Provider
+are created by hand in the UI or with `ak`, exactly like the first admin. The spec records this as
+an operator prerequisite (§11.2) rather than implying git owns it. It is the second instance of the
+same gap — cluster state that exists only in a database — and it is the strongest argument for
+promoting blueprints out of the deferred list, which §14 notes without pretending to decide it.
+
+### 8.3 What OIDC-only means operationally
+
+Coder's login will depend on authentik, and authentik depends on the same CNPG `Cluster` coder
+does. One database outage takes both. On a single-node cluster that coupling is unavoidable and is
+accepted here, not discovered later.
+
+### 8.4 The lockout question, flagged rather than answered
+
+With no local admin, a misconfigured OIDC client could lock every human out of coder. Coder is
+documented to have a recovery path for this, **and this spec has not verified what it is** — the
+web search provider is unavailable in the environment this was written in, and asserting a recovery
+procedure from memory is the exact failure this session has now caught three times.
+
+The plan must therefore open with: read coder's current documentation on OIDC lockout recovery,
+record the actual command, and prove it on a throwaway coder install or state plainly that it does
+not exist. If it does not exist, C6 is revisited and a break-glass local account is added. This is
+a gate on the cutover, not a note.
+
+---
+
+## 9. Storage and quota
+
+### 9.1 Sizes
+
+| | Per workspace | Quota for `coder-workspaces` |
+|---|---|---|
+| CPU | 4 | **8** |
+| Memory | 8 Gi | **16 Gi** |
+| Home PVC | 40 Gi | **80 Gi** requests |
+
+`vg0/pvc` is ~240 G shared with the Postgres PVCs, so 80 G of homes is roughly a third of the pool
+and the quota is what keeps it that way. `allowVolumeExpansion: false` on local-path means a home
+that fills cannot be grown through the PVC — that is a known limit of the StorageClass, not of this
+design, and it is listed in §14 as something a future StorageClass change can fix.
+
+A `LimitRange` gives containers without explicit requests a sane default, because the quota is only
+enforced against requests and an unset request is a small one.
+
+### 9.2 `local-path-retain`, and the proof it requires
+
+A StorageClass with `provisioner: rancher.io/local-path`, the same `nodePath` config as the
+default, and `reclaimPolicy: Retain`. Workspace PVCs use it; everything else keeps the default.
+
+The claim "a deleted PVC keeps its bytes" is **not accepted on reasoning**. The plan must: create a
+PVC on `local-path-retain`, write a marker file, delete the PVC and the released PV, show the
+directory still exists on the node, and show it recoverable. If local-path's helper ignores
+`Retain` — which is possible and is precisely the kind of thing a four-line manifest gets wrong —
+then C3 is wrong and §13's override gets worse, which is exactly what the proof is for.
+
+---
+
+## 10. Templates in git
+
+`coder/templates/dev/main.tf` — coder's Kubernetes provider, one container, one 40 Gi PVC on
+`local-path-retain`, mounted at `/home/coder`, resource requests matching §9.1. Pushed by hand:
+
+```
+coder templates push dev -d coder/templates/dev
+```
+
+**Accepted gap, named:** git is the source of truth but nothing enforces it. A template edited in
+the UI drifts from the file and no gate notices. The mitigation is that coder reports the template
+version a workspace is running, so a build failure points at the discrepancy — which is a
+*diagnostic*, not a prevention, and is written as such. Automatic push is §14's deferred item.
+
+---
+
+## 11. Secrets inventory and operator prerequisites
+
+### 11.1 `apply/10-secrets/`
+
+| File | Type | Keys |
+|---|---|---|
+| `coder-secrets.yaml` | `Opaque` | `db-url`, `oidc-client-id`, `oidc-client-secret` |
+| `coder-db-credentials.yaml` | `kubernetes.io/basic-auth` | `username` (`coder`), `password`; label `cnpg.io/reload: "true"` |
+
+Both must be listed in `apply/10-secrets/kustomization.yaml` — `secrets-placement` already fails
+when one is not, because an unlisted Secret builds fine and is silently never applied.
+
+### 11.2 Operator prerequisites before merge
+
+1. Create the authentik Application + OAuth2/OIDC Provider for coder; note client ID and secret.
+2. Create the DB password, then sops-encrypt both files. **The two files must carry the same
+   password** — §6.3's gate enforces it, but only after it is written.
+3. Nothing in DNS. Nothing in OVH beyond what already exists.
+
+The `db-url` value must never be pasted into a chat or an agent transcript. The rotation procedure
+in `docs/authentik-runbook.md` §1 — read from the terminal, guard the shape, encrypt in place — is
+the pattern to follow, and the reason it exists is in that section.
+
+---
+
+## 12. Verification
+
+### 12.1 Offline
+
+`make check` must pass with the age key, including the new `db-url-check`. `make check-ci` must
+pass in CI, which does **not** run `db-url-check` (it needs the age key, which never goes in CI).
+
+### 12.2 Against the cluster
+
+1. `coder-wildcard` Ready; `coder-tls` present in `coder` and in no other namespace.
+2. `Database coder` and `DatabaseRole coder` Synced (admin context — `k8s-reader` is Forbidden on
+   `postgresql.cnpg.io`).
+3. HelmRelease `coder` Ready; `https://coder.titan.arrieta.eu/` serves and offers authentik as a
+   login method.
+4. Login as `akadmin` through authentik succeeds.
+5. Push the template; create a workspace; it reaches `running` with a Bound PVC on
+   `local-path-retain` in `coder-workspaces`.
+6. A workspace app on a secondary port is reachable at `*.coder.titan.arrieta.eu` with a valid TLS
+   chain — this is C5's actual payoff and it must be observed, not inferred from config.
+7. **The Retain proof** (§9.2).
+8. Create a third workspace: it stays `Pending`, and `kubectl describe` says why.
+9. Coder's database restores through the existing drill: seed a row coder wrote, back up, restore
+   to a scratch `Cluster`, assert the named row — the form `docs/authentik-runbook.md` §2 already
+   mandates, not a `count(*)`.
+10. The §8.4 lockout finding, resolved before cutover.
+
+---
+
+## 13. Amendments to the existing specs
+
+This is the second time titan takes data without a backup path, and the first time it was only
+recorded after the fact. So:
+
+- **authentik spec §12 / bootstrap spec §13b row for general PV backups:** the trigger
+  ("any other workload with data that is not a Postgres database") has now fired **again**, and the
+  second override is **uncompensated** — the first was compensated by the S3 backup path that
+  later landed. Both specs get amended to say coder's homes are that workload, that no
+  compensation exists, and that `local-path-retain` (§9.2) is a deletion-mitigation, not a backup.
+- **AGENTS.md** backups paragraph: currently says the Postgres cluster "and nothing else does".
+  Still true, and now needs the named accepted risk attached, so a future reader does not mistake
+  an accepted override for an oversight.
+- **The asymmetry is worth stating plainly:** coder's *configuration* — templates, users,
+  workspace metadata — lives in the shared Postgres and is therefore backed up and restore-proven.
+  Only the home directories are unprotected.
+
+---
+
+## 14. Deferred, with the trigger that promotes it
+
+| Item | Why not now | Trigger |
+|---|---|---|
+| Backups of workspace homes (restic → object store, `30-backup`) | C2, recorded in §13 | First time a home holds work that would be missed — or the first time it actually hurts |
+| Automatic template deployment | A Terraform-executing CI path against a live cluster is its own subsystem | Template drift actually bites once |
+| Break-glass local coder admin | C6 | §8.4 finding says no recovery path exists |
+| authentik blueprints as declarative config | Deferred in the authentik spec (A10); coder makes it the second manual-state gap | Third instance of hand-created identity state |
+| `allowVolumeExpansion` / a growable StorageClass | local-path cannot expand; changing it is a StorageClass decision | A home fills up |
+| Per-workspace NetworkPolicy | Not in scope; the quota is the containment chosen here | A workspace needs to be fenced from another tenant |
+
+---
+
+## 15. Decision record
+
+| # | Subject | Decision |
+|---|---|---|
+| C1 | Workspace placement and persistence | In-cluster, persistent homes |
+| C2 | Home backups | None; second uncompensated override, recorded |
+| C3 | StorageClass | `local-path-retain`, `reclaimPolicy: Retain`, proven before reliance |
+| C4 | Wildcard certificate | Separate `coder-wildcard` → `coder-tls`, reflected to `coder` only |
+| C5 | Workspace app routing | Wildcard hostnames via `CODER_WILDCARD_ACCESS_URL` |
+| C6 | Authentication | authentik OIDC only; lockout recovery unverified and gated |
+| C7 | Templates | In git at `coder/templates/`, pushed by hand; drift accepted and named |
+| C8 | Capacity | 2 × (4 CPU / 8 Gi / 40 G); quota 8 CPU / 16 Gi / 80 Gi |
+| C9 | Chart version | Pinned `2.37.4` |
+| C10 | Namespaces | `coder` + `coder-workspaces`, both declared centrally |
+| C11 | New offline gate | `make db-url-check`, reference-driven so it cannot pass vacuously |
