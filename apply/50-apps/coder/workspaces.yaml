@@ -38,8 +38,22 @@ spec:
       defaultRequest:
         cpu: 500m
         memory: 1Gi
+    # `max` is not optional on a PersistentVolumeClaim limit, and the cluster is what taught me
+    # that: `default` alone is rejected with
+    #   spec.limits[1].limits: Required value: either minimum or maximum storage value is required
+    # which took the entire apps stage down on first apply - kustomize-controller server-dry-runs
+    # every object, so one invalid object means nothing in the stage applied at all. kustomize
+    # build does not catch it, no vendored CRD covers core types, and the read-only identity cannot
+    # server-dry-run it either. The API server is the only thing that knows this rule.
+    #
+    # max stays at 40Gi rather than being dropped to satisfy the validator: that turns the
+    # per-workspace budget from spec §9.1 into something the API server enforces instead of a
+    # convention the template happens to honour. A template asking for 41Gi now fails at create
+    # time with the limit named, instead of quietly eating the second workspace's quota.
     - type: PersistentVolumeClaim
       default:
+        storage: 40Gi
+      max:
         storage: 40Gi
 ---
 # Coder's Kubernetes provider creates the workspace objects, and this Role is the whole of what
