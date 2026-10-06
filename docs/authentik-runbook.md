@@ -61,6 +61,23 @@ unscheduled-for-rotation. The bucket policy is object-scoped to this one bucket,
 the blast radius at this bucket rather than the account — that limits the damage and does
 not make the key safe.
 
+**Baseline, read 2026-10-06.** The live credential is `AKIA…4BSY`, its secret access key
+fingerprinting as `sha256:8392ba3863ac`. Two independent paths produced those values and they
+agree: reading the applied Secret back through `kubectl` + `base64 --decode`, and the script's
+fingerprint of the committed sops file. That agreement is worth having — it is the only check
+here that would catch a Secret hand-applied to the cluster and never committed, and it is the
+reason the rotation's after-state is comparable to anything.
+
+The full access key ID is deliberately not written here. `make leak-check` greps
+`AKIA[A-Z0-9]{16}` and rejects the commit outright (demonstrated: dropping the literal in an
+untracked file fails the gate by name), and GitGuardian would flag it in CI on top of that.
+Last-four is how the AWS console displays a key anyway. The 12-hex digest is a truncated
+SHA-256 — a comparison handle, not a recoverable value.
+
+After the rotation the digest **must differ from `8392ba3863ac`**. If it does not, the key that
+got encrypted is the key that was already there. Replace this paragraph with the new
+fingerprint and the date the old key was deleted in IAM.
+
 Rotate create-then-delete, never delete-then-create:
 
 1. Create a second access key for `k8s-titan-pg-backups` in IAM.
