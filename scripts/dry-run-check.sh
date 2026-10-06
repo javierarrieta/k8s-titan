@@ -49,7 +49,13 @@ for stage in "${STAGES[@]}"; do
   # tree - a false positive from the checker, not a fault in the manifests, and it cost a merge
   # cycle to find. --force-conflicts matches the controller; a distinct field-manager keeps a
   # validation run from claiming ownership of anything it merely inspected.
+  #
+  # The strip in the middle is the same class of fix: a sops Secret carries a top-level `sops:` key
+  # that the Secret schema does not declare, and server-side apply refuses the document outright.
+  # Flux decrypts and drops it before submitting, so dry-running it unstripped validates a document
+  # that will never be sent. See tools/strip-sops-key.py for why that is known rather than assumed.
   if kubectl kustomize "$root/apply/$stage" \
+       | python3 "$root/tools/strip-sops-key.py" \
        | kubectl --context "$CTX" apply --server-side --force-conflicts \
            --field-manager=dry-run-check --dry-run=server -f - >/dev/null 2>"$err"; then
     filter_noise <"$err" >&2
