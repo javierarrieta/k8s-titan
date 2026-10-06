@@ -15,3 +15,18 @@ resources:
   # authentik-db-credentials is referenced by a DatabaseRole, not a HelmRelease, so
   # `make release-secrets` cannot vouch for that name the way it does for the others.
   - authentik-secrets.yaml
+  # coder's three. Unlike authentik's, these are three files rather than one, and that is the
+  # difference between the two apps rather than an inconsistency: authentik's duplicated password
+  # lives twice INSIDE one sops file, where a single edit moves both halves and they cannot drift
+  # apart. coder's DB password and OIDC client each have to appear in two different namespaces, so
+  # no single-file trick reaches them - which is exactly why `make db-url-check` and
+  # `make oidc-check` exist to compare across files.
+  #
+  # None of these three is referenced by a HelmRelease's valuesFrom, so `make release-secrets`
+  # cannot vouch for any of them: coder takes its config as env/secretKeyRef inside spec.values and
+  # the blueprint is mounted by a chart-specific key. The two named gates above are what cover them,
+  # and an unlisted file here would build green and be silently never applied - `make
+  # secrets-placement` is the guard against that specific lie.
+  - coder-secrets.yaml
+  - coder-db-credentials.yaml
+  - authentik-coder-blueprint.yaml
