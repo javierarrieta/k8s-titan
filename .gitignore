@@ -17,3 +17,10 @@ apply/10-secrets/.staging.*.yaml
 # manager. Belt-and-braces in case one is ever dropped next to a manifest.
 *.agekey
 *.age
+
+# OpenTofu working state from `tofu validate`. Not committed on purpose: tofu writes its lock
+# file against registry.opentofu.org, while coder runs Terraform, which resolves from
+# registry.terraform.io. A lock file from the wrong registry is an init failure at template push.
+# Re-run `tofu init && tofu validate` in the template directory to reproduce the check.
+coder/templates/**/.terraform/
+coder/templates/**/.terraform.lock.hcl
