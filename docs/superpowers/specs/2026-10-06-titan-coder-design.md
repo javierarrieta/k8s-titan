@@ -55,7 +55,7 @@ directories, automatic template deployment, a break-glass local login, and monit
 
 | Fact | How it was checked |
 |---|---|
-| `*.titan.arrieta.eu` resolves at **any depth** — `a.b.titan.arrieta.eu` answers | DNS-over-HTTPS query against `dns.google/resolve`; Status 0 with an answer |
+| `*.titan.arrieta.eu` resolves at **any depth** — `a.b.titan.arrieta.eu` answers | DNS-over-HTTPS query against `dns.google/resolve`; Status 0 with an answer. The record behind it is `ovh_domain_zone_record.titan_wildcard` in **`../public-dns-tf/titan.arrieta.eu.tf`** (§7) |
 | Therefore `*.coder.titan.arrieta.eu` needs **no DNS record** | Same check; OVH's wildcard is not limited to one label (the common "one label only" reading of RFC 4592 is wrong — a wildcard matches any descendant with no closer node) |
 | An X.509 wildcard matches **exactly one label**, so the existing `*.titan.arrieta.eu` SAN will not cover `x.coder.titan.arrieta.eu` | RFC 6125 §6.4.3 / certificate semantics. This is the opposite of the DNS rule above, and the asymmetry is the whole reason §7 exists |
 | titan allocates **12 CPU / 131,793,372 Ki (~126 Gi) / 110 pods** | `kubectl get node -o jsonpath` with the read-only `k8s-reader` identity |
@@ -196,7 +196,20 @@ the class of error it catches is one a normal schema validator waves through.
 
 ## 7. Certificates, DNS and ingress
 
-- **DNS: nothing to do.** Verified in §2.1 — the wildcard answers at any depth.
+- **DNS: nothing to do here, and that is not luck.** `../public-dns-tf/titan.arrieta.eu.tf` declares
+  `ovh_domain_zone_record.titan_wildcard` — `subdomain = "*.titan"`, type `A`, ttl 300 — and that
+  file's own comment says it plainly: *"the wildcard is not convenience, it is the certificate
+  strategy."* This spec's §7 depends on a resource owned by another repo, so it is named as a
+  dependency rather than treated as background. Consequences:
+  - Any DNS change goes in **that repo, via PR**. The OVH console is not the source of truth; a
+    record made by hand there is invisible to `terraform plan` and arrives as unexplained drift on
+    whoever runs it next.
+  - The ACME TXT records cert-manager's DNS-01 solver writes live in the same Terraform-managed
+    zone. Terraform tracks only what it declares, so they do not read as drift — but a destructive
+    plan over there pulls the A records out from under every certificate over here. One sentence in
+    that repo's README would be worth writing; it is out of this spec's scope to write it.
+  - If the wildcard is ever narrowed or removed, `coder.titan.arrieta.eu` and every workspace host
+    stop resolving at once. §11.2 carries that as a standing condition, not a one-time check.
 - **`coder-wildcard` Certificate** in namespace `certificates`: `commonName: coder.titan.arrieta.eu`,
   `dnsNames: [coder.titan.arrieta.eu, "*.coder.titan.arrieta.eu"]`, `issuerRef: le-prod-titan`,
   `secretName: coder-tls`, and a `secretTemplate` whose Reflector annotations allow-list **only**
@@ -324,7 +337,9 @@ when one is not, because an unlisted Secret builds fine and is silently never ap
 1. Create the authentik Application + OAuth2/OIDC Provider for coder; note client ID and secret.
 2. Create the DB password, then sops-encrypt both files. **The two files must carry the same
    password** — §6.3's gate enforces it, but only after it is written.
-3. Nothing in DNS. Nothing in OVH beyond what already exists.
+3. Nothing in DNS — **conditional on** `titan_wildcard` in `../public-dns-tf` remaining as
+   declared (§7). If it is narrowed or removed, coder and every workspace host stop resolving
+   together, and no amount of reconciliation in this repo will fix it.
 
 The `db-url` value must never be pasted into a chat or an agent transcript. The rotation procedure
 in `docs/authentik-runbook.md` §1 — read from the terminal, guard the shape, encrypt in place — is
@@ -342,21 +357,24 @@ pass in CI, which does **not** run `db-url-check` (it needs the age key, which n
 ### 12.2 Against the cluster
 
 1. `coder-wildcard` Ready; `coder-tls` present in `coder` and in no other namespace.
-2. `Database coder` and `DatabaseRole coder` Synced (admin context — `k8s-reader` is Forbidden on
+2. A workspace host resolves — `curl -s "https://dns.google/resolve?name=x.coder.titan.arrieta.eu&type=A"`
+   returns an answer. That is the §7 dependency holding in practice, not merely present in a file
+   another repo owns.
+3. `Database coder` and `DatabaseRole coder` Synced (admin context — `k8s-reader` is Forbidden on
    `postgresql.cnpg.io`).
-3. HelmRelease `coder` Ready; `https://coder.titan.arrieta.eu/` serves and offers authentik as a
+4. HelmRelease `coder` Ready; `https://coder.titan.arrieta.eu/` serves and offers authentik as a
    login method.
-4. Login as `akadmin` through authentik succeeds.
-5. Push the template; create a workspace; it reaches `running` with a Bound PVC on
+5. Login as `akadmin` through authentik succeeds.
+6. Push the template; create a workspace; it reaches `running` with a Bound PVC on
    `local-path-retain` in `coder-workspaces`.
-6. A workspace app on a secondary port is reachable at `*.coder.titan.arrieta.eu` with a valid TLS
+7. A workspace app on a secondary port is reachable at `*.coder.titan.arrieta.eu` with a valid TLS
    chain — this is C5's actual payoff and it must be observed, not inferred from config.
-7. **The Retain proof** (§9.2).
-8. Create a third workspace: it stays `Pending`, and `kubectl describe` says why.
-9. Coder's database restores through the existing drill: seed a row coder wrote, back up, restore
-   to a scratch `Cluster`, assert the named row — the form `docs/authentik-runbook.md` §2 already
-   mandates, not a `count(*)`.
-10. The §8.4 lockout finding, resolved before cutover.
+8. **The Retain proof** (§9.2).
+9. Create a third workspace: it stays `Pending`, and `kubectl describe` says why.
+10. Coder's database restores through the existing drill: seed a row coder wrote, back up, restore
+    to a scratch `Cluster`, assert the named row — the form `docs/authentik-runbook.md` §2 already
+    mandates, not a `count(*)`.
+11. The §8.4 lockout finding, resolved before cutover.
 
 ---
 
@@ -388,6 +406,7 @@ recorded after the fact. So:
 | Break-glass local coder admin | C6 | §8.4 finding says no recovery path exists |
 | authentik blueprints as declarative config | Deferred in the authentik spec (A10); coder makes it the second manual-state gap | Third instance of hand-created identity state |
 | `allowVolumeExpansion` / a growable StorageClass | local-path cannot expand; changing it is a StorageClass decision | A home fills up |
+| A note in `../public-dns-tf` that `titan_wildcard` is load-bearing for cert-manager DNS-01 across this cluster | That repo is not this spec's to edit | Next time anyone narrows a wildcard there |
 | Per-workspace NetworkPolicy | Not in scope; the quota is the containment chosen here | A workspace needs to be fenced from another tenant |
 
 ---
