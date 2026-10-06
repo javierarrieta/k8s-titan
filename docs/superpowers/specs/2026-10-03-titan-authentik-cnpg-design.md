@@ -881,6 +881,26 @@ directory has to be built. Two mechanisms, both viable, not mutually exclusive:
 
 The choice is the operator's; it does not block this spec, and nothing here forecloses either.
 
+### 12.2 Gates designed during execution and never built
+
+Promoted out of the execution ledger, which is gitignored scratch, so they survive the run that
+thought of them. None were in the plan's scope; all four would have caught a failure this plan
+actually hit.
+
+| Gate | What it proves | Why it is not built |
+|---|---|---|
+| `release-secrets-selftest` | The `release-secrets` awk still has all its arms. A gate that silently loses a branch passes forever, and this one is awk embedded in a Makefile with no test of its own | New gate, out of the plan's scope |
+| `kustomize-check` assertions on built output | That the `Cluster` carries `kustomize.toolkit.fluxcd.io/prune: disabled` (D13 — deleting the YAML must not delete the database) and that the wildcard `Certificate` carries the four Reflector annotation keys **under `secretTemplate`** | The plan's own failures #1 and #4 are still prose-only warnings in this spec |
+| Namespace-closure assertion | Every built object's `metadata.namespace` is one of the six declared in `00-bootstrap/namespaces.yaml` — so a typo'd namespace cannot ship an object into a place nothing reconciles | New gate, out of scope |
+| A pointer comment in `titan-wildcard.yaml` | That the Reflector annotations belong under `secretTemplate`, not at the `Certificate` spec level, where they do nothing | Documentation, out of scope |
+
+Three known limits of `release-secrets` were found while building it and deliberately left, not
+hidden: comment text inside a `HelmRelease` document can redden the gate (the one-line guard is
+`$0 !~ /^[ \t]*#/`); flow detection needs `kind:` before the flow line, so a `HelmRelease` with
+`kind:` last escapes it; and `cap()`'s comment overstates what it strips — a comment after a
+quoted value survives. All three fail loudly rather than silently, which is why they were
+accepted.
+
 ---
 
 ## 13. Decision record
