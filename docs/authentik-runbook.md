@@ -54,8 +54,7 @@ so the familiar five-field form fires hourly; and `retentionPolicy` is a child o
 
 ### The exposed backup credential — rotated 2026-10-05, one step left
 
-**Status: the exposed key is out of the cluster and out of git. It still exists in IAM, and
-that is the remaining action.**
+**Status: closed. The exposed key is out of the cluster, out of git, and deleted from IAM.**
 
 The IAM access key behind `s3-backup-secrets` (user `k8s-titan-pg-backups`) was pasted into a
 chat transcript while the Secret was being authored, so the Secret could be sops-encrypted from
@@ -84,10 +83,19 @@ never rolled, and is archiving happily with the new key on 1.30.1. Keep running 
 check after a rotation — it is cheap and it is the only proof that matters — but do not roll a
 pod on the theory that the Secret did not propagate. On 1.30.1 it propagates.
 
-**Still open: delete `AKIA…CU67` in IAM.** Until it is deleted, the credential that went
-through a transcript can still write to this bucket; the bucket policy is object-scoped to
-this one bucket, which caps the blast radius at this bucket rather than the account, and that
-limits the damage without making it safe. When it is gone, record the date here.
+**Closed 2026-10-06: `AKIA…CU67` is deleted in IAM.** Until it was, the credential that went
+through a transcript could still write to this bucket; the bucket policy is object-scoped to this
+one bucket, which caps the blast radius at this bucket rather than the account, and that limits the
+damage without making it safe.
+
+Deleting it is also the proof that the rotation really took: if anything were still authenticating
+with the superseded key, revoking it would have broken backups immediately. It did not. In the 24 h
+after the deletion `postgres-1` archived 291 WAL segments with the most recent at `2026-10-06T20:25:20Z`,
+zero failures, and the namespace holds no `Warning` events. Worth recording how that was read, because
+the first pass looked alarming: grepping the pod log for `error|failed` returns 579 lines, and every
+one of them is the *field name* `error_severity` inside a routine Postgres record — grouping by the
+severity value gives 579 `LOG` and 596 `info`, and nothing above `LOG`. A grep that matches a key name
+rather than a value is a check that cannot fail, which is the same trap as a `count(*)` assertion.
 
 **How it landed is its own warning.** That rotation reached `main` inside a commit titled
 `docs:` because `git add -A` swept a modified Secret off a working tree that was also carrying

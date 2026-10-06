@@ -38,8 +38,9 @@ has no backup. The same runbook records what has actually been drilled (a scratc
 restore and a point-in-time recovery, both passing), and the two credentials with special
 rules: `AUTHENTIK_SECRET_KEY` (never rotate casually — it signs sessions and derives user IDs,
 and the sops file is its only copy) and the S3 backup key (the one exposed in a chat transcript
-was replaced on 2026-10-05 and the cluster archives on the replacement; the superseded key
-still has to be deleted in IAM).
+was replaced on 2026-10-05, the cluster archives on the replacement, and the superseded key was
+deleted in IAM on 2026-10-06 — that deletion is the proof the rotation took, since anything still
+using the old key would have stopped archiving).
 
 ## Rules
 
