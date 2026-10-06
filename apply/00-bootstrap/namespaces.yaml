@@ -51,3 +51,27 @@ metadata:
     name: cnpg-system
   annotations:
     kubernetes.io/description: "CloudNativePG operator"
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: coder
+  labels:
+    name: coder
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: latest
+  annotations:
+    kubernetes.io/description: "Coder server - its provisioner RBAC reaches only coder-workspaces"
+---
+# Workspaces only. Coder's provisioner RBAC is scoped to this namespace and to nothing else,
+# which is what makes it safe to hand a workload pod-creation rights at all.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: coder-workspaces
+  labels:
+    name: coder-workspaces
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: latest
+  annotations:
+    kubernetes.io/description: "Coder workspace pods, injected by coder itself"

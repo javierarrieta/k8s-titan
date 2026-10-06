@@ -110,10 +110,11 @@ This is one slice. It is not the backup work, and it does not pretend to be.
 | C3 | `local-path-retain` StorageClass for homes | Accepting `Delete` on an unbacked volume. A four-line manifest converts "deleted the wrong PVC" from data loss into "recreate the PV object" |
 | C4 | **Separate** `coder-wildcard` Certificate → `coder-tls` | Adding `*.coder.titan.arrieta.eu` as a third SAN on `titan-wildcard`. That was the first instinct and it is worse: it forces an edit to the reflector allow-list AGENTS.md treats as the controlled mechanism, and it re-issues the whole cluster wildcard every time coder's cert renews. Separate object, separate Secret, `titan-wildcard.yaml` untouched |
 | C5 | **Path-free wildcard** workspace hostnames (`CODER_WILDCARD_ACCESS_URL`) | Path-based `/@owner/@workspace/@app`. Zero cert work, but apps that emit absolute redirects or assume a host-per-port fail in ways discovered mid-worksession, not at deploy time |
-| C6 | authentik OIDC only, **no local admin** | Coder-local password, or OIDC plus break-glass. A second credential with its own rotation story is the thing this cluster already has too few of. The lockout risk this creates is named in §8.4 and is an open item, not an oversight |
+| C6 | authentik OIDC only, **no local admin** | Coder-local password, or OIDC plus break-glass. A second credential with its own rotation story is the thing this cluster already has too few of. §8.4 resolves the lockout risk this creates: coder ships a database-level escape hatch that needs no existing user |
 | C7 | Templates in git, **pushed by hand** | Templates only in coder's UI (invisible to review and to every gate here) or automatic push (a Terraform-executing CI path against a live cluster — its own spec, §14) |
 | C8 | Two workspaces at 4 CPU / 8 Gi / 40 G, quota 8 CPU / 16 Gi / 80 G | One generous, or three or four small. Two leaves the control plane comfortable and makes "the third one is Pending" an explainable outcome |
 | C9 | Chart pinned at `2.37.4` | casa's `2.35.1` (two minors stale) or floating. Every other chart here is pinned |
+| C12 | coder's OIDC client declared as an **authentik blueprint in git** | Clicking it into existence in the UI. A hand-made client exists only inside one authentik database: invisible to review, unreproducible after a restore, and the reason this spec had a manual prerequisite blocking every later task |
 
 ---
 
@@ -245,13 +246,14 @@ HelmRelease `coder` in namespace `coder`, chart `coder` version `2.37.4` from
 Resources: requests 100m/512Mi, limits 2000m/1024Mi — same as casa, which is a known-good shape
 rather than a guess.
 
-### 8.2 The authentik side is a manual operator step
+### 8.2 The authentik side is declared in git (supersedes the A10 deferral)
 
-authentik blueprints are deferred (authentik spec A10), so the Application and OAuth2/OIDC Provider
-are created by hand in the UI or with `ak`, exactly like the first admin. The spec records this as
-an operator prerequisite (§11.2) rather than implying git owns it. It is the second instance of the
-same gap — cluster state that exists only in a database — and it is the strongest argument for
-promoting blueprints out of the deferred list, which §14 notes without pretending to decide it.
+This section previously said the Application and OAuth2/OIDC Provider are created by hand, because
+authentik blueprints were deferred (authentik spec A10). **That is no longer true**, and the reason
+it changed is worth keeping: the manual step was the single thing blocking every later task, and a
+credential that exists only as a database row is invisible to every gate in this repo. See §8.5 for
+the mechanism and what is still unproven about it. The authentik spec's A10 deferral stands for
+everything except coder's client.
 
 ### 8.3 What OIDC-only means operationally
 
@@ -259,19 +261,78 @@ Coder's login will depend on authentik, and authentik depends on the same CNPG `
 does. One database outage takes both. On a single-node cluster that coupling is unavoidable and is
 accepted here, not discovered later.
 
-### 8.4 The lockout question, flagged rather than answered
+### 8.4 The lockout question, answered from source
 
-With no local admin, a misconfigured OIDC client could lock every human out of coder. Coder is
-documented to have a recovery path for this, **and this spec has not verified what it is** — the
-web search provider is unavailable in the environment this was written in, and asserting a recovery
-procedure from memory is the exact failure this session has now caught three times.
+With no local admin, a misconfigured OIDC client could lock every human out of coder. This was left
+unverified when the spec was written; it is now checked against `coder/coder` at `main`, read on
+2026-10-06.
 
-The plan must therefore open with: read coder's current documentation on OIDC lockout recovery,
-record the actual command, and prove it on a throwaway coder install or state plainly that it does
-not exist. If it does not exist, C6 is revisited and a break-glass local account is added. This is
-a gate on the cutover, not a note.
+**The escape hatch is `coder server create-admin-user`, and it needs neither OIDC, nor the API, nor
+an existing user.** `cli/server_createadminuser.go` registers it as a child of `coder server` with
+`Use: "create-admin-user"`, takes `--postgres-url` (env `CODER_PG_CONNECTION_URL`), and writes the
+new user with `LoginType: database.LoginTypePassword`. That last detail is what makes it the
+break-glass rather than a curiosity: it creates a genuinely password-based admin even when every
+existing account is OIDC-provisioned and has no usable password.
+
+`coder reset-password <username>` (`cli/resetpassword.go`) is **not** the break-glass. It updates
+`hashed_password` and nothing else, so for a user whose login type is `oauth` it does not
+necessarily produce a working password login. Reaching for it under pressure would be the mistake.
+
+There is also a built-in guard: `CODER_DISABLE_PASSWORD_AUTH` (`codersdk/deployment.go`) documents
+that *"any user with the owner role will be able to sign in with their password regardless of this
+setting to avoid potential lock out"*. Note that the docs string names the remedy as
+`coder server create-admin` while the registered command is `create-admin-user`. Trust the code.
+
+In practice, from inside the cluster:
+
+```fish
+kubectl -n coder exec deploy/coder -- coder server create-admin-user \
+  --postgres-url (kubectl -n coder get secret coder-secrets -o jsonpath='{.data.db-url}' | base64 -d)
+```
+
+**Honest limit: this was read in source, not executed.** The environment this was verified in has
+no container runtime, so no throwaway coder was started. The command, its flags, its registration
+and its `LoginType` are cited from source; the end-to-end act of running it is not proven.
+
+Consequence for C6: it stands unchanged. No break-glass local account is added to the HelmRelease,
+because the recovery path is database-level and needs nothing that OIDC misconfiguration can break.
+The residual risk is that the escape hatch needs the coder image and the DB URL — both of which are
+in this cluster and neither of which depends on authentik.
 
 ---
+
+### 8.5 The OIDC client is declared, not clicked (C12)
+
+The plan originally had a human create the application and provider in authentik's UI and hand the
+client to coder. That makes one credential exist in exactly one place — a database row — which is
+invisible to `make check`, unreproducible after a restore, and was the manual step blocking Tasks 6
+through 13.
+
+**CRDs are not available and that was checked, not assumed.** `kubectl get crd | grep -i authentik`
+returns nothing on this cluster, and the pinned chart `authentik-2026.8.3` ships no `crds/`
+directory, no `installCRDs` value and no operator templates. There is no `applications.authentik.io`
+waiting to be used, and installing a third-party operator to obtain one is a larger change than the
+thing it would configure.
+
+**Blueprints are the first-party path.** They are authentik's own infrastructure-as-code format —
+YAML the worker applies against its own API — and the chart mounts them from a Secret
+(`values.yaml:220`, `blueprints.secrets`). So `authentik/blueprints-coder.yaml` is the
+reviewed source, `scripts/setup-coder-secrets.sh` renders it with the generated client, and the
+worker applies it.
+
+The wrinkle is the one this cluster already knows: `OAuth2Provider.client_id` and `client_secret`
+default to `generate_id` / `generate_client_secret` (`authentik/providers/oauth2/models.py:233-243`),
+so authentik will happily invent them — and then coder cannot know them. They must be set explicitly,
+which puts one credential in two files, exactly like the database password. Same treatment:
+generated once, written to both, and `make oidc-check` proves the three copies — reviewed template,
+applied Secret, coder's own env — still agree, including that the HelmRelease actually mounts the
+Secret, because an unmounted blueprint is indistinguishable from one that was never written.
+
+**Not proven, and named as such.** The flow slugs in the blueprint were probed against the live
+instance — `default-authorization-flow` returns 404 here, which is why nothing was written from
+memory — but `property_mappings: default-scopes` and the omission of `signing_key` are unverified.
+Task 6's live step is what proves them, and a Secret applying is not the same fact as a blueprint
+being applied by the worker.
 
 ## 9. Storage and quota
 
@@ -403,7 +464,7 @@ recorded after the fact. So:
 |---|---|---|
 | Backups of workspace homes (restic → object store, `30-backup`) | C2, recorded in §13 | First time a home holds work that would be missed — or the first time it actually hurts |
 | Automatic template deployment | A Terraform-executing CI path against a live cluster is its own subsystem | Template drift actually bites once |
-| Break-glass local coder admin | C6 | §8.4 finding says no recovery path exists |
+| Break-glass local coder admin | C6, and §8.4 found a database-level escape hatch that makes one redundant | The escape hatch is ever found not to work in practice |
 | authentik blueprints as declarative config | Deferred in the authentik spec (A10); coder makes it the second manual-state gap | Third instance of hand-created identity state |
 | `allowVolumeExpansion` / a growable StorageClass | local-path cannot expand; changing it is a StorageClass decision | A home fills up |
 | A note in `../public-dns-tf` that `titan_wildcard` is load-bearing for cert-manager DNS-01 across this cluster | That repo is not this spec's to edit | Next time anyone narrows a wildcard there |
@@ -420,9 +481,10 @@ recorded after the fact. So:
 | C3 | StorageClass | `local-path-retain`, `reclaimPolicy: Retain`, proven before reliance |
 | C4 | Wildcard certificate | Separate `coder-wildcard` → `coder-tls`, reflected to `coder` only |
 | C5 | Workspace app routing | Wildcard hostnames via `CODER_WILDCARD_ACCESS_URL` |
-| C6 | Authentication | authentik OIDC only; lockout recovery unverified and gated |
+| C6 | Authentication | authentik OIDC only; escape hatch is `coder server create-admin-user`, read from source (§8.4) |
 | C7 | Templates | In git at `coder/templates/`, pushed by hand; drift accepted and named |
 | C8 | Capacity | 2 × (4 CPU / 8 Gi / 40 G); quota 8 CPU / 16 Gi / 80 Gi |
 | C9 | Chart version | Pinned `2.37.4` |
 | C10 | Namespaces | `coder` + `coder-workspaces`, both declared centrally |
 | C11 | New offline gate | `make db-url-check`, reference-driven so it cannot pass vacuously |
+| C12 | authentik configuration | Blueprint in git, rendered to a sops Secret, mounted into the worker; `make oidc-check` ties the three copies together |

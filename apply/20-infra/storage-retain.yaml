@@ -1,0 +1,30 @@
+# Same provisioner and same node path as k3s' default `local-path`, with one field changed:
+# reclaimPolicy Retain. Workspace homes are NOT backed up (spec C2), so the realistic data-loss
+# accident is not disk failure, it is `kubectl delete pvc` - which against `Delete` runs a helper
+# pod that rm -rf's the directory. Retain turns that into "recreate the PV object and the bytes are
+# still there".
+#
+# Read off the live cluster rather than assumed, on v1.35.8+k3s1:
+#   sc/local-path          provisioner rancher.io/local-path, reclaimPolicy Delete,
+#                          volumeBindingMode WaitForFirstConsumer, and NO parameters: block -
+#                          so none is copied here, and adding one would be inventing a field.
+#   cm/kube-system         rancher.io/local-path takes its config from this ConfigMap, not from
+#   /local-path-config     StorageClass parameters. nodePathMap sends every volume to
+#                          /var/lib/rancher/k3s/storage, which is why a second StorageClass on the
+#                          same provisioner lands in the same place for free. Its teardown script
+#                          is `rm -rf "${VOL_DIR}"` - the deletion this class exists to survive.
+#
+# That ConfigMap is shared, so this class cannot aim at a different path without a second ConfigMap
+# and configMapName/configMapNamespace parameters. Deliberately not done: same bytes, different
+# reclaim policy is the whole point.
+#
+# This is a deletion mitigation, not a backup, and spec §13 says so. Task 9 proves the provisioner
+# actually honours Retain rather than assuming a written field is an obeyed field.
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: local-path-retain
+provisioner: rancher.io/local-path
+reclaimPolicy: Retain
+volumeBindingMode: WaitForFirstConsumer
+allowVolumeExpansion: false

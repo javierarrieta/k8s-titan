@@ -38,6 +38,20 @@ spec:
       name: RetryOnFailure
       retryInterval: 5m
   values:
+    # authentik's own infrastructure-as-code channel (spec C12). The worker discovers mounted
+    # blueprints and applies them against its own API, so coder's OIDC client is declared in git
+    # rather than clicked in a UI - which matters because a rebuilt authentik would otherwise come
+    # back with no coder client at all. Only keys ending in .yaml are picked up (values.yaml:220).
+    #
+    # A Secret and not a ConfigMap: the blueprint carries coder's client_secret, and a ConfigMap
+    # would put a live credential in plain view of anyone who can read the namespace. It is rendered
+    # from authentik/blueprints-coder.yaml by scripts/setup-coder-secrets.sh and lives,
+    # sops-encrypted, in apply/10-secrets/ like every other credential here. `make oidc-check` fails
+    # if this mount is removed while the Secret still exists - the state where the blueprint is
+    # perfectly valid, perfectly applied to the cluster, and perfectly invisible to authentik.
+    blueprints:
+      secrets:
+        - authentik-coder-blueprint
     authentik:
       log_level: info
       error_reporting:

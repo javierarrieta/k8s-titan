@@ -1,0 +1,167 @@
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: HelmRepository
+metadata:
+  name: coder-repo
+  namespace: coder
+spec:
+  interval: 12h
+  url: https://helm.coder.com/v2
+---
+# Coder, the workspace control plane. Skeleton follows auth/authentik.yaml - same HelmRepository
+# pattern, same retry remediation, same 30m interval - because a second app doing it a second way
+# is how you end up debugging the difference instead of the outage.
+#
+# Values were read out of coder_helm_2.37.4.tgz, not written from memory, and two of the plan's were
+# wrong in the way Helm never complains about:
+#
+#   coder.service.enabled  ->  coder.service.enable
+#     The chart's key is `enable`. Helm ignores unknown values silently, so `enabled: true` would
+#     have shipped a value that does nothing while the real default carried on underneath it.
+#   service.type defaults to LoadBalancer
+#     There is no load-balancer controller on this cluster, so the Service would sit with a pending
+#     external IP forever - not broken, just permanently "not yet", which is worse, because it looks
+#     like something is still deploying. ClusterIP is the only honest type here; the Ingress is the
+#     way in.
+#
+# The chart can render its own Ingress (coder.ingress, off by default). Deliberately not used: it
+# would not carry the wildcard rule and the coder-tls reference in a shape this repo controls, and
+# an Ingress you cannot read in git is an Ingress you cannot review.
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: coder
+  namespace: coder
+spec:
+  releaseName: coder
+  interval: 30m
+  timeout: 10m
+  chart:
+    spec:
+      chart: coder
+      version: "2.37.4"
+      sourceRef:
+        kind: HelmRepository
+        name: coder-repo
+        namespace: coder
+  driftDetection:
+    mode: enabled
+  install:
+    strategy:
+      name: RetryOnFailure
+      retryInterval: 5m
+  upgrade:
+    strategy:
+      name: RetryOnFailure
+      retryInterval: 5m
+  values:
+    coder:
+      # The chart injects CODER_ACCESS_URL pointing at the in-cluster Service *only if it is not
+      # already set here* (templates/_coder.tpl: `if and (not $hasAccessURL) .Values.
+      # coder.envUseClusterAccessURL`). It is set here, so the default is harmless - but that is the
+      # mechanism, not a guess, and it is the difference between coder handing out
+      # http://coder.coder.svc URLs and the real hostnames.
+      env:
+        - name: CODER_ACCESS_URL
+          value: "https://coder.titan.arrieta.eu"
+        # The whole reason C5 exists: workspace apps get one hostname each instead of a path, so a
+        # preview port is a real origin rather than something that emits an absolute redirect and
+        # lands on the wrong host.
+        - name: CODER_WILDCARD_ACCESS_URL
+          value: "https://*.coder.titan.arrieta.eu"
+        - name: CODER_PG_CONNECTION_URL
+          valueFrom:
+            secretKeyRef:
+              name: coder-secrets
+              key: db-url
+        - name: CODER_OIDC_ISSUER_URL
+          value: "https://auth.titan.arrieta.eu/application/o/coder/"
+        - name: CODER_OIDC_CLIENT_ID
+          valueFrom:
+            secretKeyRef:
+              name: coder-secrets
+              key: oidc-client-id
+        - name: CODER_OIDC_CLIENT_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: coder-secrets
+              key: oidc-client-secret
+        - name: CODER_OIDC_EMAIL_FIELD
+          value: email
+        # coder's own default, stated explicitly rather than relied on:
+        # codersdk/deployment.go defaults the username claim to preferred_username, which is what
+        # authentik's default scope mapping emits.
+        - name: CODER_OIDC_USERNAME_FIELD
+          value: preferred_username
+        # offline_access beyond coder's default openid,profile,email, because OIDC token refresh
+        # needs a refresh token - and the blueprint grants the refresh_token flow for exactly this.
+        # Unverified against authentik's scope mapping until the first real login.
+        - name: CODER_OIDC_SCOPES
+          value: openid,profile,email,offline_access
+        # authentik does not always assert email_verified for a locally-created user, and coder
+        # refuses an unverified address by default. Without this the failure is "login did nothing".
+        - name: CODER_OIDC_IGNORE_EMAIL_VERIFIED
+          value: "true"
+      service:
+        enable: true
+        type: ClusterIP
+      resources:
+        requests:
+          cpu: 100m
+          memory: 512Mi
+        limits:
+          cpu: 2000m
+          memory: 1024Mi
+      serviceAccount:
+        # Pinned, not defaulted. Task 4's RoleBinding binds ServiceAccount `coder` in
+        # coder-workspaces; the chart's default name happens to be `coder` too, but a default that
+        # two files agree by coincidence is a bug waiting for an upgrade.
+        name: coder
+        # Left empty on purpose, and this is the load-bearing line for the whole RBAC design: if a
+        # namespace were listed here the chart would generate a second Role and RoleBinding in it,
+        # and coder's effective permissions in coder-workspaces would be the union of one reviewed
+        # Role and one nobody reads. See apply/50-apps/coder/workspaces.yaml.
+        workspaceNamespaces: []
+---
+# Two rules, one host each. The wildcard rule is what makes C5 real: workspace apps get a hostname
+# each instead of a path.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: coder
+  namespace: coder
+  annotations:
+    # Workspace sessions stream over websockets (the terminal, the port-forward apps). Traefik's
+    # defaults handle it, so nothing is set here - the annotation slot is a reminder that if a
+    # workspace terminal ever hangs at connect, this is the first place to look, not coder.
+    {}
+spec:
+  ingressClassName: traefik
+  rules:
+    - host: coder.titan.arrieta.eu
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: coder
+                port:
+                  number: 80
+    - host: "*.coder.titan.arrieta.eu"
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: coder
+                port:
+                  number: 80
+  tls:
+    # coder-tls is produced in namespace `certificates` by the coder-wildcard Certificate and
+    # reflected into `coder` by Reflector - the allow-list is the secretTemplate annotations on
+    # apply/40-certificates/coder-wildcard.yaml, and it names coder and nothing else.
+    - hosts:
+        - coder.titan.arrieta.eu
+        - "*.coder.titan.arrieta.eu"
+      secretName: coder-tls

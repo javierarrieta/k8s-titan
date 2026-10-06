@@ -1,0 +1,39 @@
+# Coder's database and role, authored next to the app that owns them, so a reviewer sees the
+# whole dependency in one directory. Both live in `databases`: a CNPG Database must share a
+# namespace with its Cluster, so "where the app lives" loses to "where the cluster lives".
+#
+# The password is not here. It lives in apply/10-secrets/coder-db-credentials.yaml, encrypted,
+# and is referenced by name - which is what makes this file safe to read in a public repo.
+#
+# Read auth/authentik-db.yaml first. Everything it records about DatabaseRole applies here
+# verbatim: exactly one DatabaseRole per role, `passwordSecret` must point at a
+# kubernetes.io/basic-auth Secret whose `username` equals the role name, and the
+# `cnpg.io/reload` label belongs on that Secret rather than on this DatabaseRole, where it
+# would do nothing.
+apiVersion: postgresql.cnpg.io/v1
+kind: Database
+metadata:
+  name: coder
+  namespace: databases
+spec:
+  name: coder
+  owner: coder
+  cluster:
+    name: postgres
+---
+# `login: true` is required and silent when missing - CNPG has no default for `login`, so the
+# role is created NOLOGIN and every connection fails with a message pointing somewhere else.
+# That was observed live with the authentik role before it was understood; it is not repeated
+# here as a guess.
+apiVersion: postgresql.cnpg.io/v1
+kind: DatabaseRole
+metadata:
+  name: coder
+  namespace: databases
+spec:
+  name: coder
+  cluster:
+    name: postgres
+  login: true
+  passwordSecret:
+    name: coder-db-credentials

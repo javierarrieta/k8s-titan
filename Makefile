@@ -4,12 +4,12 @@ KUSTOMIZE_DIRS := $(shell find apply -mindepth 1 -maxdepth 2 -name kustomization
 # not be able to slip between the encryption rule and the validation glob.
 SECRET_FIND := find apply/10-secrets \( -name '*.yaml' -o -name '*.yml' \) ! -name kustomization.yaml
 
-.PHONY: check check-ci kustomize-check validate update-keys scan leak-check secrets-placement secrets-present secrets-list release-secrets crd-check update-cnpg-crds
+.PHONY: check check-ci kustomize-check kustomize-listing validate update-keys scan leak-check secrets-placement secrets-present secrets-list release-secrets db-url-check oidc-check crd-check update-cnpg-crds
 
 # leak-check runs FIRST: make has no -k, so it stops at the first failing prerequisite.
 # validate needs the age key, so an operator who forgot SOPS_AGE_KEY_FILE would never
 # reach a leak gate placed behind it.
-check: leak-check kustomize-check validate secrets-placement release-secrets crd-check
+check: leak-check kustomize-check kustomize-listing validate secrets-placement release-secrets db-url-check oidc-check crd-check
 	@echo "check: all offline gates passed"
 
 # The subset provable from the tree alone - no age key, no cluster, no network.
@@ -24,9 +24,12 @@ check: leak-check kustomize-check validate secrets-placement release-secrets crd
 # On a CI checkout nothing is staged and the tree is clean, so leak-check's diff pass
 # finds nothing - but its tree pass re-scans the whole tracked tree regardless, which is
 # what makes this worth running in CI at all.
+#
+# db-url-check is absent from this list for the same reason validate is: it has to read
+# Secret values, every Secret here is sops-encrypted, and the age key does not go in CI.
 check-ci:
 	@rc=0; \
-	for t in leak-check kustomize-check secrets-placement release-secrets crd-check; do \
+	for t in leak-check kustomize-check kustomize-listing secrets-placement release-secrets crd-check; do \
 	  echo "--- $$t ---"; \
 	  $(MAKE) --no-print-directory $$t || rc=1; \
 	done; \
@@ -383,3 +386,32 @@ release-secrets:
 	  END { for (i=1; i<=cnt; i++) if (!(w[i] in have)) { split(w[i], a, "\t"); print a[1] "/" a[2] } }'); \
 	if [ -n "$$missing" ]; then echo "FAIL: HelmRelease references Secrets absent from apply/10-secrets:"; printf '%s\n' "$$missing" | sed 's/^/  /'; exit 1; fi; \
 	echo "release-secrets: $$n HelmRelease(s), $$refs Secret reference(s) scanned; every referenced Secret present with a matching namespace"
+
+# kustomize-listing: every manifest under apply/ has to be named by a kustomization, or Flux never
+# sees it. `kustomize build` on a directory does not care, so the failure is a manifest that is
+# committed, reviewed, green, and never applied - which is how coder's Database and DatabaseRole sat
+# unlisted for a whole task. secrets-placement does this job for Secrets; this does it for the rest.
+# Keyless, so it runs in check-ci too.
+kustomize-listing:
+	@python3 tools/kustomize-listing.py apply
+
+# db-url-check: when an app takes its database as one URL with the password inline, and
+# CloudNativePG takes the same password as a separate basic-auth Secret, the password is
+# committed twice and nothing but a gate ties the two copies together. Rotating one and
+# forgetting the other looks like a broken database.
+#
+# Deliberately NOT in check-ci, unlike release-secrets: it has to read the Secret values, and
+# every Secret here is sops-encrypted, so CI without the age key could only skip it. A gate
+# that skips is a gate that lies, so the tool refuses to report clean when decryption fails,
+# and the gate lives with validate - local, key in hand. Same rule as validate, same reason.
+db-url-check:
+	@python3 tools/db-url-check.py --root apply
+
+# oidc-check: coder's OIDC client now exists in three places - the reviewed blueprint template in
+# git, the rendered Secret authentik actually applies, and coder's own copy of the same two values.
+# Every way those can disagree is silent: a login failure that reads like a coder bug, or a Secret
+# that applied but was never mounted, which looks exactly like a blueprint that was never written.
+# Same key requirement as db-url-check, so same place in the gate list: it reads Secrets, so it is
+# a local gate, not a CI one.
+oidc-check:
+	@python3 tools/oidc-check.py apply

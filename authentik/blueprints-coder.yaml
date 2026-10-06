@@ -1,0 +1,79 @@
+# authentik blueprint: coder's OIDC application and provider.
+#
+# WHY THIS EXISTS INSTEAD OF A UI CLICK
+# authentik ships no CRDs - verified on this cluster (`kubectl get crd | grep -i authentik` returns
+# nothing) and the chart we pin, authentik-2026.8.3, has no crds/ directory and no operator
+# templates, so "declare it as a Kubernetes object" was never on the table. Blueprints are
+# authentik's own infrastructure-as-code format: YAML the worker applies against its own API, and
+# the chart mounts them from a Secret (values.yaml:220, `blueprints.secrets`). That is the
+# first-party declarative path, and it means a rebuilt authentik gets coder's client back from git.
+#
+# HOW THIS FILE BECOMES A SECRET
+# Nothing here is applied directly. scripts/setup-coder-secrets.sh substitutes the two `${...}`
+# placeholders below and writes the result, sops-encrypted, to
+# apply/10-secrets/authentik-coder-blueprint.yaml. `make oidc-check` then proves the rendered
+# Secret still agrees with this file and with coder's own copy of the same two values - which is
+# what stops this file and the applied artifact from drifting apart.
+#
+# BLAST RADIUS
+# Every entry is identified by name/slug `coder`. It cannot touch another application's provider,
+# and `state: present` makes it idempotent.
+#
+# WHAT IS NOT PROVEN
+# The flow slugs below were probed against the live instance and are real:
+#   default-authentication-flow                      200
+#   default-invalidation-flow                        200
+#   default-provider-authorization-implicit-consent  200
+#   default-authorization-flow                       404  <- the obvious name, and it does not exist
+# That 404 is why the slugs were probed instead of written from memory.
+# `property_mappings: default-scopes` and the absence of `signing_key` are NOT verified - they are
+# the two things to watch in the worker log on first apply, and Task 6's live step is what proves
+# them. Without a scope mapping coder would get no email or username claim, so it is set deliberately
+# rather than left to a default that may not exist.
+version: 1
+metadata:
+  name: coder
+entries:
+  - model: authentik_providers_oauth2.oauth2provider
+    identifiers:
+      name: coder
+    state: present
+    attrs:
+      name: coder
+      client_type: confidential
+      client_id: "${CODER_OIDC_CLIENT_ID}"
+      client_secret: "${CODER_OIDC_CLIENT_SECRET}"
+      # Must match coder's callback exactly, and it is not a guess: coderd registers the OIDC
+      # callback at /api/v2/users/oidc/callback (coderd/coderd.go, r.Route("/oidc/callback") under
+      # the /users group). strict matching, because a prefix match here is a redirect-URI bypass.
+      redirect_uris:
+        - url: https://coder.titan.arrieta.eu/api/v2/users/oidc/callback
+          matching_mode: strict
+      grant_types:
+        - authorization_code
+        - refresh_token
+      property_mappings:
+        - name: default-scopes
+      authorization_flow:
+        slug: default-provider-authorization-implicit-consent
+      invalidation_flow:
+        slug: default-invalidation-flow
+      # implicit-consent, not explicit: this IdP serves one operator and coder asks for nothing
+      # beyond openid profile email - no offline_access, nothing to consent to. A consent screen
+      # would add a click and no security. Switch to
+      # default-provider-authorization-explicit-consent if coder ever asks for more.
+      issuer_mode: per_provider
+      sub_mode: hashed_user_id
+
+  - model: authentik_core.application
+    identifiers:
+      name: coder
+    state: present
+    attrs:
+      name: coder
+      # The slug is what makes the issuer URL, and coder is configured with
+      # https://auth.titan.arrieta.eu/application/o/coder/ - so this slug is load-bearing, not
+      # cosmetic. Changing it invalidates coder's OIDC issuer and every session token under it.
+      slug: coder
+      provider:
+        name: coder

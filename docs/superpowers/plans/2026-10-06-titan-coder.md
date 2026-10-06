@@ -658,25 +658,43 @@ Expected: `Ready True`, the Secret present in `coder` only, and a SAN list conta
 
 ---
 
-## Task 6: Coder's database, and the two Secrets
+## Task 6: Coder's database, its OIDC client, and the three Secrets
 
 **Files:**
 - Create: `apply/50-apps/coder/coder-db.yaml`
-- Create: `apply/10-secrets/coder-secrets.yaml`, `apply/10-secrets/coder-db-credentials.yaml` (via git-ignored staging + sops)
-- Modify: `apply/50-apps/kustomization.yaml`, `apply/10-secrets/kustomization.yaml`
+- Create: `authentik/blueprints-coder.yaml` (reviewed template, placeholders only)
+- Create: `apply/10-secrets/coder-secrets.yaml`, `apply/10-secrets/coder-db-credentials.yaml`, `apply/10-secrets/authentik-coder-blueprint.yaml` (rendered + sops-encrypted by `scripts/setup-coder-secrets.sh`)
+- Modify: `apply/50-apps/kustomization.yaml`, `apply/10-secrets/kustomization.yaml`, `apply/50-apps/auth/authentik.yaml`
 
 **Interfaces:**
 - Consumes: `Cluster postgres` in `databases`; the age key for sops.
-- Produces: role `coder` + database `coder`; Secrets `coder-db-credentials` (ns `databases`) and `coder-secrets` (ns `coder`). Task 7 consumes `coder-secrets/db-url`, `oidc-client-id`, `oidc-client-secret`. Task 2's gate consumes the pair.
+- Produces: role `coder` + database `coder`; Secrets `coder-db-credentials` (ns `databases`), `coder-secrets` (ns `coder`) and `authentik-coder-blueprint` (ns `auth`). Task 7 consumes `coder-secrets/db-url`, `oidc-client-id`, `oidc-client-secret`. Tasks 2 and 2b's gates consume the pairs.
 
-- [ ] **Step 1: Operator creates the authentik application and the DB password**
+- [ ] **Step 1: Run the script — there is no UI step anymore (spec C12)**
 
-Two manual prerequisites, both outside git, both recorded here rather than implied:
+The original version of this task had a human create the Application and OIDC Provider in authentik
+and paste the client out. That is gone: authentik takes this configuration as a blueprint, so
+`scripts/setup-coder-secrets.sh` generates the DB password *and* the OIDC client, writes each to
+every place it must appear, and prints only SHA-256 fingerprints.
 
-1. In authentik, create an Application `coder` and an OAuth2/OIDC Provider for it. Note the client ID and secret. Issuer path is `https://auth.titan.arrieta.eu/application/o/coder/`.
-2. Generate the coder DB password once, and use the **same value** in both files in Step 3. Task 2's gate is what enforces that afterwards.
+```fish
+set -x SOPS_AGE_KEY_FILE ~/.config/sops/age/titan-k8s-key.txt
+./scripts/setup-coder-secrets.sh
+```
 
-Never paste either value into a chat or an agent transcript — `docs/authentik-runbook.md` §1 records why that sentence is in this repo.
+Nothing is prompted, nothing is pasted into a chat transcript, and nothing lands in shell history.
+`docs/authentik-runbook.md` §1 is why that last sentence matters in this repo.
+
+Prove the three files before listing them:
+
+```fish
+for f in coder-secrets coder-db-credentials authentik-coder-blueprint
+    sops -d apply/10-secrets/$f.yaml | head -3
+end
+```
+
+Each must decrypt (proving the age key and the recipient list agree) and each must still be ciphertext
+in git.
 
 - [ ] **Step 2: Write the CRs**
 
