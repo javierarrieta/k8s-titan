@@ -4,12 +4,12 @@ KUSTOMIZE_DIRS := $(shell find apply -mindepth 1 -maxdepth 2 -name kustomization
 # not be able to slip between the encryption rule and the validation glob.
 SECRET_FIND := find apply/10-secrets \( -name '*.yaml' -o -name '*.yml' \) ! -name kustomization.yaml
 
-.PHONY: check check-ci kustomize-check kustomize-listing dry-run validate update-keys scan leak-check secrets-placement secrets-present secrets-list release-secrets db-url-check oidc-check crd-check update-cnpg-crds
+.PHONY: check check-ci kustomize-check kustomize-listing dry-run py-deps validate update-keys scan leak-check secrets-placement secrets-present secrets-list release-secrets db-url-check oidc-check crd-check update-cnpg-crds
 
 # leak-check runs FIRST: make has no -k, so it stops at the first failing prerequisite.
 # validate needs the age key, so an operator who forgot SOPS_AGE_KEY_FILE would never
 # reach a leak gate placed behind it.
-check: leak-check kustomize-check kustomize-listing validate secrets-placement release-secrets db-url-check oidc-check crd-check
+check: py-deps leak-check kustomize-check kustomize-listing validate secrets-placement release-secrets db-url-check oidc-check crd-check
 	@echo "check: all offline gates passed"
 
 # The subset provable from the tree alone - no age key, no cluster, no network.
@@ -29,7 +29,7 @@ check: leak-check kustomize-check kustomize-listing validate secrets-placement r
 # Secret values, every Secret here is sops-encrypted, and the age key does not go in CI.
 check-ci:
 	@rc=0; \
-	for t in leak-check kustomize-check kustomize-listing secrets-placement release-secrets crd-check; do \
+	for t in py-deps leak-check kustomize-check kustomize-listing secrets-placement release-secrets crd-check; do \
 	  echo "--- $$t ---"; \
 	  $(MAKE) --no-print-directory $$t || rc=1; \
 	done; \
@@ -386,6 +386,25 @@ release-secrets:
 	  END { for (i=1; i<=cnt; i++) if (!(w[i] in have)) { split(w[i], a, "\t"); print a[1] "/" a[2] } }'); \
 	if [ -n "$$missing" ]; then echo "FAIL: HelmRelease references Secrets absent from apply/10-secrets:"; printf '%s\n' "$$missing" | sed 's/^/  /'; exit 1; fi; \
 	echo "release-secrets: $$n HelmRelease(s), $$refs Secret reference(s) scanned; every referenced Secret present with a matching namespace"
+
+# py-deps: fail with an instruction instead of a traceback.
+#
+# Five gates - kustomize-listing, crd-field-check, oidc-check, db-url-check and the sopsload module
+# behind two of them - import PyYAML, and nothing outside the CI workflow said so. The workflow has
+# always installed it (`python3 -c 'import yaml' || pip install pyyaml`), so the dependency was known
+# to the machine that runs the gates in CI and unknown to the person running them on a laptop. It
+# surfaced as `ModuleNotFoundError: No module named 'yaml'` printed between stage lines, which reads
+# like a cluster fault rather than a missing package.
+#
+# First prerequisite of both `check` and `check-ci`, so the instruction arrives before the tracebacks.
+py-deps:
+	@python3 -c 'import yaml' 2>/dev/null || { \
+	  echo "py-deps: FAIL - python3 has no PyYAML."; \
+	  echo "py-deps:        kustomize-listing, crd-check, oidc-check, db-url-check and sopsload all import it."; \
+	  echo "py-deps:        install it:  python3 -m pip install pyyaml"; \
+	  echo "py-deps:        (CI does exactly this; see .github/workflows/offline-gate.yml)"; \
+	  exit 1; }
+	@echo "py-deps: python3 with PyYAML present"
 
 # dry-run: ask the real API server whether it would accept every object this tree builds.
 #
