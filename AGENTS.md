@@ -35,10 +35,11 @@ instead.
 Backups: the Postgres cluster ships base backups and continuous WAL to S3 and **nothing
 else does** — the generic PV stream is still deferred, so a PVC that is not that database
 has no backup. The same runbook records what has actually been drilled (a scratch-cluster
-restore and a point-in-time recovery, both passing), and the two credentials not to rotate
-casually: `AUTHENTIK_SECRET_KEY` (never — it signs sessions and derives user IDs, and the
-sops file is its only copy) and the S3 backup key (now — it was exposed in a chat
-transcript and is still the live one).
+restore and a point-in-time recovery, both passing), and the two credentials with special
+rules: `AUTHENTIK_SECRET_KEY` (never rotate casually — it signs sessions and derives user IDs,
+and the sops file is its only copy) and the S3 backup key (the one exposed in a chat transcript
+was replaced on 2026-10-05 and the cluster archives on the replacement; the superseded key
+still has to be deleted in IAM).
 
 ## Rules
 

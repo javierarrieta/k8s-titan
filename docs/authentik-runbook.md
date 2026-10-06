@@ -6,10 +6,17 @@ depends on it. Written against operator 1.30.1 / Postgres 18.6 on titan.
 **Proven vs pending.** Everything below describes a deployed system: the backup path, the
 restore drill, point-in-time recovery, the CloudNativePG operator, the shared `Cluster`, and
 authentik itself are all live on titan and were checked rather than assumed, and the first
-admin exists (§4). What is not done: the **S3 backup key is still the exposed one** (§1), and
+admin exists (§4). What is not done: the **old S3 backup key is still live in IAM** even though
+the cluster has moved off it (§1), and
 the restore drill has passed against authentik's own tables (§2, recorded) — after its first
 attempt died on a wrong table name and the two bugs that hid that. Sections say which
 of their claims were observed and which are reasoning.
+
+**A shell note, because it bites twice here.** The operator's login shell is fish, and several
+blocks below use `VAR=value command`, which is bash — fish parses that as a command literally
+named `VAR=value`. Prefix with `env` and it works in any shell: `env SEED=0 DELETE=1
+./scripts/restore-drill.sh`. The scripts themselves are fine from any shell; they carry a bash
+shebang, which is why the rotation is a script rather than a paste-able block.
 
 ---
 
@@ -45,81 +52,92 @@ because CNPG pins robfig/cron v1.2.0 where the optional field is day-of-week at 
 so the familiar five-field form fires hourly; and `retentionPolicy` is a child of
 `spec.backup`, not of `barmanObjectStore`.
 
-### The backup credential is exposed — rotate it before trusting it
+### The exposed backup credential — rotated 2026-10-05, one step left
 
-The IAM access key behind `s3-backup-secrets` (user `k8s-titan-pg-backups`) was pasted into
-a chat transcript while the Secret was being authored, so that the Secret could be
-sops-encrypted from it. The committed Secret is fine; the transcript is not, and the key has
-not been swapped. Until it is, treat this credential as **exposed**, not as merely
-unscheduled-for-rotation. The bucket policy is object-scoped to this one bucket, which caps
-the blast radius at this bucket rather than the account — that limits the damage and does
-not make the key safe.
+**Status: the exposed key is out of the cluster and out of git. It still exists in IAM, and
+that is the remaining action.**
 
-Rotate create-then-delete, never delete-then-create:
+The IAM access key behind `s3-backup-secrets` (user `k8s-titan-pg-backups`) was pasted into a
+chat transcript while the Secret was being authored, so the Secret could be sops-encrypted from
+it. That key was `AKIA…CU67`, its secret access key fingerprinting `sha256:ad1d36e2efeb`. It
+has been replaced: the live credential is `AKIA…4BSY` / `sha256:8392ba3863ac`, committed in
+`5a2af0f` on 2026-10-05 and applied by Flux.
+
+Fingerprints rather than values, here and in the script. The access key ID is an identifier and
+last-four is how the AWS console displays one; the 12-hex digest is a truncated SHA-256 — a
+comparison handle, not a recoverable value. The full access key ID is deliberately not written
+down anywhere in this repo: `make leak-check` greps `AKIA[A-Z0-9]{16}` and rejects the commit
+outright (demonstrated — dropping the literal in an untracked file fails the gate by filename),
+and GitGuardian would flag it in CI on top of that.
+
+**The rotation was verified from outside the repo, not assumed.** `kubectl -n databases logs
+postgres-1` shows `barman-cloud-wal-archive` succeeding every five minutes across the change —
+segment `…00000024` archived at `2026-10-06T09:30:07Z` in 0.79 s — with zero archive failure
+lines in the preceding 24 h. The Secret's own digest, read back off the applied object through
+`kubectl` + `base64 --decode`, equals the digest of the committed sops file, so git and the
+cluster hold the same credential and nothing was hand-applied.
+
+**A caveat I wrote here and then falsified.** This section claimed CNPG does not reliably pick
+up a changed backup Secret (cloudnative-pg#4914) and that a pod roll might be needed. On this
+target it did: `postgres-1` started `2026-10-04T21:11:19Z`, *before* the Secret changed, has
+never rolled, and is archiving happily with the new key on 1.30.1. Keep running the archiving
+check after a rotation — it is cheap and it is the only proof that matters — but do not roll a
+pod on the theory that the Secret did not propagate. On 1.30.1 it propagates.
+
+**Still open: delete `AKIA…CU67` in IAM.** Until it is deleted, the credential that went
+through a transcript can still write to this bucket; the bucket policy is object-scoped to
+this one bucket, which caps the blast radius at this bucket rather than the account, and that
+limits the damage without making it safe. When it is gone, record the date here.
+
+**How it landed is its own warning.** That rotation reached `main` inside a commit titled
+`docs:` because `git add -A` swept a modified Secret off a working tree that was also carrying
+doc edits — and no gate here would have caught it: `leak-check` does not decrypt sops files, so
+a re-encrypted Secret is opaque noise to every offline check this repo has. If you rotate a
+credential and edit docs in the same sitting, commit them separately, and read `git status`
+before `git add -A`.
+
+For the next rotation — create-then-delete, never delete-then-create:
 
 1. Create a second access key for `k8s-titan-pg-backups` in IAM.
-2. Re-sops `apply/10-secrets/s3-backup-secrets.yaml` with the new pair, `make check`, merge.
-3. Prove archiving is still advancing — a fresh segment under `postgres/wals/`, or a clean
-   `./scripts/restore-drill.sh`. CNPG does not reliably pick up a changed backup Secret on
-   its own (cloudnative-pg#4914); if WAL stops shipping, roll the instance pods.
+2. `./scripts/rotate-s3-backup-key.sh`, `make check`, merge.
+3. Prove archiving is still advancing — `pg_stat_archiver` below, or a clean
+   `./scripts/restore-drill.sh`.
 4. Only after step 3 passes, delete the old key.
 
-### Step 2, as a block you can paste
+### Step 2: `./scripts/rotate-s3-backup-key.sh`
 
-Run it wherever the `titan-k8s` age key lives, in a checkout of this repo. **Read the new
-pair from your own terminal.** Pasting a credential into a chat or an agent transcript is
-how the current key got into the state this section exists to fix — the transcript is the
-leak, not the repo.
+Run the script. It prompts for both values, so **read the new pair from your own terminal —
+never from a paste.** Pasting a credential into a chat or an agent transcript is how the
+current key got into the state this section exists to fix: the transcript is the leak, not
+the repo.
 
-```bash
-export SOPS_AGE_KEY_FILE=$HOME/.config/sops/age/titan-k8s-key.txt
+It is a script rather than a block to paste because the operator's shell is **fish**, and the
+bash form of this — `export VAR=`, `read -rs -p`, `[[ =~ ]]` — either means something
+different or means nothing there. A shebang makes the login shell irrelevant.
 
-read -rs -p "new ACCESS_KEY_ID: "       AKID;   echo
-read -rs -p "new SECRET_ACCESS_KEY: "   ASecret; echo
+What it does, in order:
 
-# Guard before encrypting. A truncated or empty value encrypts perfectly and fails three
-# namespaces away; the same class produced two empty authentik passwords once (plan Task 7).
-[[ "$AKID"   =~ ^AKIA[0-9A-Z]{16}$   ]] || { echo "ACCESS_KEY_ID is not AKIA+16 (${#AKID} chars)"; exit 1; }
-[[ "$ASecret" =~ ^[A-Za-z0-9/+=]{40}$ ]] || { echo "SECRET_ACCESS_KEY is not 40 chars (${#ASecret})"; exit 1; }
+- fingerprints the credential currently in the file: the access key ID in full (it is an
+  identifier) and a truncated SHA-256 of the secret access key. A comparison handle, never
+  the value — so "did the rotation actually land" is answerable without printing anything.
+- prompts with `read -rs`, then **guards the shapes before encrypting**: `AKIA` + 16
+  uppercase alphanumerics, and 40 chars of `[A-Za-z0-9/+=]`. An empty or truncated value
+  encrypts perfectly and fails three namespaces away — the same class that produced two empty
+  authentik passwords in Task 7. A rejected key leaves the Secret byte-identical; that was
+  checked, not assumed.
+- writes `apply/10-secrets/.staging.s3-backup.yaml` — git-ignored, and under
+  `apply/10-secrets/` so `.sops.yaml`'s `path_regex` picks the right recipients, because sops
+  chooses recipients from the file's own path rather than from your intent — encrypts it in
+  place, and moves it over the real file. A `trap` removes the plaintext staging file on any
+  exit path.
+- carries `AWS_REGION: eu-west-1` forward deliberately: `s3Credentials.region` is a
+  secret-key reference and there is no instance metadata on titan for barman to fall back to,
+  so a rewrite that drops it breaks archiving while looking like a clean diff.
+- prints the remaining steps, including step 3 below, so the create-then-delete order is in
+  front of you at the moment you need it.
 
-stage=apply/10-secrets/.staging.s3-backup.yaml   # git-ignored, matches .sops.yaml path_regex
-cat > "$stage" <<EOF
-apiVersion: v1
-kind: Secret
-metadata:
-  name: s3-backup-secrets
-  namespace: databases
-type: Opaque
-stringData:
-  ACCESS_KEY_ID: "$AKID"
-  SECRET_ACCESS_KEY: "$ASecret"
-  AWS_REGION: eu-west-1
-EOF
-
-sops --encrypt --in-place "$stage"
-mv "$stage" apply/10-secrets/s3-backup-secrets.yaml
-unset AKID ASecret
-```
-
-Then verify by decrypting, and print **shapes and lengths only** — never the values:
-
-```bash
-sops -d apply/10-secrets/s3-backup-secrets.yaml | python3 -c '
-import sys, yaml, re
-d  = yaml.safe_load(sys.stdin.read()); sd = d["stringData"]
-ak, sk, rg = sd["ACCESS_KEY_ID"], sd["SECRET_ACCESS_KEY"], sd["AWS_REGION"]
-print("ACCESS_KEY_ID    ", "AKIA+16 OK" if re.fullmatch(r"AKIA[0-9A-Z]{16}", ak) else "BAD SHAPE", f"({len(ak)} chars, ends {ak[-4:]})")
-print("SECRET_ACCESS_KEY", "40 chars OK" if len(sk) == 40 else f"BAD ({len(sk)} chars)")
-print("AWS_REGION       ", rg)
-print("name/ns/type     ", d["metadata"]["name"] + "/" + d["metadata"]["namespace"], d["type"])
-'
-```
-
-`AWS_REGION` is not optional and must survive the rewrite — `s3Credentials.region` is a
-secret-key reference, and there is no instance metadata for barman to fall back to. The
-`ends <last4>` echo is deliberate: an access key ID is an identifier, and the tail is how
-you confirm you encrypted the key you meant to without printing a secret. The whole block
-was dry-run with a fake AKIA-shaped pair before being written down.
+The whole script was dry-run against a throwaway copy of the Secret with a fake AKIA-shaped
+pair before being committed.
 
 Step 3 also gets a concrete command instead of "roll the instance pods". Note the counters
 **before** you merge, from §1:
@@ -139,8 +157,10 @@ kubectl -n databases exec postgres-1 -c postgres -- \
                                 failed_count, last_failed_time from pg_stat_archiver"
 ```
 
-`archived_count` up and `failed_count` unchanged is the new credential working. `failed_count`
-moving means the instance manager is still holding the old one (cloudnative-pg#4914):
+`archived_count` up and `failed_count` unchanged is the new credential working. If
+`failed_count` moves, the instance manager may be holding the old credentials
+(cloudnative-pg#4914) — though on 1.30.1 it propagated without a roll, so check for another
+cause first:
 
 ```bash
 kubectl -n databases delete pod postgres-1
@@ -209,7 +229,7 @@ into a throwaway `drill` database that is dropped on the way out.
 Run it:
 
 ```bash
-DELETE=1 ./scripts/restore-drill.sh 2>&1 | tee /tmp/restore-drill-$(date +%F).log
+env DELETE=1 ./scripts/restore-drill.sh 2>&1 | tee /tmp/restore-drill-$(date +%F).log
 ```
 
 What it does, in order: preflight (can this identity create Clusters? is there a
@@ -226,7 +246,7 @@ round trip. Now that authentik is live, this is the assertion to prefer — it c
 named row in a real database rather than a nonce we planted:
 
 ```
-SEED=0 CHECK_DB=authentik \
+env SEED=0 CHECK_DB=authentik \
   CHECK_SQL="select username from authentik_core_user where username='akadmin'" \
   EXPECT=akadmin ./scripts/restore-drill.sh
 ```
@@ -310,7 +330,7 @@ Point-in-time is supported by the same script and is the drill worth doing secon
 because PITR is what an incident actually needs:
 
 ```bash
-TARGET_TIME='2026-10-05T09:00:00+00:00' EXPECT=absent SEED=0 ./scripts/restore-drill.sh
+env TARGET_TIME='2026-10-05T09:00:00+00:00' EXPECT=absent SEED=0 ./scripts/restore-drill.sh
 ```
 
 That restores to before the nonce existed and asserts it is **absent** — proving
