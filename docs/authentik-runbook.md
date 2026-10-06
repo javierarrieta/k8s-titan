@@ -6,7 +6,8 @@ depends on it. Written against operator 1.30.1 / Postgres 18.6 on titan.
 **Proven vs pending.** Everything below describes a deployed system: the backup path, the
 restore drill, point-in-time recovery, the CloudNativePG operator, the shared `Cluster`, and
 authentik itself are all live on titan and were checked rather than assumed, and the first
-admin exists (§4). What is not done: the **S3 backup key is still the exposed one** (§1), and
+admin exists (§4). What is not done: the **old S3 backup key is still live in IAM** even though
+the cluster has moved off it (§1), and
 the restore drill has passed against authentik's own tables (§2, recorded) — after its first
 attempt died on a wrong table name and the two bugs that hid that. Sections say which
 of their claims were observed and which are reasoning.
@@ -51,40 +52,56 @@ because CNPG pins robfig/cron v1.2.0 where the optional field is day-of-week at 
 so the familiar five-field form fires hourly; and `retentionPolicy` is a child of
 `spec.backup`, not of `barmanObjectStore`.
 
-### The backup credential is exposed — rotate it before trusting it
+### The exposed backup credential — rotated 2026-10-05, one step left
 
-The IAM access key behind `s3-backup-secrets` (user `k8s-titan-pg-backups`) was pasted into
-a chat transcript while the Secret was being authored, so that the Secret could be
-sops-encrypted from it. The committed Secret is fine; the transcript is not, and the key has
-not been swapped. Until it is, treat this credential as **exposed**, not as merely
-unscheduled-for-rotation. The bucket policy is object-scoped to this one bucket, which caps
-the blast radius at this bucket rather than the account — that limits the damage and does
-not make the key safe.
+**Status: the exposed key is out of the cluster and out of git. It still exists in IAM, and
+that is the remaining action.**
 
-**Baseline, read 2026-10-06.** The live credential is `AKIA…4BSY`, its secret access key
-fingerprinting as `sha256:8392ba3863ac`. Two independent paths produced those values and they
-agree: reading the applied Secret back through `kubectl` + `base64 --decode`, and the script's
-fingerprint of the committed sops file. That agreement is worth having — it is the only check
-here that would catch a Secret hand-applied to the cluster and never committed, and it is the
-reason the rotation's after-state is comparable to anything.
+The IAM access key behind `s3-backup-secrets` (user `k8s-titan-pg-backups`) was pasted into a
+chat transcript while the Secret was being authored, so the Secret could be sops-encrypted from
+it. That key was `AKIA…CU67`, its secret access key fingerprinting `sha256:ad1d36e2efeb`. It
+has been replaced: the live credential is `AKIA…4BSY` / `sha256:8392ba3863ac`, committed in
+`5a2af0f` on 2026-10-05 and applied by Flux.
 
-The full access key ID is deliberately not written here. `make leak-check` greps
-`AKIA[A-Z0-9]{16}` and rejects the commit outright (demonstrated: dropping the literal in an
-untracked file fails the gate by name), and GitGuardian would flag it in CI on top of that.
-Last-four is how the AWS console displays a key anyway. The 12-hex digest is a truncated
-SHA-256 — a comparison handle, not a recoverable value.
+Fingerprints rather than values, here and in the script. The access key ID is an identifier and
+last-four is how the AWS console displays one; the 12-hex digest is a truncated SHA-256 — a
+comparison handle, not a recoverable value. The full access key ID is deliberately not written
+down anywhere in this repo: `make leak-check` greps `AKIA[A-Z0-9]{16}` and rejects the commit
+outright (demonstrated — dropping the literal in an untracked file fails the gate by filename),
+and GitGuardian would flag it in CI on top of that.
 
-After the rotation the digest **must differ from `8392ba3863ac`**. If it does not, the key that
-got encrypted is the key that was already there. Replace this paragraph with the new
-fingerprint and the date the old key was deleted in IAM.
+**The rotation was verified from outside the repo, not assumed.** `kubectl -n databases logs
+postgres-1` shows `barman-cloud-wal-archive` succeeding every five minutes across the change —
+segment `…00000024` archived at `2026-10-06T09:30:07Z` in 0.79 s — with zero archive failure
+lines in the preceding 24 h. The Secret's own digest, read back off the applied object through
+`kubectl` + `base64 --decode`, equals the digest of the committed sops file, so git and the
+cluster hold the same credential and nothing was hand-applied.
 
-Rotate create-then-delete, never delete-then-create:
+**A caveat I wrote here and then falsified.** This section claimed CNPG does not reliably pick
+up a changed backup Secret (cloudnative-pg#4914) and that a pod roll might be needed. On this
+target it did: `postgres-1` started `2026-10-04T21:11:19Z`, *before* the Secret changed, has
+never rolled, and is archiving happily with the new key on 1.30.1. Keep running the archiving
+check after a rotation — it is cheap and it is the only proof that matters — but do not roll a
+pod on the theory that the Secret did not propagate. On 1.30.1 it propagates.
+
+**Still open: delete `AKIA…CU67` in IAM.** Until it is deleted, the credential that went
+through a transcript can still write to this bucket; the bucket policy is object-scoped to
+this one bucket, which caps the blast radius at this bucket rather than the account, and that
+limits the damage without making it safe. When it is gone, record the date here.
+
+**How it landed is its own warning.** That rotation reached `main` inside a commit titled
+`docs:` because `git add -A` swept a modified Secret off a working tree that was also carrying
+doc edits — and no gate here would have caught it: `leak-check` does not decrypt sops files, so
+a re-encrypted Secret is opaque noise to every offline check this repo has. If you rotate a
+credential and edit docs in the same sitting, commit them separately, and read `git status`
+before `git add -A`.
+
+For the next rotation — create-then-delete, never delete-then-create:
 
 1. Create a second access key for `k8s-titan-pg-backups` in IAM.
-2. Re-sops `apply/10-secrets/s3-backup-secrets.yaml` with the new pair, `make check`, merge.
-3. Prove archiving is still advancing — a fresh segment under `postgres/wals/`, or a clean
-   `./scripts/restore-drill.sh`. CNPG does not reliably pick up a changed backup Secret on
-   its own (cloudnative-pg#4914); if WAL stops shipping, roll the instance pods.
+2. `./scripts/rotate-s3-backup-key.sh`, `make check`, merge.
+3. Prove archiving is still advancing — `pg_stat_archiver` below, or a clean
+   `./scripts/restore-drill.sh`.
 4. Only after step 3 passes, delete the old key.
 
 ### Step 2: `./scripts/rotate-s3-backup-key.sh`
@@ -140,8 +157,10 @@ kubectl -n databases exec postgres-1 -c postgres -- \
                                 failed_count, last_failed_time from pg_stat_archiver"
 ```
 
-`archived_count` up and `failed_count` unchanged is the new credential working. `failed_count`
-moving means the instance manager is still holding the old one (cloudnative-pg#4914):
+`archived_count` up and `failed_count` unchanged is the new credential working. If
+`failed_count` moves, the instance manager may be holding the old credentials
+(cloudnative-pg#4914) — though on 1.30.1 it propagated without a roll, so check for another
+cause first:
 
 ```bash
 kubectl -n databases delete pod postgres-1

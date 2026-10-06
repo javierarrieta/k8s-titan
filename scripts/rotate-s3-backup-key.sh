@@ -103,8 +103,10 @@ Next, in this order. Do not delete the old IAM key until step 4 passes.
        sleep 20
        kubectl -n databases exec postgres-1 -c postgres -- \
          psql -U postgres -Atc "select archived_count, last_archived_wal, failed_count from pg_stat_archiver"
-     archived_count up and failed_count flat = the new key works. If failed_count moved,
-     the instance manager is still holding the old one (cloudnative-pg#4914):
+     archived_count up and failed_count flat = the new key works. On CNPG 1.30.1 the new
+     credentials propagated without a pod roll (observed 2026-10-05: pod older than the
+     Secret, archiving clean), so if failed_count moves, look for another cause first.
+     If it really is stale credentials (cloudnative-pg#4914):
        kubectl -n databases delete pod postgres-1
      Single instance, so that is a few seconds of write outage - a response to stalled
      archiving, not a post-merge reflex.
