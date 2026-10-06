@@ -4,12 +4,12 @@ KUSTOMIZE_DIRS := $(shell find apply -mindepth 1 -maxdepth 2 -name kustomization
 # not be able to slip between the encryption rule and the validation glob.
 SECRET_FIND := find apply/10-secrets \( -name '*.yaml' -o -name '*.yml' \) ! -name kustomization.yaml
 
-.PHONY: check check-ci kustomize-check validate update-keys scan leak-check secrets-placement secrets-present secrets-list release-secrets db-url-check crd-check update-cnpg-crds
+.PHONY: check check-ci kustomize-check validate update-keys scan leak-check secrets-placement secrets-present secrets-list release-secrets db-url-check oidc-check crd-check update-cnpg-crds
 
 # leak-check runs FIRST: make has no -k, so it stops at the first failing prerequisite.
 # validate needs the age key, so an operator who forgot SOPS_AGE_KEY_FILE would never
 # reach a leak gate placed behind it.
-check: leak-check kustomize-check validate secrets-placement release-secrets db-url-check crd-check
+check: leak-check kustomize-check validate secrets-placement release-secrets db-url-check oidc-check crd-check
 	@echo "check: all offline gates passed"
 
 # The subset provable from the tree alone - no age key, no cluster, no network.
@@ -398,3 +398,12 @@ release-secrets:
 # and the gate lives with validate - local, key in hand. Same rule as validate, same reason.
 db-url-check:
 	@python3 tools/db-url-check.py --root apply
+
+# oidc-check: coder's OIDC client now exists in three places - the reviewed blueprint template in
+# git, the rendered Secret authentik actually applies, and coder's own copy of the same two values.
+# Every way those can disagree is silent: a login failure that reads like a coder bug, or a Secret
+# that applied but was never mounted, which looks exactly like a blueprint that was never written.
+# Same key requirement as db-url-check, so same place in the gate list: it reads Secrets, so it is
+# a local gate, not a CI one.
+oidc-check:
+	@python3 tools/oidc-check.py apply

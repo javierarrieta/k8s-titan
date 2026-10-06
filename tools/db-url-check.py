@@ -15,62 +15,13 @@ Fixtures may be plaintext; real secrets are sops-encrypted. A file that looks en
 does not decrypt is reported, never silently skipped - a gate that skips is a gate that lies.
 """
 import argparse
-import base64
 import os
 import re
-import subprocess
 import sys
 import urllib.parse
 
-try:
-    import yaml
-except ImportError:
-    sys.exit("db-url-check: PyYAML is missing (pip install pyyaml) - refusing to report clean")
-
-
-def load_docs(root):
-    """Every YAML document under root, with its path. Secrets and CRs alike."""
-    out = []
-    for dirpath, _dirs, files in os.walk(root):
-        for fn in sorted(files):
-            if not fn.endswith((".yaml", ".yml")) or fn == "kustomization.yaml":
-                continue
-            path = os.path.join(dirpath, fn)
-            try:
-                text = subprocess.run(["sops", "--decrypt", path], capture_output=True,
-                                      text=True, check=True).stdout
-            except subprocess.CalledProcessError:
-                try:
-                    with open(path) as fh:
-                        text = fh.read()
-                except OSError as exc:
-                    sys.exit(f"db-url-check: cannot read {path}: {exc}")
-            if "ENC[" in text and "sops:" in text:
-                sys.exit(f"db-url-check: {path} looks sops-encrypted but did not decrypt "
-                         f"(is SOPS_AGE_KEY_FILE set?) - refusing to report clean")
-            try:
-                docs = [d for d in yaml.safe_load_all(text) if isinstance(d, dict)]
-            except yaml.YAMLError as exc:
-                sys.exit(f"db-url-check: {path} is not valid YAML: {exc}")
-            for d in docs:
-                d["__path__"] = path
-                out.append(d)
-    return out
-
-
-def secret_key(docs, name, namespace, key):
-    """(value, whole-string-data) for one Secret key, or (None, None) if absent."""
-    for d in docs:
-        if d.get("kind") != "Secret":
-            continue
-        md = d.get("metadata") or {}
-        if md.get("name") != name or md.get("namespace") != namespace:
-            continue
-        data = d.get("stringData") or {}
-        if not data:
-            data = {k: base64.b64decode(v).decode() for k, v in (d.get("data") or {}).items()}
-        return data.get(key), data
-    return None, None
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from sopsload import load_docs, secret_key  # noqa: E402
 
 
 def pg_url_refs(docs):

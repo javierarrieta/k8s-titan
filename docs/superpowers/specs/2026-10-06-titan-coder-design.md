@@ -114,6 +114,7 @@ This is one slice. It is not the backup work, and it does not pretend to be.
 | C7 | Templates in git, **pushed by hand** | Templates only in coder's UI (invisible to review and to every gate here) or automatic push (a Terraform-executing CI path against a live cluster — its own spec, §14) |
 | C8 | Two workspaces at 4 CPU / 8 Gi / 40 G, quota 8 CPU / 16 Gi / 80 G | One generous, or three or four small. Two leaves the control plane comfortable and makes "the third one is Pending" an explainable outcome |
 | C9 | Chart pinned at `2.37.4` | casa's `2.35.1` (two minors stale) or floating. Every other chart here is pinned |
+| C12 | coder's OIDC client declared as an **authentik blueprint in git** | Clicking it into existence in the UI. A hand-made client exists only inside one authentik database: invisible to review, unreproducible after a restore, and the reason this spec had a manual prerequisite blocking every later task |
 
 ---
 
@@ -245,13 +246,14 @@ HelmRelease `coder` in namespace `coder`, chart `coder` version `2.37.4` from
 Resources: requests 100m/512Mi, limits 2000m/1024Mi — same as casa, which is a known-good shape
 rather than a guess.
 
-### 8.2 The authentik side is a manual operator step
+### 8.2 The authentik side is declared in git (supersedes the A10 deferral)
 
-authentik blueprints are deferred (authentik spec A10), so the Application and OAuth2/OIDC Provider
-are created by hand in the UI or with `ak`, exactly like the first admin. The spec records this as
-an operator prerequisite (§11.2) rather than implying git owns it. It is the second instance of the
-same gap — cluster state that exists only in a database — and it is the strongest argument for
-promoting blueprints out of the deferred list, which §14 notes without pretending to decide it.
+This section previously said the Application and OAuth2/OIDC Provider are created by hand, because
+authentik blueprints were deferred (authentik spec A10). **That is no longer true**, and the reason
+it changed is worth keeping: the manual step was the single thing blocking every later task, and a
+credential that exists only as a database row is invisible to every gate in this repo. See §8.5 for
+the mechanism and what is still unproven about it. The authentik spec's A10 deferral stands for
+everything except coder's client.
 
 ### 8.3 What OIDC-only means operationally
 
@@ -298,6 +300,39 @@ The residual risk is that the escape hatch needs the coder image and the DB URL 
 in this cluster and neither of which depends on authentik.
 
 ---
+
+### 8.5 The OIDC client is declared, not clicked (C12)
+
+The plan originally had a human create the application and provider in authentik's UI and hand the
+client to coder. That makes one credential exist in exactly one place — a database row — which is
+invisible to `make check`, unreproducible after a restore, and was the manual step blocking Tasks 6
+through 13.
+
+**CRDs are not available and that was checked, not assumed.** `kubectl get crd | grep -i authentik`
+returns nothing on this cluster, and the pinned chart `authentik-2026.8.3` ships no `crds/`
+directory, no `installCRDs` value and no operator templates. There is no `applications.authentik.io`
+waiting to be used, and installing a third-party operator to obtain one is a larger change than the
+thing it would configure.
+
+**Blueprints are the first-party path.** They are authentik's own infrastructure-as-code format —
+YAML the worker applies against its own API — and the chart mounts them from a Secret
+(`values.yaml:220`, `blueprints.secrets`). So `apply/50-apps/auth/blueprints/coder.yaml` is the
+reviewed source, `scripts/setup-coder-secrets.sh` renders it with the generated client, and the
+worker applies it.
+
+The wrinkle is the one this cluster already knows: `OAuth2Provider.client_id` and `client_secret`
+default to `generate_id` / `generate_client_secret` (`authentik/providers/oauth2/models.py:233-243`),
+so authentik will happily invent them — and then coder cannot know them. They must be set explicitly,
+which puts one credential in two files, exactly like the database password. Same treatment:
+generated once, written to both, and `make oidc-check` proves the three copies — reviewed template,
+applied Secret, coder's own env — still agree, including that the HelmRelease actually mounts the
+Secret, because an unmounted blueprint is indistinguishable from one that was never written.
+
+**Not proven, and named as such.** The flow slugs in the blueprint were probed against the live
+instance — `default-authorization-flow` returns 404 here, which is why nothing was written from
+memory — but `property_mappings: default-scopes` and the omission of `signing_key` are unverified.
+Task 6's live step is what proves them, and a Secret applying is not the same fact as a blueprint
+being applied by the worker.
 
 ## 9. Storage and quota
 
@@ -452,3 +487,4 @@ recorded after the fact. So:
 | C9 | Chart version | Pinned `2.37.4` |
 | C10 | Namespaces | `coder` + `coder-workspaces`, both declared centrally |
 | C11 | New offline gate | `make db-url-check`, reference-driven so it cannot pass vacuously |
+| C12 | authentik configuration | Blueprint in git, rendered to a sops Secret, mounted into the worker; `make oidc-check` ties the three copies together |
