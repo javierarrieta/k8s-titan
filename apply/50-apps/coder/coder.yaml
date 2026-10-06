@@ -63,11 +63,22 @@ spec:
       env:
         - name: CODER_ACCESS_URL
           value: "https://coder.titan.arrieta.eu"
+        # No scheme — and this one is not a style choice, coder refuses to start without it.
+        # codersdk/deployment.go:2307-2326 documents it as "*.example.com" and carries the comment
+        # "Do not use a serpent.URL here. We are intentionally omitting the scheme part of the url",
+        # because it is validated by appurl.CompileHostnamePattern rather than parsed as a URL. With a
+        # scheme the pod dies at boot, before it ever touches the database:
+        #   parsing env: 1 error occurred:
+        #     * parse "Wildcard Access URL": hostname pattern must not contain a scheme
+        # CODER_ACCESS_URL just above is the opposite case — a serpent.URL that does want the scheme —
+        # which is exactly why both were read from source instead of written from the shape of the
+        # other. Same name, same prefix, different contract.
+        #
         # The whole reason C5 exists: workspace apps get one hostname each instead of a path, so a
         # preview port is a real origin rather than something that emits an absolute redirect and
         # lands on the wrong host.
         - name: CODER_WILDCARD_ACCESS_URL
-          value: "https://*.coder.titan.arrieta.eu"
+          value: "*.coder.titan.arrieta.eu"
         - name: CODER_PG_CONNECTION_URL
           valueFrom:
             secretKeyRef:
