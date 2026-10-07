@@ -96,6 +96,13 @@ spec:
             secretKeyRef:
               name: coder-secrets
               key: oidc-client-secret
+        # The button said "OpenID Connect" — coder's default — which is how a first-time operator
+        # looking for a way in walks past the only route that works and concludes a local admin is
+        # required. It is not: coderd/userauth.go:1783-1785 lets the first user sign up over OIDC
+        # "regardless of whether signups are enabled", and :1849-1851 hands that first user the owner
+        # role. The generic label was the whole obstacle, so name the actual identity provider.
+        - name: CODER_OIDC_SIGN_IN_TEXT
+          value: "Sign in with authentik"
         - name: CODER_OIDC_EMAIL_FIELD
           value: email
         # coder's own default, stated explicitly rather than relied on:
