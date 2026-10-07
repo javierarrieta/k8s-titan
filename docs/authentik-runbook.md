@@ -780,3 +780,86 @@ not a migration plan for the rest of authentik's config and nothing here says th
 move. The trigger that would make it one is a second service needing declarative setup — at which
 point the template / `oidc-check` / render-script pattern in §5 is the thing to generalise, and the
 `blueprints_discovery` cadence stops being a footnote and becomes a real argument for an apply hook.
+
+---
+
+## 8. `CODER_DISABLE_PASSWORD_AUTH` — tested, and the answer is no
+
+Coder's configuration reference promises, in the option's own description:
+
+> "Any user with the owner role will be able to sign in with their password regardless of this
+> setting to avoid potential lock out."
+
+**It does not do that, and this is now measured rather than read.** On 2026-10-07, with a
+`create-admin-user` owner in place:
+
+| `CODER_DISABLE_PASSWORD_AUTH` | `POST /api/v2/users/login` as that owner | |
+|---|---|---|
+| `true` | **403** | `"Password authentication is disabled."` |
+| unset | **201** | session issued |
+
+The code agrees with the measurement, `coderd/userauth.go:599-605`:
+
+```go
+// If password authentication is disabled and the user does not have the
+// owner role, block the request.
+if api.DeploymentValues.DisablePasswordAuth {
+```
+
+The comment describes an owner carve-out; the `if` has no owner condition. All three enforcement
+sites (`:244`, `:351`, `:601`) are unconditional, and `main` is identical to the pinned `v2.37.4`,
+so there is no version to wait for. PR #5991, which introduced the flag, describes the carve-out as
+the feature's purpose — "prevents the password login endpoint from working unless the user has the
+'owner' role".
+
+**So: never set this flag.** `coder server create-admin-user` writes a *password* owner
+(`cli/server_createadminuser.go:199-200`) and issues no session token, which means under the flag the
+break-glass account exists and cannot be used by any route. That is not OIDC-only, it is no-escape-hatch.
+
+And even if the carve-out were implemented, it would be **API-only**: `SignInForm.tsx:29` gates the
+password fields on `authMethods.password.enabled`, which comes from a public unauthenticated
+endpoint that cannot know you are an owner. With the flag set the login page shows no password form
+for anybody. A break-glass you can only reach with `curl` is a worse break-glass.
+
+What this buys instead: nothing much. The create-first-user page disappears once a user exists, and no
+local account has a password unless one is created deliberately. The flag defends only against a
+future forgotten local account, and costs the documented way back in.
+
+**The break-glass exists now** — created with `kubectl -n coder exec -it deploy/coder -- coder server
+create-admin-user`, which needs `-it` because it prompts, and which must not be given
+`--postgres-url` since `CODER_PG_CONNECTION_URL` is already in the pod env and the flag would put the
+DB password on a command line. Its password lives only in the operator's password manager; nothing in
+this repo can show it. Re-test it with the `curl` above every few months — an untested break-glass is
+a rumour.
+
+## 9. Hand-edits to Helm-managed Deployments are **not** reverted
+
+*Discovered the hard way in the same session as §8, by assuming otherwise.*
+
+The working assumption — "poke it live, Flux will put it back" — is false here:
+
+```console
+driftDetection: {"mode":"enabled"}   # notify-only. It reports drift; it does not fix it.
+Drifted: NoDriftDetected             # and it did not even report this one
+# env var still present 5h later, 30m interval, after two manual reconcile nudges
+```
+
+Helm patches new-vs-old, not live-vs-desired, so an env var added out of band survives every
+subsequent `helm upgrade` indefinitely. `kubectl -n coder edit deploy coder` therefore makes a change
+that is **permanent and invisible to git**, which is the worst combination available on this cluster.
+
+To remove one, say so explicitly:
+
+```fish
+kubectl -n coder set env deploy/coder CODER_DISABLE_PASSWORD_AUTH-
+```
+
+Two consequences worth deciding about deliberately rather than discovering under pressure:
+
+1. Either set `driftDetection.mode: fix` on the HelmReleases, or accept that live drift persists and
+   treat `kubectl edit` as a last resort rather than a diagnostic. Today the repo neither does the
+   first nor documents the second.
+2. Any incident where someone "temporarily" edits a deployment leaves that state behind after the
+   incident is closed. `make dry-run` compares git to the chart and cannot see this class of drift at
+   all.
+
