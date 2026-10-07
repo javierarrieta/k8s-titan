@@ -26,15 +26,16 @@
 #   default-provider-authorization-implicit-consent  200
 #   default-authorization-flow                       404  <- the obvious name, and it does not exist
 # That 404 is why the slugs were probed instead of written from memory.
-# `property_mappings: default-scopes` and the absence of `signing_key` are NOT verified - they are
-# the two things to watch in the worker log on first apply, and Task 6's live step is what proves
-# them. Without a scope mapping coder would get no email or username claim, so it is set deliberately
-# rather than left to a default that may not exist.
+# `property_mappings` and the flow references were answered from source, not guessed, after the first
+# apply failed validation. See the attrs block below for the exact rule and where it lives.
 version: 1
 metadata:
   name: coder
 entries:
   - model: authentik_providers_oauth2.oauth2provider
+    # Named so the application entry below can point at it with !KeyOf instead of hunting the
+    # database for an object this blueprint creates itself.
+    id: coder-provider
     identifiers:
       name: coder
     state: present
@@ -52,16 +53,25 @@ entries:
       grant_types:
         - authorization_code
         - refresh_token
+      # Related fields must be primary keys, not lookup dicts. The importer only rewrites a value if
+      # it is a key in its own pk_map (v1/importer.py:175-197, populated at :441 from entries inside
+      # this blueprint); everything else reaches the serializer verbatim, and these are
+      # PrimaryKeyRelatedFields. Writing `slug: default-...` therefore fails with
+      #   "{'slug': 'default-provider-authorization-implicit-consent'}" is not a valid UUID
+      # which is precisely what the first apply reported. `!Find` is the tag built for this job: it
+      # runs apps.get_model(...).objects.filter(...).first() and resolves to instance.pk
+      # (v1/common.py:369-413). Model names are the app_label from each app's apps.py plus the lower-
+      # cased class - `default-scopes` is a ScopeMapping, which inherits PropertyMapping but lives in
+      # the oauth2 app, so it is authentik_providers_oauth2.scopemapping and not a policies model.
+      # The scope mapping is not optional in practice: it is what puts email and username into the
+      # token, and coder reads both.
       property_mappings:
-        - name: default-scopes
-      authorization_flow:
-        slug: default-provider-authorization-implicit-consent
-      invalidation_flow:
-        slug: default-invalidation-flow
-      # implicit-consent, not explicit: this IdP serves one operator and coder asks for nothing
-      # beyond openid profile email - no offline_access, nothing to consent to. A consent screen
-      # would add a click and no security. Switch to
-      # default-provider-authorization-explicit-consent if coder ever asks for more.
+        - !Find [authentik_providers_oauth2.scopemapping, [name, default-scopes]]
+      authorization_flow: !Find [authentik_flows.flow, [slug, default-provider-authorization-implicit-consent]]
+      invalidation_flow: !Find [authentik_flows.flow, [slug, default-invalidation-flow]]
+      # implicit-consent, not explicit: this IdP serves one operator and the consent would add a click
+      # and no security. Switch to default-provider-authorization-explicit-consent if coder ever asks
+      # for scopes beyond openid profile email.
       issuer_mode: per_provider
       sub_mode: hashed_user_id
 
@@ -75,5 +85,9 @@ entries:
       # https://auth.titan.arrieta.eu/application/o/coder/ - so this slug is load-bearing, not
       # cosmetic. Changing it invalidates coder's OIDC issuer and every session token under it.
       slug: coder
-      provider:
-        name: coder
+      # !KeyOf, not !Find: the provider is created by this same blueprint, one entry above, and
+      # validate() runs the entire import inside a rolled-back transaction (v1/importer.py:453-474),
+      # so the instance genuinely exists by the time this entry resolves. KeyOf raises if no entry with
+      # that id has an instance yet (v1/common.py:239-253) - the loud failure I want if the entry order
+      # ever changes, rather than a silently null provider that validates and then does nothing.
+      provider: !KeyOf coder-provider

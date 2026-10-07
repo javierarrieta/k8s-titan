@@ -26,7 +26,7 @@ import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from sopsload import find, load_docs, load_text, secret_key  # noqa: E402
+from sopsload import find, load_docs, load_text, load_tolerating_tags, secret_key  # noqa: E402
 
 import yaml  # noqa: E402
 
@@ -67,7 +67,7 @@ def main():
         sys.exit(f"oidc-check: {TEMPLATE} is missing - the gate has no source of truth to check "
                  f"against; refusing to report clean")
     try:
-        tpl = yaml.safe_load(tpl_text)
+        tpl = load_tolerating_tags(tpl_text)
     except yaml.YAMLError as exc:
         sys.exit(f"oidc-check: {TEMPLATE} is not valid YAML: {exc}")
     checked += 1
@@ -128,7 +128,7 @@ def main():
             # Named before the whole-document comparison, so the message names the credential that
             # actually moved instead of reporting a generic document mismatch.
             try:
-                rbp = yaml.safe_load(rendered) or {}
+                rbp = load_tolerating_tags(rendered) or {}
                 rattrs = next((e.get("attrs") or {}) for e in (rbp.get("entries") or [])
                               if e.get("model") == "authentik_providers_oauth2.oauth2provider")
             except yaml.YAMLError:
@@ -144,7 +144,7 @@ def main():
             expected = (tpl_text.replace("${CODER_OIDC_CLIENT_ID}", cid or "")
                                .replace("${CODER_OIDC_CLIENT_SECRET}", csec or ""))
             try:
-                if yaml.safe_load(rendered) != yaml.safe_load(expected):
+                if load_tolerating_tags(rendered) != load_tolerating_tags(expected):
                     fail(f"{BLUEPRINT_SECRET}:{BLUEPRINT_KEY} is not the committed template with "
                          f"the two credentials substituted - the applied artifact has drifted from "
                          f"the reviewed source; re-run scripts/setup-coder-secrets.sh")
