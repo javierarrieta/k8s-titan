@@ -65,14 +65,50 @@ if [ ${#existing[@]} -gt 0 ]; then
 fi
 
 # --- generate -------------------------------------------------------------------------------
-# Hex for the DB password on purpose: it goes inline inside a postgres:// URL, and '@', '/', ':' or
-# '%' would make that URL ambiguous to anything parsing it without percent-encoding - including
-# make db-url-check, which parses it with urllib rather than eyeballing it.
-DBPASS=$(python3 -c 'import secrets; print(secrets.token_hex(16))')
-# A UUID-shaped client ID, matching what authentik's own generate_id produces, so a client created
-# by hand and one created by this script are indistinguishable.
-CID=$(python3 -c 'import uuid; print(uuid.uuid4())')
-CSEC=$(python3 -c 'import secrets; print(secrets.token_hex(32))')
+# Each value can be supplied from the environment instead. That exists for one specific job:
+# re-rendering the blueprint after a template fix, without rotating credentials that are still good.
+# Before this, the two operations were inseparable, so a syntax fix in the template could only be
+# shipped by also changing every secret - a credential rotation smuggled inside a formatting commit.
+# When nothing is supplied it still generates, and it says which of the two happened, because a
+# rotation nobody mentioned is exactly the surprise this repo keeps writing paragraphs about.
+sourced=()
+generated=()
+
+DBPASS=${CODER_DB_PASSWORD:-}
+if [ -z "$DBPASS" ]; then
+  # Hex for the DB password on purpose: it goes inline inside a postgres:// URL, and '@', '/', ':' or
+  # '%' would make that URL ambiguous to anything parsing it without percent-encoding - including
+  # make db-url-check, which parses it with urllib rather than eyeballing it.
+  DBPASS=$(python3 -c 'import secrets; print(secrets.token_hex(16))')
+  generated+=("db password")
+else
+  sourced+=("db password")
+fi
+
+CID=${CODER_OIDC_CLIENT_ID:-}
+if [ -z "$CID" ]; then
+  # A UUID-shaped client ID, matching what authentik's own generate_id produces, so a client created
+  # by hand and one created by this script are indistinguishable.
+  CID=$(python3 -c 'import uuid; print(uuid.uuid4())')
+  generated+=("oidc client id")
+else
+  sourced+=("oidc client id")
+fi
+
+CSEC=${CODER_OIDC_CLIENT_SECRET:-}
+if [ -z "$CSEC" ]; then
+  CSEC=$(python3 -c 'import secrets; print(secrets.token_hex(32))')
+  generated+=("oidc client secret")
+else
+  sourced+=("oidc client secret")
+fi
+
+if [ ${#sourced[@]} -gt 0 ]; then
+  echo "reusing from environment: ${sourced[*]}"
+fi
+if [ ${#generated[@]} -gt 0 ]; then
+  echo "newly generated:          ${generated[*]}"
+fi
 
 # --- render and write ------------------------------------------------------------------------
 # The blueprint Secret is built in python, not with a heredoc: the blueprint is multi-line YAML
@@ -80,6 +116,7 @@ CSEC=$(python3 -c 'import secrets; print(secrets.token_hex(32))')
 # as one opaque blob instead of a document.
 render() {
   TEMPLATE="$TEMPLATE" DB_SECRET="$DB_SECRET" APP_SECRET="$APP_SECRET" BP_SECRET="$BP_SECRET" \
+  REPO="$REPO" \
   STAGE_DB="$STAGE_DB" STAGE_APP="$STAGE_APP" STAGE_BP="$STAGE_BP" \
   DBPASS="$DBPASS" CID="$CID" CSEC="$CSEC" python3 - <<'PY'
 import os, re, sys, yaml
@@ -101,7 +138,14 @@ rendered = (tpl.replace("${CODER_OIDC_CLIENT_ID}", env["CID"])
 leftover = re.findall(r"\$\{[A-Z_]+\}", rendered)
 if leftover:
     sys.exit(f"FAIL: unsubstituted placeholder(s) remain in the rendered blueprint: {leftover}")
-yaml.safe_load(rendered)  # refuse to ship a blueprint that will not parse
+# Refuse to ship a blueprint that will not parse. Plain safe_load cannot be used here: it raises
+# ConstructorError on !Find, so the check would reject a blueprint authentik accepts - a gate that
+# fails on valid input, the worst kind, because the next person deletes it rather than fixes it. This
+# is the same helper `make oidc-check` uses, so the renderer and the gate cannot drift into
+# disagreeing about what counts as parseable.
+sys.path.insert(0, os.path.join(env["REPO"], "tools"))
+from sopsload import load_tolerating_tags  # noqa: E402
+load_tolerating_tags(rendered)
 
 def dump(path, obj):
     with open(path, "w") as fh:

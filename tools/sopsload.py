@@ -89,3 +89,28 @@ def find(docs, kind, name, namespace=None):
             continue
         return d
     return None
+
+
+def load_tolerating_tags(text):
+    """Parse YAML that may carry authentik blueprint tags: !Find, !KeyOf, !Env, !Context.
+
+    PyYAML's safe loader raises ConstructorError on an unknown tag, so a plain safe_load rejects a
+    blueprint that authentik accepts. A check that fails on valid input is the worst kind — the next
+    person to hit it deletes the check rather than the tag — so the tags are rebuilt as opaque
+    values instead. Enough structure survives that bad indentation or a malformed sequence still
+    fails, without this module having to track authentik's tag vocabulary as it grows.
+    """
+    import yaml
+
+    class _TagLoader(yaml.SafeLoader):
+        pass
+
+    def _keep_tag(loader, suffix, node):
+        if isinstance(node, yaml.SequenceNode):
+            return ["!" + suffix] + list(loader.construct_sequence(node, deep=True))
+        if isinstance(node, yaml.MappingNode):
+            return {"!" + suffix: loader.construct_mapping(node, deep=True)}
+        return "!" + suffix + " " + str(loader.construct_scalar(node))
+
+    _TagLoader.add_multi_constructor("!", _keep_tag)
+    return yaml.load(text, Loader=_TagLoader)
