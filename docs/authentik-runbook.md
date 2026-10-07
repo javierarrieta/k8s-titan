@@ -546,6 +546,24 @@ kubectl -n auth exec deploy/authentik-worker -- ak apply_blueprint \
   /blueprints/mounted/secret-authentik-coder-blueprint/coder.yaml
 ```
 
+### How to tell the provider actually exists — mind the trailing slash
+
+```fish
+curl -s -o /dev/null -w '%{http_code}\n' \
+  https://auth.titan.arrieta.eu/application/o/coder/.well-known/openid-configuration
+```
+
+`200` means the OIDC client is live; the document's `issuer` should read
+`https://auth.titan.arrieta.eu/application/o/coder/`, which is the exact string coder is configured
+with, so the two can be compared rather than assumed equal.
+
+**Do not put a trailing slash on that path.** `…/.well-known/openid-configuration/` returns `404` on
+this install while the unsuffixed form returns `200`. That false negative cost a full debugging cycle
+here: coder was already `1/1 Running` and serving traffic while the slashed URL insisted its provider
+did not exist. A probe that reports a working thing as missing is worse than no probe, because it
+redirects attention to the wrong component — and coder *refuses to start* until OIDC discovery
+succeeds, so "coder is Running" was itself the answer, available without any endpoint at all.
+
 ### Redact before pasting any of it
 
 `ak apply_blueprint` dumps the whole entry — **including `client_secret`, in plaintext** — when

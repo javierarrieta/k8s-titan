@@ -55,8 +55,9 @@ directories, automatic template deployment, a break-glass local login, and monit
 
 | Fact | How it was checked |
 |---|---|
-| `*.titan.arrieta.eu` resolves at **any depth** — `a.b.titan.arrieta.eu` answers | DNS-over-HTTPS query against `dns.google/resolve`; Status 0 with an answer. The record behind it is `ovh_domain_zone_record.titan_wildcard` in **`../public-dns-tf/titan.arrieta.eu.tf`** (§7) |
-| Therefore `*.coder.titan.arrieta.eu` needs **no DNS record** | Same check; OVH's wildcard is not limited to one label (the common "one label only" reading of RFC 4592 is wrong — a wildcard matches any descendant with no closer node) |
+| `*.titan.arrieta.eu` resolves at **any depth** — `a.b.titan.arrieta.eu` answers | DNS-over-HTTPS against `cloudflare-dns.com/dns-query`; Status 0 with an answer. The record behind it is `ovh_domain_zone_record.titan_wildcard` in **`../public-dns-tf/titan.arrieta.eu.tf`** (§7). OVH's wildcard is not limited to one label — the common "one label only" reading of RFC 4592 is wrong here |
+| **FALSIFIED 2026-10-07:** the row below claimed `*.coder.titan.arrieta.eu` needed no DNS record. It does. `coder.titan.arrieta.eu` returns **NODATA** — Status 0, no answer — while `zzz.titan.arrieta.eu` next to it resolves fine | DoH, same method. Cause: two stale `_acme-challenge.coder.titan.arrieta.eu` TXT records are still in the zone. They created a `coder.titan` node, and a wildcard cannot match a name that already exists (RFC 4592 closest-encloser), so the node shadows `*.titan` without carrying an A record of its own. `foo.coder.titan.arrieta.eu` returns NXDOMAIN for the same reason |
+| Therefore coder needs **two explicit records** in `../public-dns-tf`: `coder.titan` and `*.coder.titan`, both `A` | Follows from the row above. It is also the more honest arrangement regardless: coder's hosts should not depend on a wildcard belonging to something else, and the shadowing node is not going away — cert-manager recreates those TXT records on every renewal, and the webhook demonstrably does not always clean them up |
 | An X.509 wildcard matches **exactly one label**, so the existing `*.titan.arrieta.eu` SAN will not cover `x.coder.titan.arrieta.eu` | RFC 6125 §6.4.3 / certificate semantics. This is the opposite of the DNS rule above, and the asymmetry is the whole reason §7 exists |
 | titan allocates **12 CPU / 131,793,372 Ki (~126 Gi) / 110 pods** | `kubectl get node -o jsonpath` with the read-only `k8s-reader` identity |
 | The only StorageClass is `local-path` (rancher.io/local-path), `reclaimPolicy: Delete`, `allowVolumeExpansion: false` | `kubectl get storageclass` |
@@ -197,20 +198,26 @@ the class of error it catches is one a normal schema validator waves through.
 
 ## 7. Certificates, DNS and ingress
 
-- **DNS: nothing to do here, and that is not luck.** `../public-dns-tf/titan.arrieta.eu.tf` declares
-  `ovh_domain_zone_record.titan_wildcard` — `subdomain = "*.titan"`, type `A`, ttl 300 — and that
-  file's own comment says it plainly: *"the wildcard is not convenience, it is the certificate
-  strategy."* This spec's §7 depends on a resource owned by another repo, so it is named as a
-  dependency rather than treated as background. Consequences:
-  - Any DNS change goes in **that repo, via PR**. The OVH console is not the source of truth; a
-    record made by hand there is invisible to `terraform plan` and arrives as unexplained drift on
-    whoever runs it next.
+- **DNS: there was something to do here, and it was missed.** The original claim in this section was
+  *"nothing to do here, and that is not luck"*, resting on the `*.titan` wildcard. That is **false on
+  the live zone**: `coder.titan.arrieta.eu` returns NODATA today (§2.1), because stale ACME TXT
+  records created a `coder.titan` node that shadows the wildcard. What is required:
+  - Declare `coder.titan` and `*.coder.titan` as `A` records in **`../public-dns-tf`**, via PR. The
+    OVH console is not the source of truth; a record made by hand there is invisible to
+    `terraform plan` and arrives as unexplained drift on whoever runs it next.
+  - Delete the two leftover `_acme-challenge.coder.titan.arrieta.eu` TXT records. They are not needed
+    by an already-issued certificate and they are the thing doing the shadowing.
   - The ACME TXT records cert-manager's DNS-01 solver writes live in the same Terraform-managed
     zone. Terraform tracks only what it declares, so they do not read as drift — but a destructive
     plan over there pulls the A records out from under every certificate over here. One sentence in
     that repo's README would be worth writing; it is out of this spec's scope to write it.
-  - If the wildcard is ever narrowed or removed, `coder.titan.arrieta.eu` and every workspace host
-    stop resolving at once. §11.2 carries that as a standing condition, not a one-time check.
+  - **The isolation proof, because it is what makes this a DNS ticket and nothing else:** with DNS
+    bypassed by pinning the name to the host's address at the HTTP layer, `https://coder.titan.arrieta.eu/`
+    returns `200` and `https://probe.coder.titan.arrieta.eu/` returns `400` (coder rejecting an unknown
+    workspace host), and **both TLS handshakes verify** against `coder-tls`. Certificate, ingress,
+    Traefik and coder are all doing their jobs; only resolution is missing.
+  - If the wildcard is ever narrowed or removed, every other `*.titan` host stops resolving at once.
+    §11.2 carries that as a standing condition, not a one-time check.
 - **`coder-wildcard` Certificate** in namespace `certificates`: `commonName: coder.titan.arrieta.eu`,
   `dnsNames: [coder.titan.arrieta.eu, "*.coder.titan.arrieta.eu"]`, `issuerRef: le-prod-titan`,
   `secretName: coder-tls`, and a `secretTemplate` whose Reflector annotations allow-list **only**
