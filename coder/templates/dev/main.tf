@@ -31,9 +31,18 @@ data "coder_workspace_owner" "me" {}
 # on: it is not backed up (spec C2), and Retain is what stands between a wrong `kubectl delete
 # pvc` and a lost home directory. Task 9 proves the provisioner honours it.
 resource "kubernetes_persistent_volume_claim_v1" "home" {
-  # `wait_until_bound`, not `wait_for_bound` - the plan had the latter and `tofu validate` rejected
-  # it outright. Read out of the provider schema (tofu providers schema -json), not from memory.
-  wait_until_bound = true
+  # false, and it is not a loosening. local-path-retain is volumeBindingMode:
+  # WaitForFirstConsumer (read from the StorageClass), so the PVC cannot bind until a pod that uses
+  # it is scheduled — and that pod is the very next resource in this graph. With wait_until_bound =
+  # true, terraform blocks on the PVC forever, the pod is never created, and coder's 5-minute build
+  # deadline kills it. The live failure did not even look like this: the provider surfaced it as
+  #   client rate limiter Wait returned an error: context deadline exceeded
+  # on the PVC block, because the attribute's whole job is polling the API until it binds and the
+  # polling is what ran out of time. The PVC event said the actual reason the whole time:
+  #   WaitForFirstConsumer  waiting for first consumer to be created before binding
+  # Binding is still enforced, just by the kubelet: the pod will not reach Running until the volume
+  # is attached and mounted, and coder's own agent connection is what gates workspace readiness.
+  wait_until_bound = false
   metadata {
     name      = "coder-${data.coder_workspace.me.id}-home"
     namespace = "coder-workspaces"
