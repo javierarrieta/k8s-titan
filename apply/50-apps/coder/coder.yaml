@@ -105,13 +105,26 @@ spec:
           value: preferred_username
         # offline_access beyond coder's default openid,profile,email, because OIDC token refresh
         # needs a refresh token - and the blueprint grants the refresh_token flow for exactly this.
-        # Unverified against authentik's scope mapping until the first real login.
+        # The blueprint now backs all four with real ScopeMappings (authentik/blueprints-coder.yaml);
+        # what remains unverified is the end-to-end exchange, i.e. the first real login.
         - name: CODER_OIDC_SCOPES
           value: openid,profile,email,offline_access
         # authentik does not always assert email_verified for a locally-created user, and coder
         # refuses an unverified address by default. Without this the failure is "login did nothing".
         - name: CODER_OIDC_IGNORE_EMAIL_VERIFIED
           value: "true"
+      # The line that makes a Secret rotation reach the running process at all. Without it, rotating
+      # coder-secrets changes the Secret and nothing else - coder reads its env once, at container start,
+      # and there is no checksum annotation anywhere in the coder chart or its bundled libcoder to roll
+      # it. That is how the 2026-10-07 OIDC rotation merged and silently did nothing.
+      #
+      # Named explicitly rather than `reloader.stakater.com/auto: "true"`, which would discover every
+      # referenced object and roll on any of them: "what restarts if I touch this Secret" should be
+      # answerable by reading this file. Reloader checks the workload's own annotations first and falls
+      # back to pod-template annotations (pkg/common/common.go:203-256), so this hook is valid; libcoder
+      # renders it at charts/libcoder/templates/_coder.yaml:25-29.
+      podAnnotations:
+        secret.reloader.stakater.com/reload: coder-secrets
       service:
         enable: true
         type: ClusterIP

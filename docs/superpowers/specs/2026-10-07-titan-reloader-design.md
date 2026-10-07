@@ -1,8 +1,8 @@
 # titan — rolling workloads when the Secrets they consume change
 
-Status: **design**. Implementation is one HelmRelease plus one annotation, but the reason it is not
-already obvious is buried in an interaction between Reloader and Flux drift detection, so the whole
-spec is short and most of it is that.
+Status: **implemented** in the same change as this spec — `apply/20-infra/reloader/reloader.yaml` plus
+one annotation on coder. Most of what is here is the reasoning the manifests carry in compressed form,
+and the part that is not obvious is the interaction in §4.
 
 ## 1. The problem, found the hard way
 
@@ -62,7 +62,7 @@ Reloader does.
 |---|---|---|
 | R1 | Install **Stakater Reloader**, chart `2.2.18` / app `v1.4.22`, pinned | Do nothing and document "restart it yourself". Already tried: it is what we had, and it silently failed on a real rotation |
 | R2 | `reloader.reloadStrategy: annotations` — **load-bearing, not cosmetic** | The default `env-vars`, which injects a `STAKATER_*` env var into the pod template. Flux's `driftDetection: mode: enabled` reverts it, and the restart is cancelled mid-roll |
-| R3 | Scoped RBAC: `watchGlobally: false`, `namespaces: [coder, auth]` → namespaced Role/RoleBinding, **no ClusterRole** | The chart default, a cluster-wide grant. `apply/20-infra/reflector/reflector.yaml` already documents that Reflector's cluster-wide `secrets: *` is a regret held in check only by review; adding a second one would be worse, because Reloader is *designed* to read every Secret |
+| R3 | Scoped RBAC: `watchGlobally: false`, `namespaces: [coder]` → namespaced Role, **no ClusterRole** | The chart default, a cluster-wide grant. `apply/20-infra/reflector/reflector.yaml` already documents that Reflector's cluster-wide `secrets: *` is a regret held in check only by review; adding a second one would be worse, because Reloader is *designed* to read every Secret. Scoped to `coder` alone rather than also `auth`: an unannotated namespace would buy a read grant for no behaviour, so `auth` arrives in the same change that annotates authentik |
 | R4 | Per-workload **explicit** annotation `secret.reloader.stakater.com/reload: "<name>"` | `reloader.stakater.com/auto: "true"`, which discovers everything referenced and rolls on any of it. Explicit names match how this repo lists everything else, and make "what will restart if I touch this Secret" answerable by reading one file |
 | R5 | Annotate **coder only** in the first change; authentik after it is proven | Annotating both at once. An authentik worker restart can interrupt a blueprint apply or a sync task; that deserves its own step after the mechanism is known good |
 | R6 | Release lives in `apps`, matching Reflector | A dedicated `reloader` namespace — one component does not earn a namespace here |
@@ -103,8 +103,11 @@ values:
   reloader:
     reloadStrategy: annotations   # R2 - see §4, do not change this casually
     watchGlobally: false          # R3
-    namespaces: [coder, auth]     # release namespace (apps) is added by the chart itself
+    namespaces: [coder]           # release namespace (apps) is added by the chart itself
 ```
+
+The chart enforces R3 rather than merely preferring it: `templates/role.yaml:1-2` fails the render if
+`namespaces` is set while `watchGlobally` is true, so the two settings cannot drift apart.
 
 and one line in `apply/50-apps/coder/coder.yaml`, under `coder.podAnnotations`:
 
@@ -115,17 +118,25 @@ podAnnotations:
 
 ## 6. Verification
 
-1. **The pending rotation is the test.** Coder's live pod still holds the pre-rotation client secret
-   while the cluster Secret already holds the new one. The moment coder is annotated, Reloader should
-   see that mismatch and roll the pod — completing the rotation *and* proving the mechanism in one
-   step, with no synthetic fixture to disbelieve afterwards.
-2. **Flux does not revert it.** After the roll, the next HelmRelease reconcile must leave the release
-   `Ready` with no further action, and the annotation must survive. This is the R2 claim being tested,
-   not assumed.
+**One thing to be clear-eyed about first.** Adding `podAnnotations` changes the pod template, so the
+Helm upgrade that installs the annotation rolls coder by itself. The pending OIDC rotation therefore
+completes whether or not Reloader works — which means it proves the annotation is wired but proves
+nothing about Reloader. The Reloader-specific evidence is steps 3 and 4, and any later rotation.
+
+1. **The pending rotation closes.** Coder's live pod still holds the pre-rotation client secret while the
+   cluster Secret already holds the new one; the rollout above is what finally swaps them. Verify by a
+   real login, which is the only check that shows both ends agree.
+2. **Flux does not revert the annotation.** After any Reloader-triggered roll, the next HelmRelease
+   reconcile must leave the release `Ready` with no further action, and
+   `reloader.stakater.com/last-reloaded-from` must survive. This is the R2 claim being tested, not
+   assumed.
 3. **No spurious rolls.** Re-run `scripts/setup-coder-secrets.sh` with every value pinned so sops
    re-encrypts identical plaintext, merge, and confirm coder does **not** restart. This is the property
-   that the CI-checksum alternative could not provide, so it is the one worth proving.
-4. **Then, and only then,** annotate authentik and repeat with a value that matters.
+   the CI-checksum alternative could not provide, so it is the one worth proving — and note it can only
+   be tested with a change that does not itself touch the pod template.
+4. **Then, and only then,** add `auth` to `reloader.namespaces` and annotate authentik, repeating with a
+   value that matters. An authentik worker restart can interrupt a blueprint apply, which is why it is a
+   separate step.
 
 ## 7. Not proven / accepted
 
