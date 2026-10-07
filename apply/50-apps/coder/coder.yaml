@@ -84,6 +84,15 @@ spec:
             secretKeyRef:
               name: coder-secrets
               key: db-url
+        # OIDC-only in normal operation. Measured on v2.37.4, not inferred: with this set, the
+        # create-admin-user owner returns 403 from POST /api/v2/users/login and 201 with it unset,
+        # because coderd/userauth.go:599-605 blocks unconditionally - the owner carve-out coder's docs
+        # and PR #5991 both promise is not implemented, at any of its three sites, on main included.
+        # That is survivable precisely because the break-glass user lives in the database and not in
+        # this env var: flip the flag off, sign in with it, fix whatever broke OIDC, flip back. The full
+        # procedure, including why the flip must be undone by hand, is docs/authentik-runbook.md §8.
+        - name: CODER_DISABLE_PASSWORD_AUTH
+          value: "true"
         - name: CODER_OIDC_ISSUER_URL
           value: "https://auth.titan.arrieta.eu/application/o/coder/"
         - name: CODER_OIDC_CLIENT_ID
