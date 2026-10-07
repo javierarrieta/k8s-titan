@@ -68,6 +68,12 @@ using the old key would have stopped archiving).
   receives it — the allow-list is the `secretTemplate` annotations on
   `apply/40-certificates/titan-wildcard.yaml`, so a new consuming namespace means
   editing that file, never copying the Secret by hand.
+- Live drift is **not** corrected here. The HelmReleases run `driftDetection.mode: enabled`, which is
+  notify-only, and Helm's new-vs-old patching lets an out-of-band env var survive every later upgrade
+  indefinitely — so `kubectl edit` on a Helm-managed Deployment makes a permanent change that git never
+  sees and `make dry-run` cannot detect. Prefer a commit; if you must poke live, remove it explicitly
+  afterwards (`kubectl -n <ns> set env deploy/<name> FOO-`) and say so. See
+  `docs/authentik-runbook.md` §9, which is written because this was assumed false once.
 - `make validate` deliberately fails when `apply/10-secrets` holds nothing. Do not
   soften that guard to make a check pass: a gate that passes vacuously is worse than
   no gate.
