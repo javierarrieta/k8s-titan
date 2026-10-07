@@ -134,6 +134,11 @@ resource "coder_agent" "dev" {
 }
 
 resource "kubernetes_pod_v1" "dev" {
+  # The pod is the compute, so it must exist only while the workspace is started. Without this the
+  # pod survives `coder stop` entirely — which is what happened on the live cluster: coder reported
+  # "stopped", the pod stayed Running, and 4 CPU / 8Gi stayed charged against the namespace quota
+  # forever. The PVC deliberately has no count (it is the persistent half); the pod must have it.
+  count = data.coder_workspace.me.start_count
   # No wait_for_rollout / wait_for_delete: 3.x dropped both (its only top-level attributes are
   # `id` and `target_state`, read from the provider schema). The plan carried them from 2.x and
   # `tofu validate` rejected them. coder's own agent connection is what waits for the workspace to
