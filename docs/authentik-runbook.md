@@ -899,3 +899,89 @@ Two consequences worth deciding about deliberately rather than discovering under
    incident is closed. `make dry-run` compares git to the chart and cannot see this class of drift at
    all.
 
+
+## 10. Recovering a coder workspace home after its PVC is deleted — **drilled 2026-10-07**
+
+Spec §9.2 refused to accept "a deleted PVC keeps its bytes" on reasoning, and required the plan to
+show the bytes *and* show them recoverable. Both halves are now done, and the second half is where
+the surprise is.
+
+### What `Retain` actually buys
+
+It preserves the **bytes**, and nothing else. After `kubectl delete pvc`:
+
+```
+$ kubectl get pv pvc-e057553e-… -o jsonpath='{.status.phase}'
+Released
+$ ls -l /var/lib/rancher/k3s/storage/pvc-e057553e-…_coder-workspaces_coder-1258c2a6-…-home/RETAIN-DRILL.txt
+-rw-r--r-- 1 javier 1000 34 Oct  7 19:23 …/RETAIN-DRILL.txt
+```
+
+What it does **not** do is reattach. Starting the workspace after the deletion provisioned a brand
+new 40 Gi volume, the pod came up `Running`, coder reported the workspace `Started`, home-manager
+ran happily against an empty home, and the marker was simply gone:
+
+```
+coder-1258c2a6-…-home   Bound   pvc-bc377888-…     ← a fresh volume, not the retained one
+$ ls ~/RETAIN-DRILL.txt
+ls: cannot access '/home/coder/RETAIN-DRILL.txt': No such file or directory
+```
+
+**This is the failure mode to internalise: a lost home looks like a healthy workspace.** Nothing
+errors. The user gets an empty dotless home and the retained bytes sit in a directory no object
+points at. Spec §9.2's mitigation is real but it is *not* automatic, and §13's C2 override is only
+defensible with that caveat attached.
+
+### Recovery procedure (this is what was run, in this order)
+
+```bash
+coder stop dev --yes
+kubectl -n coder-workspaces delete pvc coder-<workspaceID>-home
+kubectl delete pv <released-pv> <any-newer-pv-the-provisioner-made>
+
+# The PV must exist BEFORE the claim, so the binder has something to match.
+kubectl apply -f - <<'PV'
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: coder-home-recovered
+spec:
+  capacity: { storage: 40Gi }
+  accessModes: ["ReadWriteOnce"]
+  storageClassName: local-path-retain
+  claimRef:
+    namespace: coder-workspaces
+    name: coder-<workspaceID>-home
+  hostPath:
+    path: /var/lib/rancher/k3s/storage/<released-pv>_<ns>_<claim>
+PV
+
+kubectl get pv coder-home-recovered -o jsonpath='{.status.phase}'   # must say Available
+coder start dev --yes
+```
+
+`claimRef` is what makes the binder pick this instead of provisioning. The `Available` check is the
+checkpoint — do not start the workspace until it prints it.
+
+Result:
+
+```
+coder-1258c2a6-…-home   Bound   coder-home-recovered
+$ cat ~/RETAIN-DRILL.txt
+RETAIN-DRILL 2026-10-07T19:23:09Z          # sha256 24e05217decf1dcc, unchanged
+```
+
+### The trap in it
+
+**The recovery races the provisioner.** If you start the workspace before hand-writing the PV, the
+provisioner wins, you get an empty volume, and the orphaned directory is now *harder* to find because
+a healthy-looking workspace is sitting on top of the wrong data. Two rules follow:
+
+1. If a workspace home vanishes, **stop it immediately** — do not restart it — and check for a
+   `Released` PV before anything else.
+2. `kubectl get pv | grep Released` is a diagnostic worth running routinely; a `Released` PV on this
+   cluster means data is sitting on disk with nothing pointing at it.
+
+Finding the directory when the PV object is already gone: the path is
+`/var/lib/rancher/k3s/storage/<pv-name>_<namespace>_<claim-name>`, so `ls` that directory and match
+on the claim suffix.
