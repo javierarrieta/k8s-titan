@@ -85,6 +85,17 @@ entries:
       # implicit-consent, not explicit: this IdP serves one operator and the consent would add a click
       # and no security. Switch to default-provider-authorization-explicit-consent if coder ever asks
       # for scopes beyond openid profile email.
+      # Without a signing key authentik signs the id_token with HS256, i.e. with the client_secret.
+      # That is not a hypothesis - providers/oauth2/models.py:358-359 reads
+      #   if not self.signing_key:
+      #       # No Certificate at all, assume HS256
+      # and coder's go-oidc verifier only accepts RS256, so the first real login died at token
+      # verification with: oidc: malformed jwt: unexpected signature algorithm "HS256"; expected
+      # ["RS256"]. Every check that could pass without a login did pass; this is the failure they could
+      # not see. The key is authentik's own managed JWT certificate, created and reconciled by
+      # authentik/crypto/apps.py (MANAGED_KEY at :10, name "authentik Internal JWT Certificate" at :23)
+      # - keyed on `managed` for the same reason the scope mappings are.
+      signing_key: !Find [authentik_crypto.certificatekeypair, [managed, goauthentik.io/crypto/jwt-managed]]
       issuer_mode: per_provider
       sub_mode: hashed_user_id
 
