@@ -50,11 +50,57 @@ resource "kubernetes_persistent_volume_claim_v1" "home" {
   }
 }
 
+# The image is a parameter rather than a literal because the whole point of a baked workspace image
+# is that software ships by rebuilding it; pinning it in source would mean a git commit per image bump
+# and a template push is already that. Default is 0.0.11, read from the GHCR tag list
+# (`/v2/.../tags/list`, highest semver) rather than copied from coder-templates, which still pins
+# 0.0.7. The repo is public-readable — verified with an anonymous pull token — so no imagePullSecret.
+data "coder_parameter" "workspace_image" {
+  name         = "workspace_image"
+  display_name = "Workspace image"
+  description  = "Workspace container image (registry/repo:tag)"
+  type         = "string"
+  default      = "ghcr.io/javierarrieta/coder-workspaces-nix:0.0.11"
+  mutable      = true
+}
+
 resource "coder_agent" "dev" {
   # `arch` is required by the coder provider schema and the plan omitted it, which fails the push.
   # amd64 is not a guess: the sole node reports status.nodeInfo.architecture=amd64.
   os   = "linux"
   arch = "amd64"
+
+  # Matches the image's WorkingDir and the PVC mount. Without it the agent picks a default that is
+  # not on the persistent volume, and anything it drops there dies with the pod.
+  #
+  # `tofu validate` warns that dir is deprecated. It stays because the pinned coder provider's own
+  # schema lists no replacement — coder_agent exposes dir and nothing like working_folder, read out
+  # of `tofu providers schema -json`. A warning with no available alternative is information, not
+  # debt; when the provider ships a successor field, this is a one-line change.
+  dir = "/home/coder"
+
+  # Config-only home-manager, same contract as the podman template: software comes from the image,
+  # home-manager ships dotfiles and program settings and installs nothing. It still has to *build*
+  # its generation into the nix store, which is why the container boots as root and hands uid 1000
+  # write access to /nix before the agent ever runs (see the pod command).
+  #
+  # Failure is logged rather than fatal: a broken flake should leave a usable workspace, not a
+  # workspace that never reaches connected.
+  startup_script = <<-EOT
+    #!/bin/bash
+    set -uo pipefail
+    if ! home-manager switch -b pre-hm --flake github:javierarrieta/nixos-configurations#coder-workspace >> /home/coder/.hm-switch.log 2>&1; then
+      echo "hm-switch failed $(date -u +%FT%TZ)" >> /home/coder/.hm-switch.log
+    fi
+  EOT
+
+  env = {
+    GIT_AUTHOR_NAME     = data.coder_workspace_owner.me.name
+    GIT_AUTHOR_EMAIL    = data.coder_workspace_owner.me.email
+    GIT_COMMITTER_NAME  = data.coder_workspace_owner.me.name
+    GIT_COMMITTER_EMAIL = data.coder_workspace_owner.me.email
+    NIX_PATH            = "nixpkgs=https://github.com/NixOS/nixpkgs/archive/nixos-unstable.tar.gz"
+  }
 
   # interval and timeout are SECONDS in the coder provider schema, not milliseconds - checked
   # in provider/agent.go: "The interval in seconds at which to refresh this metadata item".
@@ -93,17 +139,58 @@ resource "kubernetes_pod_v1" "dev" {
     }
   }
   spec {
+    # snake_case, not the API's camelCase — the provider schema for kubernetes_pod_v1 lists
+    # automount_service_account_token under spec, and the camelCase form fails `tofu validate`.
+    # The workspace pod has no business talking to the API server, and the coder server's own
+    # ServiceAccount is what terraform runs as — not something a workspace should inherit by default.
+    automount_service_account_token = false
+
     container {
       name  = "dev"
-      image = "alpine:3.20"
+      image = data.coder_parameter.workspace_image.value
 
-      command     = ["sh", "-c", "while true; do sleep 3600; done"]
+      # Boots as root, grants uid 1000 the nix store, drops, then runs the agent. This is the podman
+      # template's approach and it is not cargo-culted: an initContainer cannot do this, because a
+      # container's filesystem writes are invisible to its siblings — only volumes are shared — so
+      # the chown has to happen in the same filesystem the agent will run in.
+      #
+      # The chowns are top-level on purpose. `chmod u+rwx /nix/store` lets uid 1000 add store paths,
+      # which is what `nix-shell -p` and `home-manager switch` need; existing paths stay root-owned
+      # and read-only, as they should be. A recursive chown of /nix/store is both slow and wrong.
+      # /home/coder is chowned top-level only too — coder-templates learned that a recursive chown of
+      # a home volume blocks agent start for minutes.
+      #
+      # The init script goes through a file because coder-templates found an inline version crashing
+      # container creation during their live spike.
+      command = ["sh", "-c", <<-EOS
+        cat > /tmp/agent-init.sh <<'AGENTINIT'
+        ${coder_agent.dev.init_script}
+        AGENTINIT
+        chmod +x /tmp/agent-init.sh
+        chown 1000:1000 /nix /nix/store || echo 'store setup failed'
+        chmod u+rwx /nix/store || true
+        mkdir -p /nix/var/nix
+        chown -R 1000:1000 /nix/var /nix/var/nix
+        chown 1000:1000 /home/coder
+        exec setpriv --reuid=1000 --regid=1000 --init-groups /tmp/agent-init.sh
+      EOS
+      ]
       working_dir = "/home/coder"
 
-      # Requests equal limits, at the per-workspace budget from spec §9.1. Two of these against
-      # the namespace quota of 8 CPU / 16 Gi is the whole design: the third workspace is meant to
-      # sit Pending. Requests are what the quota charges, so leaving them unset would have made
-      # the quota decorative - see the LimitRange in workspaces.yaml for the same argument.
+      # runAsUser 0 overrides the image's declared `User: 1000:1000` (read from the image config:
+      # User=1000:1000, Cmd=/bin/sh, WorkingDir=/home/coder). setpriv then drops to 1000.
+      #
+      # This is why the pod will keep failing PodSecurity `restricted` and always will: restricted
+      # demands runAsNonRoot *and* capabilities drop:[ALL], and setpriv --reuid needs CAP_SETUID.
+      # You cannot drop a capability you are about to use. coder-workspaces is warn-only, so it
+      # schedules; if that namespace is ever moved to enforce, this pod needs a different design —
+      # an image that ships /nix owned by 1000, which coder-workspaces could not do at build time
+      # because the CI builder's /nix/store is a read-only virtiofs share.
+      security_context {
+        run_as_user  = 0
+        run_as_group = 0
+      }
+
       resources {
         requests = { cpu = "4000m", memory = "8Gi" }
         limits   = { cpu = "4000m", memory = "8Gi" }
@@ -120,13 +207,8 @@ resource "kubernetes_pod_v1" "dev" {
       }
     }
 
-    # No securityContext, deliberately, and it is worth knowing why rather than it being an
-    # oversight. coder-workspaces carries pod-security warn: restricted, and this pod will be
-    # flagged: alpine declares no USER, so it runs as root. Setting runAsNonRoot: true would not
-    # fix that - it would make the pod refuse to start, because runAsNonRoot needs the image to
-    # name a non-root user or an explicit runAsUser. The real fix is an image that declares a
-    # user; when that happens the home directory is already writable, because the provisioner's
-    # own setup script creates each volume 0777 (read from cm/kube-system/local-path-config).
+    # No securityContext on the container beyond runAsUser, deliberately. See the comment above for
+    # why capabilities drop:[ALL] is not available to a container that must setpriv down.
     volume {
       name = "home"
       persistent_volume_claim {
