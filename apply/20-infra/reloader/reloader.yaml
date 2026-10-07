@@ -1,0 +1,78 @@
+# Reloader restarts workloads when the Secrets they consume arrive too late to matter.
+#
+# A container's environment is fixed at creation. A Secret consumed through `secretKeyRef` or `envFrom`
+# is read once, at start, and never re-read — so rotating it changes the Secret and nothing else. When
+# coder's OIDC client secret was rotated on 2026-10-07 the merge applied cleanly and changed nothing
+# observable: coder went on authenticating with a credential that no longer existed, every condition
+# green. Volume-mounted Secrets behave the opposite way — kubelet rewrites the file in place — which is
+# exactly why authentik's blueprint converged on its own while coder never moved.
+#
+# Design, and the Flux-specific reasoning that decides most of the values below:
+# docs/superpowers/specs/2026-10-07-titan-reloader-design.md
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: HelmRepository
+metadata:
+  name: stakater
+  namespace: apps
+spec:
+  interval: 1h
+  url: https://stakater.github.io/stakater-charts
+---
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: reloader
+  namespace: apps
+spec:
+  releaseName: reloader
+  chart:
+    spec:
+      chart: reloader
+      # Pinned, as everything else here. 3.0.0-beta.2 exists and was not used: betas are not what this
+      # cluster pins, and there is nothing in 3.x this needs.
+      version: "2.2.18"
+      sourceRef:
+        kind: HelmRepository
+        name: stakater
+  interval: 30m
+  driftDetection:
+    mode: enabled
+  install:
+    strategy:
+      name: RetryOnFailure
+      retryInterval: 5m
+  upgrade:
+    strategy:
+      name: RetryOnFailure
+      retryInterval: 5m
+  values:
+    reloader:
+      # LOAD-BEARING — do not "tidy" this back to the default.
+      #
+      # The default strategy (`env-vars`) makes Reloader inject a STAKATER_* environment variable into
+      # the pod template to force the restart. Every HelmRelease here runs `driftDetection: mode:
+      # enabled`, so Flux sees a field it owns disagreeing with Git, reverts it, and the rollout is
+      # cancelled before a new pod ever reads the new Secret — replacing one silent failure with another.
+      #
+      # `annotations` instead writes `reloader.stakater.com/last-reloaded-from` through Reloader's own
+      # server-side-apply field manager. Flux never declared that field, so under SSA it does not own it
+      # and does not remove it. This rests on kustomize-controller applying with server-side apply, which
+      # it does — the same fact `make dry-run` had to be rebuilt around after client-side apply produced
+      # false positives.
+      #
+      # Note the chart's `restart` rollout-strategy is *not* an alternative: it is Argo Rollouts only and
+      # is ignored for plain Deployments.
+      reloadStrategy: annotations
+      # Scoped, not the chart default of cluster-wide. Reflector's own file already records that a
+      # cluster-wide `secrets: *` grant is held to one purpose by review alone — and Reloader is
+      # purpose-built to read every Secret in whatever it watches. The chart refuses to render
+      # `namespaces` while `watchGlobally` is true (templates/role.yaml:1-2), so these two settings are
+      # one decision rather than two: no ClusterRole is created at all.
+      watchGlobally: false
+      # Exactly the namespaces holding annotated workloads, and nothing more. The release namespace
+      # (`apps`) is added by the chart itself. `auth` is deliberately absent: authentik-server and
+      # authentik-worker take their Secrets through `envFrom` and carry the same defect, but nothing in
+      # `auth` is annotated yet, so listing it would buy a read grant for no behaviour. Spec R5 — add it
+      # in the same change that annotates authentik, once this is proven on coder.
+      namespaces:
+        - coder

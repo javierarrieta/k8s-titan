@@ -9,5 +9,6 @@ resources:
   - k8s-reader/clusterrolebinding.yaml
   - k8s-reader/serviceaccount-token.yaml
   - reflector/reflector.yaml
+  - reloader/reloader.yaml
   - cnpg/operator.yaml
   - storage-retain.yaml
