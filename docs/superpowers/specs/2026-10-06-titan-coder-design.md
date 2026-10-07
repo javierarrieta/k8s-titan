@@ -328,11 +328,17 @@ generated once, written to both, and `make oidc-check` proves the three copies �
 applied Secret, coder's own env — still agree, including that the HelmRelease actually mounts the
 Secret, because an unmounted blueprint is indistinguishable from one that was never written.
 
-**Not proven, and named as such.** The flow slugs in the blueprint were probed against the live
+**Partly proven since, and the gap is now measured.** The flow slugs were probed against the live
 instance — `default-authorization-flow` returns 404 here, which is why nothing was written from
-memory — but `property_mappings: default-scopes` and the omission of `signing_key` are unverified.
-Task 6's live step is what proves them, and a Secret applying is not the same fact as a blueprint
-being applied by the worker.
+memory. `property_mappings: default-scopes` was *not* written from memory and was wrong: no
+`ScopeMapping` by that name exists, and the worker's apply failed on it. `signing_key` is still
+unverified — it is optional and nothing has exercised it.
+
+The larger finding is that **a Secret applying is not the same fact as a blueprint being applied**,
+and the distance between them is authentik's own `blueprints_discovery` cadence, measured at gaps up
+to ~50 minutes on the live worker. `docs/authentik-runbook.md` §5 carries the measurements, how to
+tell whether an apply has even been attempted, and why `ak apply_blueprint` output has to be redacted
+before it is pasted anywhere.
 
 ## 9. Storage and quota
 

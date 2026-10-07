@@ -6,8 +6,7 @@ depends on it. Written against operator 1.30.1 / Postgres 18.6 on titan.
 **Proven vs pending.** Everything below describes a deployed system: the backup path, the
 restore drill, point-in-time recovery, the CloudNativePG operator, the shared `Cluster`, and
 authentik itself are all live on titan and were checked rather than assumed, and the first
-admin exists (§4). What is not done: the **old S3 backup key is still live in IAM** even though
-the cluster has moved off it (§1), and
+admin exists (§4), the old S3 backup key has been **deleted from IAM** (§1), and
 the restore drill has passed against authentik's own tables (§2, recorded) — after its first
 attempt died on a wrong table name and the two bugs that hid that. Sections say which
 of their claims were observed and which are reasoning.
@@ -507,12 +506,92 @@ The log-out-and-log-back-in half of the flow is the intended test of
 `AUTHENTIK_LISTEN__TRUSTED_PROXY_CIDRS`: a wrong CIDR produces a redirect loop or a
 mixed-content block, far louder than anything in the logs. Much of it is already proven
 without a browser — authentik's own access log records `scheme: https` for proxied requests
-(§5) — but a real round trip through the login page is the half that exercises a session
+(§6) — but a real round trip through the login page is the half that exercises a session
 cookie, and it is worth walking once deliberately rather than discovering on a phone.
 
 ---
 
-## 5. What the read-only identity can and cannot prove
+## 5. Declarative authentik config — blueprints, and how long they take to land
+
+authentik config-as-code on this install is **blueprints**, not CRDs. The chart pinned at
+`2026.8.3` ships no `crds/` directory and has no `installCRDs`, so there is no `Provider` object
+to commit; `blueprints.secrets: [<name>]` on the HelmRelease mounts a Secret into the worker at
+`/blueprints/mounted/secret-<name>/`. The first thing using it is coder's OIDC app and provider:
+template at `authentik/blueprints-coder.yaml`, rendered by `scripts/setup-coder-secrets.sh` into
+the sops Secret, with `make oidc-check` comparing the two.
+
+### Flux delivers it; authentik decides when it lands
+
+**This is the finding that costs people the most confused minutes.** Flux applies the Secret, and
+then authentik's own `blueprints_discovery` celery task notices the change and applies it. That
+task is not fast and not regular. Measured over three hours on the live worker:
+
+```
+05:50:28   06:41:33   06:50:34   07:50:38   07:54:27
+```
+
+Gaps up to ~50 minutes. **So a merge is not an apply, and the gap can be half an hour.** Before
+debugging a blueprint you think should have taken effect, ask the worker whether it has even looked:
+
+```fish
+kubectl -n auth logs deploy/authentik-worker --since=1h | grep -i "changed file"
+```
+
+`Applying blueprint due to changed file` names the path it read. Absent that line, nothing has been
+attempted and the blueprint is not the thing to debug. To skip the wait, apply it directly — same
+code path the periodic task uses:
+
+```fish
+kubectl -n auth exec deploy/authentik-worker -- ak apply_blueprint \
+  /blueprints/mounted/secret-authentik-coder-blueprint/coder.yaml
+```
+
+### Redact before pasting any of it
+
+`ak apply_blueprint` dumps the whole entry — **including `client_secret`, in plaintext** — when
+validation fails. That is how coder's secret went into a chat transcript and had to be rotated.
+Always filter:
+
+```fish
+... ak apply_blueprint --dry-run <path> 2>&1 | sed -E 's/[a-f0-9]{64}/REDACTED/g' | tail -20
+```
+
+### Two failure modes, both from writing references from memory
+
+The importer rewrites a value only when it is a key in its own `pk_map`, which is built from entries
+*inside the same blueprint*. Everything else reaches the serializer verbatim. That makes exactly two
+ways to get a relation wrong, and they fail very differently:
+
+| mistake | symptom |
+|---|---|
+| a lookup dict where a pk is wanted — `authorization_flow: {slug: x}` | loud: `"{'slug': 'x'}" is not a valid UUID` |
+| a `!Find` whose filter matches nothing | **silent**: resolves to `None`, then `property_mappings: [None]`, a validation failure that names the field but not the cause |
+
+The second one is the trap. `!Find` is `apps.get_model(...).filter(...).first()` — a miss is a
+`None`, not an error. The real example: `default-scopes` was written as though it were a thing, and
+no `ScopeMapping` by that name exists. authentik ships **one mapping per scope**, each with a stable
+`managed:` id, and the display names are UI-editable and localisable, so key on the id:
+
+```yaml
+property_mappings:
+  - !Find [authentik_providers_oauth2.scopemapping, [managed, goauthentik.io/providers/oauth2/scope-openid]]
+  - !Find [..., scope-email]
+  - !Find [..., scope-profile]
+```
+
+The rule this leaves behind: **every `!Find` gets checked against source or the live instance before
+it ships**, because a wrong one is indistinguishable from a right one until the apply. Model names
+come from each app's `apps.py` label (`authentik_providers_oauth2.scopemapping` is the oauth2 app,
+not the policies app whose class it inherits from), and the default objects are declared in
+authentik's own `blueprints/system/*.yaml`.
+
+One incidental confirmation from that file: the email scope mapping's expression returns
+`"email_verified": False`. So `CODER_OIDC_IGNORE_EMAIL_VERIFIED=true` is load-bearing, not defensive
+— without it coder rejects a login over an address authentik deliberately marks unverified.
+
+---
+
+## 6. What the read-only identity can and cannot prove
 
 `docs/agent-read-access.md` mints `k8s-reader`, and it is the right identity for a routine
 check. Its limit is worth naming, because the obvious verification command fails in a way
@@ -553,12 +632,17 @@ bucket (§1) — never the `ContinuousArchiving` condition.
 
 ---
 
-## 6. Open decision carried forward
+## 7. Open decision carried forward
 
-*Sub-project 3, so it is not re-derived from scratch next session.*
+*Superseded 2026-10-07, and kept rather than deleted because the reasoning still matters.*
 
-How titan's services learn about their users: authentik **blueprint export** (config as
-code, declarative, the mechanism the spec calls the right long-term answer) versus
-**OAuth federation** (each service holds its own client secret and maps claims locally).
-Deliberately deferred — adding blueprints before the import mechanism is chosen would be
-speculative, and authentik config-as-code is out of scope for this slice (spec A10).
+The decision was: authentik **blueprint export**, not OAuth federation. coder's OIDC application and
+provider are now declared in git (§5) — the mechanism this section called "the right long-term
+answer" and deferred as speculative.
+
+What remains genuinely open is the narrower thing the deferral was protecting. This is one blueprint
+for one service, added because a manual UI step was the only human prerequisite blocking coder. It is
+not a migration plan for the rest of authentik's config and nothing here says that config should
+move. The trigger that would make it one is a second service needing declarative setup — at which
+point the template / `oidc-check` / render-script pattern in §5 is the thing to generalise, and the
+`blueprints_discovery` cadence stops being a footnote and becomes a real argument for an apply hook.
