@@ -651,6 +651,11 @@ What proves it worked is a real login, not a status condition: neither side repo
 client secret until somebody tries to exchange a code, so every intermediate check can be green while
 the pair disagrees.
 
+**This manual restart is a gap, not a design.** `docs/superpowers/specs/2026-10-07-titan-reloader-design.md`
+designs the fix — Reloader, scoped to two namespaces, with `reloadStrategy: annotations` so Flux's drift
+detection does not revert the restart trigger. Until that lands, the restart above is mandatory and
+nothing will remind you.
+
 ---
 
 ## 6. What the read-only identity can and cannot prove
