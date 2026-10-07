@@ -783,7 +783,7 @@ point the template / `oidc-check` / render-script pattern in §5 is the thing to
 
 ---
 
-## 8. `CODER_DISABLE_PASSWORD_AUTH` — tested, and the answer is no
+## 8. `CODER_DISABLE_PASSWORD_AUTH` — tested, the carve-out is a myth, and what that changes
 
 Coder's configuration reference promises, in the option's own description:
 
@@ -812,18 +812,54 @@ so there is no version to wait for. PR #5991, which introduced the flag, describ
 the feature's purpose — "prevents the password login endpoint from working unless the user has the
 'owner' role".
 
-**So: never set this flag.** `coder server create-admin-user` writes a *password* owner
-(`cli/server_createadminuser.go:199-200`) and issues no session token, which means under the flag the
-break-glass account exists and cannot be used by any route. That is not OIDC-only, it is no-escape-hatch.
+**The flag is set anyway — deliberately, and with the escape hatch moved somewhere it still works.**
+`coder server create-admin-user` writes a *password* owner (`cli/server_createadminuser.go:199-200`)
+and issues no session token, so under the flag that account cannot sign in. But it lives in the
+database, not in the env var, and the flag is one environment variable on a Deployment. The break-glass
+is therefore: **turn the flag off, use the admin, turn it back on.** That is what
+`CODER_DISABLE_PASSWORD_AUTH: "true"` in `apply/50-apps/coder/coder.yaml` means, and §8.1 is the
+procedure.
 
-And even if the carve-out were implemented, it would be **API-only**: `SignInForm.tsx:29` gates the
-password fields on `authMethods.password.enabled`, which comes from a public unauthenticated
-endpoint that cannot know you are an owner. With the flag set the login page shows no password form
-for anybody. A break-glass you can only reach with `curl` is a worse break-glass.
+What the flag buys: no local account can be used while the system is healthy, so a forgotten password
+is not a standing door, and the login page offers exactly one way in.
 
-What this buys instead: nothing much. The create-first-user page disappears once a user exists, and no
-local account has a password unless one is created deliberately. The flag defends only against a
-future forgotten local account, and costs the documented way back in.
+### 8.1 If you are locked out: enable password auth
+
+The realistic trigger is authentik being down or misconfigured, not a forgotten password. Do this:
+
+```fish
+# 1. Flip it live. This changes the pod template, so coder rolls itself; ~40s.
+kubectl -n coder set env deploy/coder CODER_DISABLE_PASSWORD_AUTH=false
+
+# 2. The login page now renders the password form again — SignInForm.tsx:29 keys off
+#    /api/v2/users/authmethods, which flips with the flag. Sign in as the break-glass admin.
+#    Or without a browser:
+curl -s -X POST https://coder.titan.arrieta.eu/api/v2/users/login \
+  -H 'Content-Type: application/json' -d '{"email":"…","password":"…"}'
+#    201 = session token in the body. 403 = the flag is not actually off yet.
+
+# 3. Fix the OIDC problem. Then put the flag back, by hand, see below.
+kubectl -n coder set env deploy/coder CODER_DISABLE_PASSWORD_AUTH=true
+```
+
+**Step 3 is not optional and Flux will not do it for you.** `driftDetection.mode` is `enabled`, which
+is notify-only, and Helm patches new-vs-old rather than live-vs-desired — so a value you changed by
+hand stays changed forever, including `false`. The next `helm upgrade` will not restore it. Either set
+it back explicitly as above, or force git to win:
+
+```fish
+kubectl -n coder annotate --overwrite helmrelease coder reconcile.fluxcd.io/requestedAt="$(date +%s)"
+# then confirm git and reality agree:
+kubectl -n coder get deploy coder -o jsonpath='{.spec.template.spec.containers[0].env}' \
+  | tr ',' '\n' | grep -A1 DISABLE_PASSWORD
+```
+
+While the flag is off, the only password-loginable account is the break-glass admin, whose password is
+in the password manager and nowhere in this repo. That is a small, deliberate, temporary window — but
+it is a window, so close it in the same session that opened it.
+
+And note what the flag does **not** protect: it does not survive someone editing the Deployment, and
+§9 shows this cluster does not notice when that happens.
 
 **The break-glass exists now** — created with `kubectl -n coder exec -it deploy/coder -- coder server
 create-admin-user`, which needs `-it` because it prompts, and which must not be given
