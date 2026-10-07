@@ -607,6 +607,50 @@ One incidental confirmation from that file: the email scope mapping's expression
 `"email_verified": False`. So `CODER_OIDC_IGNORE_EMAIL_VERIFIED=true` is load-bearing, not defensive
 — without it coder rejects a login over an address authentik deliberately marks unverified.
 
+### Rotating coder's OIDC client secret
+
+Done once on 2026-10-07, because `ak apply_blueprint` had printed the old value into a transcript —
+the same class of exposure as the S3 key, and the same remedy.
+
+**There is an unavoidable window in which logins fail, and it is worth understanding before anyone
+rotates this a second time.** `OAuth2Provider.client_secret` is a single field, not a list, so
+authentik cannot hold old and new at once. And coder reads it from `secretKeyRef` **into its
+environment at container start** — with no checksum annotation anywhere in the coder chart's
+templates, changing the Secret does not roll the pod. The two ends therefore move at different speeds
+and never move together:
+
+| step | who moves | when |
+|---|---|---|
+| merge | both Secrets land in the cluster | Flux, seconds |
+| authentik uses the new secret | its own `blueprints_discovery` | **up to ~50 min later**, or now if applied by hand |
+| coder uses the new secret | whoever runs `rollout restart` | **never, unless someone does it** |
+
+Between rows two and three, new OIDC logins fail with `invalid_client` at the token endpoint.
+Existing sessions survive, so it is a login outage rather than a lockout. This rotation was free only
+because it landed before the first real login; **the next one is a planned interruption and should be
+announced as one.**
+
+The sequence, ordered to keep the window as short as it can be:
+
+```fish
+# 1. Re-render with the DB password and client id pinned, so the client secret is the only thing that
+#    changes. Leaving CODER_OIDC_CLIENT_SECRET unset is what makes the script generate a fresh one.
+env CODER_DB_PASSWORD=… CODER_OIDC_CLIENT_ID=… FORCE=1 ./scripts/setup-coder-secrets.sh
+#    It prints which values were reused vs generated, and only ever a truncated SHA-256.
+
+# 2. Merge, then make authentik apply it instead of waiting on discovery:
+kubectl -n auth exec deploy/authentik-worker -- ak apply_blueprint \
+  /blueprints/mounted/secret-authentik-coder-blueprint/coder.yaml 2>&1 \
+  | sed -E 's/[a-f0-9]{64}/REDACTED/g' | tail -5
+
+# 3. Close the gap immediately:
+kubectl -n coder rollout restart deploy/coder
+```
+
+What proves it worked is a real login, not a status condition: neither side reports a mismatched
+client secret until somebody tries to exchange a code, so every intermediate check can be green while
+the pair disagrees.
+
 ---
 
 ## 6. What the read-only identity can and cannot prove
