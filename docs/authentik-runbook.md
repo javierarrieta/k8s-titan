@@ -603,6 +603,70 @@ come from each app's `apps.py` label (`authentik_providers_oauth2.scopemapping` 
 not the policies app whose class it inherits from), and the default objects are declared in
 authentik's own `blueprints/system/*.yaml`.
 
+### The third failure mode: `signing_key`, optional until it isn't
+
+A `!Find` that resolves and a field that is present can still be the wrong config. The provider
+applied cleanly, the OIDC discovery endpoint answered `200`, and the first real login died at the
+last step:
+
+```
+oidc: malformed jwt: unexpected signature algorithm "HS256"; expected ["RS256"]
+```
+
+authentik's own code is the explanation, `providers/oauth2/models.py:358-359`:
+
+```python
+if not self.signing_key:
+    # No Certificate at all, assume HS256
+```
+
+With no signing key the provider HMACs the `id_token` with the **client_secret**. coder's go-oidc
+verifier expects RS256 from the provider JWKS and rejects the token. The fix is one line, pointing
+at the certificate authentik already creates and reconciles (`authentik/crypto/apps.py`:
+`MANAGED_KEY` at `:10`, "authentik Internal JWT Certificate" at `:23`):
+
+```yaml
+signing_key: !Find [authentik_crypto.certificatekeypair, [managed, goauthentik.io/crypto/jwt-managed]]
+```
+
+The provider JWKS is the cheap external check, and it is worth capturing **before** a change for
+once, so the after means something:
+
+```fish
+curl -s https://auth.titan.arrieta.eu/application/o/coder/.well-known/openid-configuration \
+  | python3 -c 'import sys,json;print(json.load(sys.stdin)["jwks_uri"])' | xargs curl -s
+# expect: kty=RSA alg=RS256 use=sig. An empty key list means no signing key is set.
+```
+
+**What this generalises to:** OIDC discovery `200`, coder `Ready`, all five stages `Healthy`,
+`oidc-check` 9/9 — every one of those stayed green while login was broken. None of them completes a
+code exchange. Checks made of config agreement can never prove a token verifies; the last hop of an
+auth chain is only provable by authenticating.
+
+### Cold start: coder's `/setup` page has no OIDC button
+
+On a deployment with zero users, `/` redirects to `/setup`, and `SetupPageView.tsx` at the pinned
+`v2.37.4` is a **password-only** form — username, email, password. There is no OIDC control there,
+even though `oidc.enabled` is `true` and the backend fully supports first-user OIDC signup
+(`coderd/userauth.go:1783-1785` allows it "regardless of whether signups are enabled", and
+`:1849-1851` grants that user the owner role). The UI just never offers the route.
+
+The route is public and works; drive it directly:
+
+```
+https://coder.titan.arrieta.eu/api/v2/users/oidc/callback
+```
+
+It 307s to authentik with a correct `client_id`, `redirect_uri`, scopes and a `state` cookie, and
+the return leg creates the first user. Confirmed working 2026-10-07.
+
+Do not conclude from `/setup` that a local admin is required. And note the interaction with
+`CODER_DISABLE_PASSWORD_AUTH`: coder's docs promise owners can still password-login under that flag,
+but `coderd/userauth.go:599-605` blocks it unconditionally — the comment describes a carve-out the
+`if` does not implement, on `v2.37.4` and on `main` alike. Since `coder server create-admin-user`
+makes a *password* owner (`cli/server_createadminuser.go:199-200`) and no session token, setting
+that flag before a working break-glass exists is how you actually lock yourself out.
+
 One incidental confirmation from that file: the email scope mapping's expression returns
 `"email_verified": False`. So `CODER_OIDC_IGNORE_EMAIL_VERIFIED=true` is load-bearing, not defensive
 — without it coder rejects a login over an address authentik deliberately marks unverified.
@@ -651,10 +715,13 @@ What proves it worked is a real login, not a status condition: neither side repo
 client secret until somebody tries to exchange a code, so every intermediate check can be green while
 the pair disagrees.
 
-**This manual restart is a gap, not a design.** `docs/superpowers/specs/2026-10-07-titan-reloader-design.md`
-designs the fix — Reloader, scoped to two namespaces, with `reloadStrategy: annotations` so Flux's drift
-detection does not revert the restart trigger. Until that lands, the restart above is mandatory and
-nothing will remind you.
+**This manual restart was a gap, and it is now closed.** Reloader is live (`reloader-reloader-*` in
+`apps`, chart `2.2.18`, scoped to the `apps` and `coder` namespaces with a namespaced `Role` and no
+`ClusterRole`), and `apply/50-apps/coder/coder.yaml` carries
+`secret.reloader.stakater.com/reload: coder-secrets` on the pod template — so a change to that
+Secret rolls coder by itself. `docs/superpowers/specs/2026-10-07-titan-reloader-design.md` is the
+design. Step 3 above is now belt-and-braces rather than mandatory; if Reloader is ever removed, the
+`rollout restart` becomes load-bearing again and nothing will warn you.
 
 ---
 
