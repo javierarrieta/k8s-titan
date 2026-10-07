@@ -338,8 +338,11 @@ Secret, because an unmounted blueprint is indistinguishable from one that was ne
 **Partly proven since, and the gap is now measured.** The flow slugs were probed against the live
 instance — `default-authorization-flow` returns 404 here, which is why nothing was written from
 memory. `property_mappings: default-scopes` was *not* written from memory and was wrong: no
-`ScopeMapping` by that name exists, and the worker's apply failed on it. `signing_key` is still
-unverified — it is optional and nothing has exercised it.
+`ScopeMapping` by that name exists, and the worker's apply failed on it. `signing_key` was left
+unset on the same reasoning — optional, and nothing had exercised it. Something did, and it was wrong:
+without it authentik signs `id_token` with HS256 using the client secret, and coder rejects the
+token. The first real login is what found it, after every offline and status check had passed.
+See `docs/authentik-runbook.md` §5.
 
 The larger finding is that **a Secret applying is not the same fact as a blueprint being applied**,
 and the distance between them is authentik's own `blueprints_discovery` cadence, measured at gaps up
