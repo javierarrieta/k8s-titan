@@ -379,6 +379,14 @@ directory still exists on the node, and show it recoverable. If local-path's hel
 `Retain` — which is possible and is precisely the kind of thing a four-line manifest gets wrong —
 then C3 is wrong and §13's override gets worse, which is exactly what the proof is for.
 
+**Result (drilled 2026-10-07, runbook §10).** Both halves pass, with a caveat this section did not
+anticipate: `Retain` preserves the bytes, but recovery is **manual and races the provisioner**. After
+the claim was deleted the PV went `Released` and the file survived on the node; starting the workspace
+then provisioned a fresh empty volume and reported a healthy, started workspace with an empty home.
+Recovery required a hand-written PV with a `claimRef`, applied *before* the claim existed. So C2's
+mitigation is real but it is a procedure someone must know to run, not a property that protects them
+on its own — which makes it weaker than the wording above implied.
+
 ---
 
 ## 10. Templates in git
