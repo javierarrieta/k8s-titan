@@ -985,3 +985,40 @@ a healthy-looking workspace is sitting on top of the wrong data. Two rules follo
 Finding the directory when the PV object is already gone: the path is
 `/var/lib/rancher/k3s/storage/<pv-name>_<namespace>_<claim-name>`, so `ls` that directory and match
 on the claim suffix.
+
+## 11. Google social login — four wrong facts, all caught by running it
+
+Landed 2026-10-11 (`authentik/blueprints-google.yaml`). Every one of these was read confidently from
+source and wrong, and none of them produced a visible failure anywhere a dashboard would show.
+
+| Wrong belief | Reality | How it surfaced |
+|---|---|---|
+| model `googleoauthsource` | `GoogleOAuthSource` is `abstract = True` — a type marker, not a table. Use `oauthsource` + `provider_type: google` | `ak apply_blueprint` in the foreground |
+| `pkce: s256` | `PKCEMethod` is `none`/`plain`/`S256` — inconsistent with itself, so the lowercase value is rejected | same |
+| `pkce: S256` does something | It does not. `clients/oauth2.py` uses `source_type.pkce` and only honours the per-source override when `urls_customizable` is True; GoogleType sets neither, so it inherits `NONE`/`False` | reading `clients/oauth2.py` after the redirect carried no `code_challenge` |
+| callback is `/application/o/google/callback/` | That is authentik's **provider** mountpoint (coder's OIDC discovery answers there). Sources mount at `source/oauth/` → `/source/oauth/callback/google/` | the route 404'd and `application/o/coder/.well-known` did not |
+| creating the source puts it on the login page | It does not. The **Identification stage** has its own `sources` M2M and the inbuilt flow binds that stage without populating it | operator: "I cannot see any way to log in with google" |
+
+### A failing blueprint logs its own inputs
+
+The importer's `Entry invalid` line dumps the whole entry, **attrs included**. For a blueprint that
+carries a credential — which authentik's blueprint Secrets must, since there is no other way to get one
+in — that means **a blueprint that fails on startup writes its credentials into container logs**, where
+they outlive the pod and go wherever the log pipeline goes.
+
+This cuts directly against the habit this section recommends. Both are still right, in order:
+
+1. Render locally, then `ak apply_blueprint` **in the foreground** on the mounted file and read the
+   output. Silent hourly discovery is how four bad blueprints passed unnoticed.
+2. Redact before the output goes anywhere durable:
+   `... 2>&1 | sed -E 's/GOCSPX-[A-Za-z0-9_-]+/REDACTED/g'`
+   Dropping that pipe is how a live Google secret ended up in a terminal and a chat transcript.
+
+### Proven working
+
+```
+GET /source/oauth/login/google/ -> 302 https://accounts.google.com/o/oauth2/auth
+  client_id     343910733311-…apps.googleusercontent.com
+  redirect_uri  https://auth.titan.arrieta.eu/source/oauth/callback/google/
+  scope         email profile
+```
