@@ -27,8 +27,8 @@
 # Writing the UI's words would fail validation with a confusing error.
 #
 # VERIFIED, NOT GUESSED
-#  * model `authentik_sources_oauth.googleoauthsource` - GoogleOAuthSource is a CreatableType
-#    (sources/oauth/models.py), so it is writable through the API and therefore through a blueprint.
+#  * model `authentik_sources_oauth.oauthsource` - the CONCRETE model. GoogleOAuthSource is abstract
+#    (see the entry below), which is the mistake this file already made once and cost a merge.
 #  * flow slug `default-source-authentication` - probed live at /if/flow/default-source-authentication/
 #    -> 200. Same method that caught `default-authorization-flow` being a 404 in coder's blueprint.
 #  * callback URL `https://auth.titan.arrieta.eu/application/o/google/callback/` - the `application/o`
@@ -45,7 +45,13 @@ version: 1
 metadata:
   name: google-social-login
 entries:
-  - model: authentik_sources_oauth.googleoauthsource
+  - model: authentik_sources_oauth.oauthsource
+    # NOT googleoauthsource. GoogleOAuthSource is `abstract = True` in sources/oauth/models.py - it is
+    # a type marker the API uses to describe the vendor, not a database table. Asking for it fails with
+    # "App or Model does not exist: {'app': 'authentik_sources_oauth', 'model': 'googleoauthsource'}",
+    # which is a confusing way to say "the class you read is decoration". The concrete model is
+    # OAuthSource; what makes a source Google is provider_type below. Verified on the live instance
+    # after this was wrong, not before - see runbook.
     identifiers:
       name: google
     state: present
