@@ -1,0 +1,70 @@
+# authentik blueprint: Google social login, allowlist mode.
+#
+# WHY ALLOWLIST AND NOT SIGNUP
+# `user_matching_mode: email_link` plus NO `enrollment_flow` means: a Google identity that matches an
+# existing authentik user's email authenticates as that user; one that matches nobody is refused.
+# That refusal is not an assumption - authentik/core/sources/flow_manager.py handle_enroll() checks
+# `if not self.source.enrollment_flow` and returns "Source is not configured for enrollment." with a
+# logged warning. Setting enrollment_flow to default-source-enrollment instead would let ANY Google
+# account on the internet mint an authentik account, on a host that fronts a cluster.
+#
+# So "who can get in" is a list you can read: the authentik users, matched by email. Adding a person
+# means creating their authentik user first. Removing means deactivating it.
+#
+# WHAT THIS DOES NOT DO
+#  * It does not chain a second factor. authentication_flow is the inbuilt default-source-authentication
+#    flow, which authenticates the linked user and stops - authentik's own password/2FA is NOT asked
+#    afterwards. The security boundary is therefore the Google account itself. Deliberate, and worth
+#    re-reading if this repo ever fronts anything you care about.
+#  * It cannot restrict by Google Workspace domain. authentik's Google type hardcodes its request
+#    parameters (sources/oauth/types/google.py: get_additional_parameters returns only
+#    `scope: [email, profile]`), so there is no `hd` knob to set here. Domain restriction would need a
+#    policy on a dedicated flow, not a field on this source.
+#
+# FIELD NAMES ARE NOT THE UI'S
+# The credentials are `consumer_key` / `consumer_secret`, NOT client_id/client_secret - the UI labels
+# them "Client ID" and "Client Secret", the API (sources/oauth/api/source.py, fields list) does not.
+# Writing the UI's words would fail validation with a confusing error.
+#
+# VERIFIED, NOT GUESSED
+#  * model `authentik_sources_oauth.googleoauthsource` - GoogleOAuthSource is a CreatableType
+#    (sources/oauth/models.py), so it is writable through the API and therefore through a blueprint.
+#  * flow slug `default-source-authentication` - probed live at /if/flow/default-source-authentication/
+#    -> 200. Same method that caught `default-authorization-flow` being a 404 in coder's blueprint.
+#  * callback URL `https://auth.titan.arrieta.eu/application/o/google/callback/` - the `application/o`
+#    prefix is asserted in core/urls.py's own comment ("everything else uses application/o or
+#    application/saml") and the tail is `callback/<slug:source_slug>/` in sources/oauth/urls.py. The
+#    slug below is what fixes that URL, and it must match what is registered in Google Cloud.
+#
+# HOW THIS FILE BECOMES A SECRET
+# Nothing here is applied directly. scripts/setup-google-blueprint.sh substitutes the two `${...}`
+# placeholders and writes the result, sops-encrypted, to
+# apply/10-secrets/authentik-google-blueprint.yaml - same shape as coder's blueprint, same reason:
+# a ConfigMap would put a live credential in plain view of anyone who can read the namespace.
+version: 1
+metadata:
+  name: google-social-login
+entries:
+  - model: authentik_sources_oauth.googleoauthsource
+    identifiers:
+      name: google
+    state: present
+    attrs:
+      name: Google
+      # Fixes the callback URL Google must be told about. Changing it invalidates the GCP registration.
+      slug: google
+      # Required, and not cosmetic: OAuthSourceSerializer declares provider_type as a ChoiceField with
+      # no default, and OAuthSource.source_type resolves the type FROM this value
+      # (registry.find_type(self.provider_type)). Left unset the entry fails validation on create; the
+      # value is GoogleType.name in sources/oauth/types/google.py.
+      provider_type: google
+      enabled: true
+      # Displayed as a prominent button on the login page rather than a small icon (core/models.py).
+      promoted: true
+      consumer_key: "${GOOGLE_CLIENT_ID}"
+      consumer_secret: "${GOOGLE_CLIENT_SECRET}"
+      # Default is `none`. Google supports S256, and it costs nothing.
+      pkce: s256
+      authentication_flow: !Find [authentik_flows.flow, [slug, default-source-authentication]]
+      user_matching_mode: email_link
+      # enrollment_flow intentionally absent: unknown Google identities are denied. See header.

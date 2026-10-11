@@ -30,3 +30,7 @@ resources:
   - coder-secrets.yaml
   - coder-db-credentials.yaml
   - authentik-coder-blueprint.yaml
+  # Google social login, allowlist mode. Carries the Google OAuth client secret, so it is a Secret
+  # for the same reason as coder's blueprint, and it is rendered by scripts/setup-google-blueprint.sh
+  # from authentik/blueprints-google.yaml.
+  - authentik-google-blueprint.yaml
