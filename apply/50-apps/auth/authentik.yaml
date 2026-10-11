@@ -102,6 +102,13 @@ spec:
       enabled: false
     server:
       replicas: 1
+      # AUTHENTIK_SECRET_KEY and the Postgres password arrive through `envFrom` (see the envFrom block
+      # above), and a container's environment is fixed at creation - so rotating either one changes the
+      # Secret and nothing else, the exact defect Reloader exists for. The blueprint Secrets are NOT
+      # listed here: the server does not apply blueprints, so restarting it for a blueprint edit would be
+      # an auth outage for no behaviour.
+      podAnnotations:
+        secret.reloader.stakater.com/reload: authentik-secrets
       service:
         type: ClusterIP
       ingress:
@@ -118,3 +125,11 @@ spec:
             secretName: titan-tls
     worker:
       replicas: 1
+      # Two different failure modes, both worth a restart:
+      #  * authentik-secrets - same envFrom defect as the server.
+      #  * the two blueprint Secrets - these are VOLUME-mounted, so kubelet rewrites the file in place
+      #    and the pod never notices. That is not the problem here: authentik's worker only *discovers*
+      #    mounted blueprints hourly plus at startup, so a blueprint edit would otherwise sit unread for
+      #    up to an hour after a merge. That delay is what made PR #42's fix look like it had not landed.
+      podAnnotations:
+        secret.reloader.stakater.com/reload: "authentik-secrets,authentik-coder-blueprint,authentik-google-blueprint"
