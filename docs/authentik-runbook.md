@@ -998,6 +998,12 @@ source and wrong, and none of them produced a visible failure anywhere a dashboa
 | `pkce: S256` does something | It does not. `clients/oauth2.py` uses `source_type.pkce` and only honours the per-source override when `urls_customizable` is True; GoogleType sets neither, so it inherits `NONE`/`False` | reading `clients/oauth2.py` after the redirect carried no `code_challenge` |
 | callback is `/application/o/google/callback/` | That is authentik's **provider** mountpoint (coder's OIDC discovery answers there). Sources mount at `source/oauth/` → `/source/oauth/callback/google/` | the route 404'd and `application/o/coder/.well-known` did not |
 | creating the source puts it on the login page | It does not. The **Identification stage** has its own `sources` M2M and the inbuilt flow binds that stage without populating it | operator: "I cannot see any way to log in with google" |
+| `state: update` patches an existing object | Not a state. `BlueprintEntryDesiredState` is exactly `{absent, present, created, must_created}`, and an invalid state rejects the **whole** blueprint, so a correct entry above it stopped applying too | `POST /api/v3/flows/executor/default-authentication-flow/` returning `sources: []` |
+
+The last one is the only failure here that was checkable from the file alone, and it is now rejected by
+`scripts/setup-google-blueprint.sh` before anything reaches a cluster. The public flow-executor endpoint
+is worth remembering as a check: it returns the Identification stage's own source list, so it proves the
+button exists without anyone clicking it and without credentials.
 
 ### A failing blueprint logs its own inputs
 
