@@ -66,7 +66,20 @@ if leftover:
 # reject valid input - the shared loader tolerates the tag, same helper as tools/oidc-check.py.
 sys.path.insert(0, os.path.join(env["REPO"], "tools"))
 from sopsload import load_tolerating_tags  # noqa: E402
-load_tolerating_tags(rendered)
+doc = load_tolerating_tags(rendered)
+
+# States are an enum, not prose: blueprints/v1/common.py defines exactly
+# {absent, present, created, must_created}. `state: update` reads like the obvious verb for "patch this
+# existing object", is not a state, and fails the WHOLE blueprint - every entry, not just the bad one -
+# which is how a correct source definition silently stopped applying. Cheaper to check here than to
+# discover it in a worker log that does not exist.
+VALID_STATES = {"absent", "present", "created", "must_created"}
+for i, entry in enumerate(doc.get("entries") or []):
+    st = entry.get("state", "present")
+    if st not in VALID_STATES:
+        sys.exit(f"FAIL: entry {i} ({entry.get('model')}) has state {st!r}; "
+                 f"authentik accepts exactly {sorted(VALID_STATES)} - and an invalid state rejects "
+                 f"the entire blueprint, not just this entry")
 
 with open(env["STAGE_BP"], "w") as fh:
     yaml.safe_dump({

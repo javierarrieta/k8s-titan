@@ -91,15 +91,18 @@ entries:
   # and no error anywhere. The docs say this in one line under "Add sources to default login page"; it
   # is not discoverable from the source's own fields at all.
   #
-  # `state: update`, not `present`: this is authentik's own inbuilt stage, and if it is somehow missing
-  # the right answer is to fail loudly rather than mint a second stage the flow does not bind. The inbuilt
-  # blueprint declares this stage with no attrs, so re-applying it will not clear what is set here.
+  # `state: present`, and there is no alternative: BlueprintEntryDesiredState is exactly
+  # {absent, present, created, must_created} (blueprints/v1/common.py). `state: update` - which reads
+  # like the obvious "patch this existing object" verb and is what this entry originally said - is not a
+  # state at all, and an invalid state fails the WHOLE blueprint, so the source entry above stopped
+  # applying too. Upsert is safe here because the identifier is the stage's own name: if it were ever
+  # missing, the created stage simply would not be bound to a flow.
   #
   # Must stay AFTER the source entry: !Find resolves at apply time, and a miss is a silent None.
   - model: authentik_stages_identification.identificationstage
     identifiers:
       name: default-authentication-identification
-    state: update
+    state: present
     attrs:
       sources:
         - !Find [authentik_sources_oauth.oauthsource, [slug, google]]
