@@ -31,10 +31,13 @@
 #    (see the entry below), which is the mistake this file already made once and cost a merge.
 #  * flow slug `default-source-authentication` - probed live at /if/flow/default-source-authentication/
 #    -> 200. Same method that caught `default-authorization-flow` being a 404 in coder's blueprint.
-#  * callback URL `https://auth.titan.arrieta.eu/application/o/google/callback/` - the `application/o`
-#    prefix is asserted in core/urls.py's own comment ("everything else uses application/o or
-#    application/saml") and the tail is `callback/<slug:source_slug>/` in sources/oauth/urls.py. The
-#    slug below is what fixes that URL, and it must match what is registered in Google Cloud.
+#  * callback URL `https://auth.titan.arrieta.eu/source/oauth/callback/google/` - sources mount at
+#    `source/oauth/` (sources/oauth/apps.py: mountpoint), and the tail is `callback/<slug:source_slug>/`
+#    in sources/oauth/urls.py. This file documented `application/o/google/callback/` for a whole merge
+#    cycle and that was WRONG: `application/o/` is where authentik mounts as a *provider* (coder's OIDC
+#    discovery answers there), which is what the comment in core/urls.py was talking about. Reading a
+#    comment about providers and applying it to sources put a redirect URI Google would not recognise
+#    into the Cloud console.
 #
 # HOW THIS FILE BECOMES A SECRET
 # Nothing here is applied directly. scripts/setup-google-blueprint.sh substitutes the two `${...}`
@@ -57,7 +60,9 @@ entries:
     state: present
     attrs:
       name: Google
-      # Fixes the callback URL Google must be told about. Changing it invalidates the GCP registration.
+      # Fixes the callback URL Google must be told about:
+      # https://auth.titan.arrieta.eu/source/oauth/callback/google/ . Changing it invalidates the GCP
+      # registration.
       slug: google
       # Required, and not cosmetic: OAuthSourceSerializer declares provider_type as a ChoiceField with
       # no default, and OAuthSource.source_type resolves the type FROM this value
@@ -69,8 +74,11 @@ entries:
       promoted: true
       consumer_key: "${GOOGLE_CLIENT_ID}"
       consumer_secret: "${GOOGLE_CLIENT_SECRET}"
-      # Default is `none`. Google supports S256, and it costs nothing.
-      pkce: s256
+      # UPPERCASE, and not by style: PKCEMethod is `NONE = "none"`, `PLAIN = "plain"`, `S256 = "S256"` -
+      # the enum is inconsistent with itself, so the lowercase guess that matches its two siblings is
+      # rejected with `"s256" is not a valid choice`. Default is `none`; Google supports S256 and it
+      # costs nothing.
+      pkce: S256
       authentication_flow: !Find [authentik_flows.flow, [slug, default-source-authentication]]
       user_matching_mode: email_link
       # enrollment_flow intentionally absent: unknown Google identities are denied. See header.
