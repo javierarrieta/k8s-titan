@@ -70,9 +70,14 @@ spec:
       # one decision rather than two: no ClusterRole is created at all.
       watchGlobally: false
       # Exactly the namespaces holding annotated workloads, and nothing more. The release namespace
-      # (`apps`) is added by the chart itself. `auth` is deliberately absent: authentik-server and
-      # authentik-worker take their Secrets through `envFrom` and carry the same defect, but nothing in
-      # `auth` is annotated yet, so listing it would buy a read grant for no behaviour. Spec R5 — add it
-      # in the same change that annotates authentik, once this is proven on coder.
+      # (`apps`) is added by the chart itself.
+      #
+      # `auth` was added when authentik's server and worker were annotated (spec R5, fulfilled 2026-10-11):
+      # authentik takes its environment through `envFrom`, so it carried the same defect coder did, and
+      # the blueprint Secrets needed it for a subtler reason - they are volume-mounted and kubelet rewrites
+      # them in place, but authentik's worker only *discovers* mounted blueprints hourly plus at startup.
+      # A blueprint edit therefore sat unread for up to an hour after a merge, which is what made PR #42's
+      # fix look like it had not landed.
       namespaces:
         - coder
+        - auth
