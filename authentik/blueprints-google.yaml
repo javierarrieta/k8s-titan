@@ -74,11 +74,32 @@ entries:
       promoted: true
       consumer_key: "${GOOGLE_CLIENT_ID}"
       consumer_secret: "${GOOGLE_CLIENT_SECRET}"
-      # UPPERCASE, and not by style: PKCEMethod is `NONE = "none"`, `PLAIN = "plain"`, `S256 = "S256"` -
-      # the enum is inconsistent with itself, so the lowercase guess that matches its two siblings is
-      # rejected with `"s256" is not a valid choice`. Default is `none`; Google supports S256 and it
-      # costs nothing.
-      pkce: S256
+      # No pkce, deliberately, and do not add one back. It validates (`S256`, uppercase - the enum is
+      # inconsistent with itself) and then does nothing: clients/oauth2.py takes
+      # `source.source_type.pkce` and only honours the per-source override when
+      # `source_type.urls_customizable` is True. GoogleType sets neither, so it inherits
+      # `pkce = NONE, urls_customizable = False` and the source's own value is never read. A pkce line
+      # here would claim a protection that is not happening - worse than an empty gap.
       authentication_flow: !Find [authentik_flows.flow, [slug, default-source-authentication]]
       user_matching_mode: email_link
       # enrollment_flow intentionally absent: unknown Google identities are denied. See header.
+
+  # The source existing is not the same as the source being clickable. Nothing on the login page lists
+  # sources by itself - the Identification stage does, through its own `sources` M2M ("Specify which
+  # sources should be shown", stages/identification/models.py), and the inbuilt default flow binds that
+  # stage without populating it. So a valid, working source produced a login page with no way to use it
+  # and no error anywhere. The docs say this in one line under "Add sources to default login page"; it
+  # is not discoverable from the source's own fields at all.
+  #
+  # `state: update`, not `present`: this is authentik's own inbuilt stage, and if it is somehow missing
+  # the right answer is to fail loudly rather than mint a second stage the flow does not bind. The inbuilt
+  # blueprint declares this stage with no attrs, so re-applying it will not clear what is set here.
+  #
+  # Must stay AFTER the source entry: !Find resolves at apply time, and a miss is a silent None.
+  - model: authentik_stages_identification.identificationstage
+    identifiers:
+      name: default-authentication-identification
+    state: update
+    attrs:
+      sources:
+        - !Find [authentik_sources_oauth.oauthsource, [slug, google]]
