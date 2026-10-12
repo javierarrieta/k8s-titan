@@ -27,7 +27,8 @@ provider "kubernetes" {}
 data "coder_workspace" "me" {}
 data "coder_workspace_owner" "me" {}
 
-# 40 Gi on the Retain class. This is the resource the spec's whole accepted-risk argument sits
+# A selectable size on the Retain class (data.coder_parameter.disk, 40 Gi by default). This is the
+# resource the spec's whole accepted-risk argument sits
 # on: it is not backed up (spec C2), and Retain is what stands between a wrong `kubectl delete
 # pvc` and a lost home directory. Task 9 proves the provisioner honours it.
 resource "kubernetes_persistent_volume_claim_v1" "home" {
@@ -54,7 +55,7 @@ resource "kubernetes_persistent_volume_claim_v1" "home" {
     access_modes       = ["ReadWriteOnce"]
     storage_class_name = "local-path-retain"
     resources {
-      requests = { storage = "40Gi" }
+      requests = { storage = "${data.coder_parameter.disk.value}Gi" }
     }
   }
 }
@@ -71,6 +72,109 @@ data "coder_parameter" "workspace_image" {
   type         = "string"
   default      = "ghcr.io/javierarrieta/coder-workspaces-nix:0.0.11"
   mutable      = true
+}
+
+# Cores, memory and disk are parameters rather than literals, but the menu's ceiling is the
+# per-workspace budget from spec §9.1 (4 CPU / 8 Gi / 40 Gi), not a preference: the ResourceQuota in
+# apply/50-apps/coder/workspaces.yaml is 8 CPU / 16 Gi / 80 Gi for two workspaces and the
+# LimitRange there caps a PVC at 40 Gi. Two workspaces at the top of either menu fill the quota
+# exactly; anything above it would be a selector that produces a Forbidden or a Pending pod, which
+# is a worse failure than not offering the choice. Defaults are half the ceiling so two workspaces
+# at defaults sit at half the quota and a third can still start.
+#
+# Requests and limits are set to the same value, so the pod is Guaranteed QoS. That is deliberate
+# and it is what makes the number mean something: a Burstable pod's CPU shares are proportional to
+# its *request*, so a request below the limit is a promise the scheduler keeps and the quota is
+# charged against requests regardless.
+#
+# All three are immutable (the provider default). Coder sets an immutable parameter at workspace
+# creation and on a move to a new template version, which is the honest lifecycle here: the pod's
+# container resources are not updatable in place, so a mutable core count would be a field the UI
+# accepts and the API server refuses. Practical consequence for existing workspaces: stop before
+# applying the new version, then start. The pod is count = start_count, so stopped means the pod is
+# gone and the rebuild creates it at the new size instead of trying to patch a running one.
+data "coder_parameter" "cpu" {
+  name         = "cpu"
+  display_name = "Cores"
+  description  = "vCPU cores, requested and limited (Guaranteed QoS). Two workspaces at 4 fill the namespace quota."
+  type         = "number"
+  default      = "2"
+  form_type    = "radio"
+  order        = 1
+
+  option {
+    name  = "1 core"
+    value = "1"
+  }
+  option {
+    name  = "2 cores"
+    value = "2"
+  }
+  option {
+    name  = "4 cores"
+    value = "4"
+  }
+}
+
+data "coder_parameter" "memory" {
+  name         = "memory"
+  display_name = "Memory (GiB)"
+  description  = "Memory in GiB, requested and limited. Two workspaces at 8 fill the namespace quota."
+  type         = "number"
+  default      = "4"
+  form_type    = "radio"
+  order        = 2
+
+  option {
+    name  = "2 GiB"
+    value = "2"
+  }
+  option {
+    name  = "4 GiB"
+    value = "4"
+  }
+  option {
+    name  = "8 GiB"
+    value = "8"
+  }
+}
+
+# Disk is selectable at creation and one-way afterwards, and the reason is a live field rather than
+# a convention: local-path-retain ships allowVolumeExpansion: false (apply/20-infra/storage-retain.yaml),
+# so the API server refuses any change to a bound claim's size. monotonic = "increasing" is coder's
+# own tool for exactly this shape ("resources that can't be shrunk or grown without implications,
+# like disk volume size") and it stops a user from picking 10 Gi over an existing 40 Gi home.
+#
+# The default is deliberately NOT half the ceiling, unlike cores and memory. An existing workspace
+# takes a new parameter's default on its next build, so a 20 Gi default would have terraform plan a
+# 40Gi -> 20Gi shrink on every home already on the cluster and the API server would reject the
+# build. 40 Gi keeps every existing home's plan empty; anyone creating a new workspace can pick less.
+# Growing a home past its creation size is spec §14's deferred StorageClass item, not a template edit.
+data "coder_parameter" "disk" {
+  name         = "disk"
+  display_name = "Home disk (GiB)"
+  description  = "Home volume size, chosen at creation. It cannot be grown or shrunk afterwards: local-path-retain does not support expansion. Not backed up."
+  type         = "number"
+  default      = "40"
+  form_type    = "radio"
+  order        = 3
+
+  validation {
+    monotonic = "increasing"
+  }
+
+  option {
+    name  = "10 GiB"
+    value = "10"
+  }
+  option {
+    name  = "20 GiB"
+    value = "20"
+  }
+  option {
+    name  = "40 GiB"
+    value = "40"
+  }
 }
 
 resource "coder_agent" "dev" {
@@ -206,8 +310,8 @@ resource "kubernetes_pod_v1" "dev" {
       }
 
       resources {
-        requests = { cpu = "4000m", memory = "8Gi" }
-        limits   = { cpu = "4000m", memory = "8Gi" }
+        requests = { cpu = "${data.coder_parameter.cpu.value * 1000}m", memory = "${data.coder_parameter.memory.value}Gi" }
+        limits   = { cpu = "${data.coder_parameter.cpu.value * 1000}m", memory = "${data.coder_parameter.memory.value}Gi" }
       }
 
       volume_mount {
@@ -237,5 +341,11 @@ resource "coder_metadata" "home" {
   item {
     key   = "storage class"
     value = "local-path-retain (Retain: a deleted PVC keeps its bytes, and it is not backed up)"
+  }
+  # The size is chosen once and cannot be changed afterwards, so it belongs on the resource card and
+  # not only in the parameters form someone saw once.
+  item {
+    key   = "size"
+    value = "${data.coder_parameter.disk.value} Gi (fixed at creation; this class cannot expand)"
   }
 }

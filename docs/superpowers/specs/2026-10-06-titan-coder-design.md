@@ -368,6 +368,16 @@ design, and it is listed in §14 as something a future StorageClass change can f
 A `LimitRange` gives containers without explicit requests a sane default, because the quota is only
 enforced against requests and an unset request is a small one.
 
+**Update (2026-10-12): the per-workspace column is now a ceiling, not a fixed size.** `cpu`,
+`memory` and `disk` are `coder_parameter`s in the dev template — 1/2/4 CPU, 2/4/8 Gi, 10/20/40 Gi,
+defaulting to 2 CPU / 4 Gi / 40 Gi. The ceiling is untouched on purpose: two workspaces at the top
+of either menu are exactly the quota, so every option in the menu is a size that can actually start.
+Disk keeps the full 40 Gi as its default while cores and memory went to half, and the asymmetry is
+the expansion limit above: an existing workspace adopts a new parameter's default on its next build,
+so a 20 Gi default would have had terraform plan a 40Gi → 20Gi shrink on every home already on the
+cluster, which the API server refuses on a class that cannot expand. Half-size defaults would have
+broken every existing workspace to make one new field nicer.
+
 ### 9.2 `local-path-retain`, and the proof it requires
 
 A StorageClass with `provisioner: rancher.io/local-path`, the same `nodePath` config as the
@@ -512,3 +522,4 @@ recorded after the fact. So:
 | C10 | Namespaces | `coder` + `coder-workspaces`, both declared centrally |
 | C11 | New offline gate | `make db-url-check`, reference-driven so it cannot pass vacuously |
 | C12 | authentik configuration | Blueprint in git, rendered to a sops Secret, mounted into the worker; `make oidc-check` ties the three copies together |
+| C13 | Workspace sizing (2026-10-12) | Selectable inside the C8 ceiling: 1/2/4 CPU, 2/4/8 Gi, 10/20/40 Gi; defaults 2 / 4 / 40; all immutable, disk one-way at creation |
