@@ -5,7 +5,7 @@ terraform {
       version = ">= 1.0.0"
     }
     kubernetes = {
-      source  = "hashicorp/kubernetes"
+      source = "hashicorp/kubernetes"
       # Pinned to the 3.x line rather than the plan's ">= 2.23.0". The pod and PVC schemas differ
       # between 2.x and 3.x - wait_for_rollout, wait_for_delete and wait_for_bound are 2.x-only -
       # and a range whose lower bound has a different schema than its upper bound is a template
@@ -87,18 +87,34 @@ data "coder_parameter" "workspace_image" {
 # its *request*, so a request below the limit is a promise the scheduler keeps and the quota is
 # charged against requests regardless.
 #
-# All three are immutable (the provider default). Coder sets an immutable parameter at workspace
-# creation and on a move to a new template version, which is the honest lifecycle here: the pod's
-# container resources are not updatable in place, so a mutable core count would be a field the UI
-# accepts and the API server refuses. Practical consequence for existing workspaces: stop before
-# applying the new version, then start. The pod is count = start_count, so stopped means the pod is
-# gone and the rebuild creates it at the new size instead of trying to patch a running one.
+# Cores and memory are mutable, meaning changeable after creation, and "changed" means "applied by a
+# restart". The mechanism is worth stating exactly, because the obvious alternative is a trap.
+#
+# Kubernetes 1.35 — titan is v1.35.8+k3s1, read from the node, not assumed — made container
+# resources mutable on a running pod: in-place pod resize is stable and locked on, Guaranteed pods
+# included, and this pod is Guaranteed with requests == limits, which is the one invariant a resize
+# must preserve. So a live resize is possible here, and is deliberately not what this template relies
+# on. The pinned kubernetes provider 3.3.0 cannot express resizePolicy at all — its container
+# block_types are env, env_from, lifecycle, liveness_probe, port, readiness_probe, resources,
+# security_context, startup_probe, volume_device and volume_mount, with no resize_policy, and
+# RestartContainer appears nowhere in the vendored binary — so a memory shrink would use the default
+# NotRequired policy, which is best-effort and parks in "In Progress" when usage already exceeds the
+# new limit. Coder would display 4 Gi on a container still capped at 8 and terraform would call that
+# a success. A restart has no such window: coder stops the workspace before starting it with the new
+# parameters (coder#22020, fixed by coder#23541 merged 2026-04-01, and titan runs 2.37.4), the pod is
+# count = start_count so it is destroyed outright, and the new pod is admitted into a namespace where
+# this workspace's own quota has already been released. Disk stays immutable for a harder reason —
+# see below.
+#
+# One caveat: coder#23541 landed in the experimental parameters page. Stopping the workspace by hand
+# before changing cores or memory is still the instruction to give people, and it costs nothing.
 data "coder_parameter" "cpu" {
   name         = "cpu"
   display_name = "Cores"
-  description  = "vCPU cores, requested and limited (Guaranteed QoS). Two workspaces at 4 fill the namespace quota."
+  description  = "vCPU cores, requested and limited (Guaranteed QoS). Two workspaces at 4 fill the namespace quota. Changing this restarts the workspace."
   type         = "number"
   default      = "2"
+  mutable      = true
   form_type    = "radio"
   order        = 1
 
@@ -119,9 +135,10 @@ data "coder_parameter" "cpu" {
 data "coder_parameter" "memory" {
   name         = "memory"
   display_name = "Memory (GiB)"
-  description  = "Memory in GiB, requested and limited. Two workspaces at 8 fill the namespace quota."
+  description  = "Memory in GiB, requested and limited. Two workspaces at 8 fill the namespace quota. Changing this restarts the workspace."
   type         = "number"
   default      = "4"
+  mutable      = true
   form_type    = "radio"
   order        = 2
 
@@ -150,12 +167,15 @@ data "coder_parameter" "memory" {
 # 40Gi -> 20Gi shrink on every home already on the cluster and the API server would reject the
 # build. 40 Gi keeps every existing home's plan empty; anyone creating a new workspace can pick less.
 # Growing a home past its creation size is spec §14's deferred StorageClass item, not a template edit.
+# mutable = false is written out rather than left at the provider default because the other two in
+# this file are true, and a reader should not have to know the default to see the rule.
 data "coder_parameter" "disk" {
   name         = "disk"
   display_name = "Home disk (GiB)"
   description  = "Home volume size, chosen at creation. It cannot be grown or shrunk afterwards: local-path-retain does not support expansion. Not backed up."
   type         = "number"
   default      = "40"
+  mutable      = false
   form_type    = "radio"
   order        = 3
 
