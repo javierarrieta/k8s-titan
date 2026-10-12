@@ -378,6 +378,14 @@ so a 20 Gi default would have had terraform plan a 40Gi → 20Gi shrink on every
 cluster, which the API server refuses on a class that cannot expand. Half-size defaults would have
 broken every existing workspace to make one new field nicer.
 
+Cores and memory are **mutable**, applied by a stop→start: coder stops the workspace before starting
+it with the new parameters (coder#23541, merged 2026-04-01, and titan runs 2.37.4), and the pod is
+`count = start_count`, so the change lands as a new pod rather than a patch to a running one. Disk is
+**immutable**. Kubernetes 1.35 makes in-place resize of a running Guaranteed pod possible and locked
+on, and it is still not used: the pinned kubernetes provider cannot express `resizePolicy`, so a live
+memory shrink would be best-effort and could leave the container capped at the old limit while coder
+showed the new one. A restart has no such window.
+
 ### 9.2 `local-path-retain`, and the proof it requires
 
 A StorageClass with `provisioner: rancher.io/local-path`, the same `nodePath` config as the
@@ -522,4 +530,4 @@ recorded after the fact. So:
 | C10 | Namespaces | `coder` + `coder-workspaces`, both declared centrally |
 | C11 | New offline gate | `make db-url-check`, reference-driven so it cannot pass vacuously |
 | C12 | authentik configuration | Blueprint in git, rendered to a sops Secret, mounted into the worker; `make oidc-check` ties the three copies together |
-| C13 | Workspace sizing (2026-10-12) | Selectable inside the C8 ceiling: 1/2/4 CPU, 2/4/8 Gi, 10/20/40 Gi; defaults 2 / 4 / 40; all immutable, disk one-way at creation |
+| C13 | Workspace sizing (2026-10-12) | Selectable inside the C8 ceiling: 1/2/4 CPU, 2/4/8 Gi, 10/20/40 Gi; defaults 2 / 4 / 40; cores and memory mutable via stop→start, disk immutable and one-way at creation |
