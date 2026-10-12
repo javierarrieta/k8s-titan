@@ -219,10 +219,22 @@ resource "coder_agent" "dev" {
   #
   # Failure is logged rather than fatal: a broken flake should leave a usable workspace, not a
   # workspace that never reaches connected.
+  #
+  # The flake attribute is NOT the one the podman template uses, and the two cannot share one.
+  # nixos-configurations bakes pi's inference endpoint (~/.pi/agent/models.json) at eval time and
+  # lets the declared value win over the file on every switch, so the endpoint has to be chosen
+  # per network location rather than fixed up at runtime. `coder-workspace` points it at
+  # host.containers.internal, which is podman's gateway to llm01 and does not resolve in a k8s pod
+  # at all; `coder-workspace-titan` reaches the same service over the WireGuard mesh instead. See
+  # home/hosts/coder-workspace-titan/userOptions.nix in that repo.
+  #
+  # Ordering: that attribute has to exist on nixos-configurations' default branch before this is
+  # pushed, or the switch fails and every workspace silently boots with stale dotfiles -- the
+  # non-fatal branch above makes a wrong attribute name invisible except in ~/.hm-switch.log.
   startup_script = <<-EOT
     #!/bin/bash
     set -uo pipefail
-    if ! home-manager switch -b pre-hm --flake github:javierarrieta/nixos-configurations#coder-workspace >> /home/coder/.hm-switch.log 2>&1; then
+    if ! home-manager switch -b pre-hm --flake github:javierarrieta/nixos-configurations#coder-workspace-titan >> /home/coder/.hm-switch.log 2>&1; then
       echo "hm-switch failed $(date -u +%FT%TZ)" >> /home/coder/.hm-switch.log
     fi
   EOT
