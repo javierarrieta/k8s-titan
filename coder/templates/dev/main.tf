@@ -1,8 +1,14 @@
 terraform {
   required_providers {
     coder = {
-      source  = "coder/coder"
-      version = ">= 1.0.0"
+      source = "coder/coder"
+      # Bounded for the reason the block below records, and by an incident of its own. `>= 1.0.0`
+      # let every push re-resolve to the newest 2.x, and 2.17.0 had marked coder_agent.dir
+      # deprecated, so a template that was quiet in May emitted three warnings in October with no
+      # commit to show for it. `~> 2.19` admits the 2.x minor that reverts that deprecation and
+      # stops a 3.0 - where a removal would land - from arriving unreviewed. The lock file cannot
+      # do this job: .gitignore excludes it, so nothing here pinned anything before this line.
+      version = "~> 2.19"
     }
     kubernetes = {
       source = "hashicorp/kubernetes"
@@ -203,13 +209,21 @@ resource "coder_agent" "dev" {
   os   = "linux"
   arch = "amd64"
 
-  # Matches the image's WorkingDir and the PVC mount. Without it the agent picks a default that is
-  # not on the persistent volume, and anything it drops there dies with the pod.
+  # Matches the image's WorkingDir and the PVC mount. Without it the agent falls back to
+  # usershell.ResolveWorkingDirectory -> os.UserHomeDir(), which is $HOME, and this container sets
+  # no HOME (the pod's env block carries only CODER_AGENT_TOKEN) — so the landing directory would
+  # be whatever the runtime infers from the image's numeric User=1000:1000. Anything the agent
+  # drops off the PVC dies with the pod, so this stays explicit.
   #
-  # `tofu validate` warns that dir is deprecated. It stays because the pinned coder provider's own
-  # schema lists no replacement — coder_agent exposes dir and nothing like working_folder, read out
-  # of `tofu providers schema -json`. A warning with no available alternative is information, not
-  # debt; when the provider ships a successor field, this is a one-line change.
+  # Provider 2.17-2.19 answer this line with three deprecation warnings. They are noise, not debt,
+  # and the reason is upstream's: the deprecation (terraform-provider-coder#507, May 2026) existed
+  # only because a non-$HOME dir broke Coder Desktop's Mutagen file sync. That bug is fixed in
+  # coder/mutagen#10, so #549 (2026-10-06) reverted the deprecation outright. That fix is tagged
+  # v2.20.0-pre0 alone and the registry has no stable 2.20.0, so `~> 2.19` still resolves to 2.19.0
+  # and these three warnings persist until 2.20.0 ships - then they go away with no edit here.
+  # There is no successor field to migrate to, so do not "fix" this line by
+  # dropping dir or setting it to "$HOME" — the provider never expands that string, Stat("$HOME")
+  # fails and it silently falls back to home.
   dir = "/home/coder"
 
   # Config-only home-manager, same contract as the podman template: software comes from the image,
