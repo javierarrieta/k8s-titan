@@ -13,6 +13,8 @@ resources:
   # order Flux applies in.
   - monitoring/scrape-identity.yaml
   - monitoring/scrape-token.yaml
+  # After the identity it is scraped by: KSM is the thing the proxy grant exists for.
+  - monitoring/kube-state-metrics.yaml
   - reflector/reflector.yaml
   - reloader/reloader.yaml
   - cnpg/operator.yaml

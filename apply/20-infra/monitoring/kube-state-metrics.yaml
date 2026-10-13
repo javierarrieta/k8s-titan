@@ -1,0 +1,95 @@
+# kube-state-metrics on titan, so that casa's shipped kubernetes-apps and
+# kubernetes-resources rule groups mean something here instead of matching zero
+# series. Without it there is no pod-, deployment- or PVC-level signal at all:
+# KubePodCrashLooping, replica shortfalls and KubePersistentVolumeFillingUp all
+# read kube_* families that only KSM emits.
+#
+# It is ClusterIP-only and nothing exposes it. Its metrics leave the cluster
+# through the kube-apiserver service proxy on the already-open :6443, which is
+# why there is no NodePort and no firewall change here: a NodePort would have put
+# an UNAUTHENTICATED full cluster inventory -- pod names, images, env var names,
+# secret names, ingress hosts -- on a port that publicHost.meshTCPPortExtraSources
+# opens to the whole home LAN. See spec D2.
+#
+# fullnameOverride is load-bearing, not cosmetic: casa scrapes this Service by
+# name through the apiserver proxy
+# (/api/v1/namespaces/monitoring/services/http:kube-state-metrics:http/proxy/metrics),
+# and the default name is prefixed with the release name. A release rename would
+# change the Service name and silently drop the target to a 404. Verified against
+# the rendered chart on 2026-10-13: name `kube-state-metrics`, port named `http`,
+# port 8080.
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: HelmRepository
+metadata:
+  name: prometheus-community
+  namespace: monitoring
+spec:
+  interval: 1h
+  type: oci
+  url: oci://ghcr.io/prometheus-community/charts
+---
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: kube-state-metrics
+  namespace: monitoring
+spec:
+  releaseName: ksm
+  chart:
+    spec:
+      chart: kube-state-metrics
+      # 8.6.0 ships kube-state-metrics 2.20.0 via the chart's appVersion; the
+      # image tag is deliberately not pinned a second time.
+      version: "8.6.0"
+      sourceRef:
+        kind: HelmRepository
+        name: prometheus-community
+  interval: 30m
+  driftDetection:
+    mode: enabled
+  install:
+    strategy:
+      name: RetryOnFailure
+      retryInterval: 5m
+  upgrade:
+    strategy:
+      name: RetryOnFailure
+      retryInterval: 5m
+  values:
+    fullnameOverride: kube-state-metrics
+    # One node. Autosharding on a single-node cluster shards work that does not
+    # exist and adds a StatefulSet to reason about.
+    replicas: 1
+    autosharding:
+      enabled: false
+    # No prometheus-operator CRDs exist in titan, and casa is the scraper. Leaving
+    # this on advertises a scrape that nothing here acts on.
+    prometheusScrape: false
+    # Drop the secrets collector, and with it the ClusterRole grant.
+    #
+    # The chart's default collector list includes `secrets`, which makes the
+    # rendered ClusterRole grant cluster-wide get/list/watch on Secrets. KSM itself
+    # only emits metadata (name, labels, size -- never the data), but the grant is
+    # not metadata-scoped: anything that compromises this pod could read every
+    # Secret in titan, which is AUTHENTIK_SECRET_KEY, the coder and CNPG passwords,
+    # the OVH DNS credential and the S3 backup key. That is a straight escalation
+    # path bought for metrics nothing consumes.
+    #
+    # Verified before excluding, not after: zero references to kube_secret_* across
+    # all 45 PrometheusRule objects in casa's monitoring namespace and zero in
+    # k8s-casa/apply. And the exclusion removes BOTH the --resources entry and the
+    # RBAC rule -- re-rendered 2026-10-13, 27 collectors remain and the rendered
+    # ClusterRole no longer mentions secrets at all.
+    collectorsExclude:
+      - secrets
+    rbac:
+      create: true
+    # 23 pods on titan as measured 2026-10-13. KSM's baseline RSS for a cluster
+    # this size is well under the limit; the limit exists so a leak is contained
+    # on a host whose root filesystem is 150 G and whose etcd is on it.
+    resources:
+      requests:
+        memory: 64Mi
+        cpu: 20m
+      limits:
+        memory: 256Mi
