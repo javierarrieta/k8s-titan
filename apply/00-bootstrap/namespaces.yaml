@@ -75,3 +75,23 @@ metadata:
     pod-security.kubernetes.io/warn-version: latest
   annotations:
     kubernetes.io/description: "Coder workspace pods, injected by coder itself"
+---
+# The namespace for the identity k8s-casa's Prometheus scrapes titan with, and for
+# kube-state-metrics. Declared here rather than inside the monitoring manifests for
+# the same reason as every other namespace in this file: the stage order has to be
+# able to depend on it, and a namespace created by the thing that lives in it is a
+# race the kustomize-controller would rather not lose.
+#
+# `monitoring` is also a namespace name casa already uses, which is exactly why
+# every series this cluster emits is stamped cluster=titan -- see
+# docs/titan-metrics-scrape.md before changing any label here.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: monitoring
+  labels:
+    name: monitoring
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: latest
+  annotations:
+    kubernetes.io/description: "The identity k8s-casa scrapes titan with, and kube-state-metrics"

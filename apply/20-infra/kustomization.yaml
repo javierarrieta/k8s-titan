@@ -8,6 +8,13 @@ resources:
   - k8s-reader/clusterrole.yaml
   - k8s-reader/clusterrolebinding.yaml
   - k8s-reader/serviceaccount-token.yaml
+  # Identity before token: the ServiceAccount token controller can only fill the
+  # Secret once the ServiceAccount it names exists, and file order here is the
+  # order Flux applies in.
+  - monitoring/scrape-identity.yaml
+  - monitoring/scrape-token.yaml
+  # After the identity it is scraped by: KSM is the thing the proxy grant exists for.
+  - monitoring/kube-state-metrics.yaml
   - reflector/reflector.yaml
   - reloader/reloader.yaml
   - cnpg/operator.yaml

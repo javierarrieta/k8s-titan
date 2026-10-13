@@ -1,0 +1,87 @@
+# The identity k8s-casa's Prometheus scrapes titan with.
+#
+# This is deliberately NOT k8s-reader. That identity is the one agents investigate
+# with, is Forbidden on Secrets on purpose, and is already held by things this
+# cluster does not control. Widening it for a scrape would couple a monitoring
+# credential to every agent that carries it, and the two grants below are not
+# read-only-inventory grants -- /metrics on the apiserver and the kubelet is a
+# different data surface with a different audience.
+#
+# Three grants, and the reason for each:
+#   nonResourceURLs /metrics   kube-apiserver's /metrics is a non-resource path;
+#                              RBAC for it lives nowhere else.
+#   nodes/metrics              the kubelet authorizes its bearer token with a
+#                              SubjectAccessReview against exactly this subresource.
+#   services/proxy (namespaced) how kube-state-metrics leaves the cluster. See the
+#                              note on the Role below; it is the only reason this
+#                              file touches a namespace-scoped object at all.
+#
+# What this identity cannot do: read any object, in any namespace, including
+# Secrets. It reads metrics and proxies to one Service.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: prometheus-scrape
+  namespace: monitoring
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: prometheus-scrape
+rules:
+  - nonResourceURLs: ["/metrics"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["nodes/metrics"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: prometheus-scrape
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: prometheus-scrape
+subjects:
+  - kind: ServiceAccount
+    name: prometheus-scrape
+    namespace: monitoring
+---
+# No resourceNames here, and that is measured rather than lazy. The apiserver's
+# proxy authorizer puts the RAW PATH SEGMENT into the SubjectAccessReview, so a
+# request to .../services/http:kube-state-metrics:http/proxy/metrics is checked
+# against the resource name "http:kube-state-metrics:http". Pinning
+# resourceNames to that string would work right up until the chart renames its
+# Service port, and then fail as a 403 in a scrape three time zones away. The
+# namespace is the boundary: `monitoring` holds kube-state-metrics and nothing
+# else, so this grants proxy access to exactly one Service either way.
+#
+# Verified on titan (v1.35.8+k3s1, 2026-10-13) with the read-only identity:
+#   kubectl get --raw '/api/v1/namespaces/kube-system/services/http:kube-dns:53/proxy/'
+#   -> Forbidden: services "http:kube-dns:53" is forbidden ... cannot get "services/proxy"
+# The quoted name in that error is the SubjectAccessReview resource name, and it
+# is the whole path segment. That is what this comment is about.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: prometheus-scrape-proxy
+  namespace: monitoring
+rules:
+  - apiGroups: [""]
+    resources: ["services/proxy"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: prometheus-scrape-proxy
+  namespace: monitoring
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: prometheus-scrape-proxy
+subjects:
+  - kind: ServiceAccount
+    name: prometheus-scrape
+    namespace: monitoring
