@@ -266,6 +266,50 @@ Each step is cheap and gates the next. Do not skip V2; it is where two guessed d
   titan `absent()` guard fires; separately confirm `absent(up{job="nonexistent", cluster=""})`
   returns 1, which is the assumption §7.1 rests on. A guard that has never been observed firing is
   a guess.
+
+### Results — measured 2026-10-13, after both PRs merged
+
+**V1 — passed, by a stronger route than planned.** No curl with the token was ever run; the six
+targets came up `up=1` from casa, which proves authentication end-to-end rather than proving one
+endpoint answers.
+
+**V2 — passed, and it is the result that mattered most.** The kube-apiserver service proxy accepts
+the **named-port** form: `services/http:kube-state-metrics:http/proxy/metrics` scrapes successfully
+(`up{job="kube-state-metrics", cluster="titan"} == 1`, 2,027 samples). The merged-registry finding
+holds on titan and is now measured rather than borrowed from casa:
+
+| endpoint | samples |
+|---|---|
+| `:6443/metrics` | 42,322 |
+| `:10257/metrics` | 42,322 |
+| `:10259/metrics` | 42,322 |
+
+Identical counts, so one registry serves all three. `controller_manager_*` on titan: **0 series**,
+which is what the controller-manager keep-list assumed — it drops nothing real. `scheduler_*`:
+715 series, and 715 survive the scheduler keep-list. Without the keep-lists these two jobs would
+have stored ~85k duplicate samples.
+
+**V3 — passed.** Six jobs, all `1`: `apiserver`, `kubelet` ×2 paths, `kube-state-metrics`,
+`kube-controller-manager`, `kube-scheduler`.
+
+**V4 — partial.** Per-target samples are measured (apiserver 42,322 against a 250k limit; KSM
+2,027 against 150k) but `sampleLimit` has **not** been tightened to ~2×. Left deliberately: one
+day of data is not a week, and a limit set too low fails the scrape and pages.
+
+**V5 — the empty-matcher assumption is proven; the drill is still owed.**
+`absent(up{job="definitely-not-a-job", cluster=""})` returns **1**, so every `cluster=""` guard in
+§7.1 rests on something measured rather than reasoned. The deliberate break-a-target drill has not
+been run. The guards were, however, observed firing in the wild within minutes of merge — because
+the first merge set the `job` label on four ScrapeConfigs and not two, so
+`TitanSchedulerScrapeMissing` and `TitanControllerManagerScrapeMissing` went pending for targets
+that were healthy the whole time. A guard proven by a bug is still proven; a guard proven by a bug
+it was supposed to prevent is a lesson.
+
+**One thing V2 did not close, and it is worth stating because the merged registry looks like it
+should have.** `:6443/metrics` carries 7,988 `etcd_*` series. Every one is client-side
+(`etcd_request_duration_seconds`, `etcd_requests_total`, `etcd_bookmark_counts`). There are **zero**
+`etcd_server_*` or `etcd_disk_*` series, so the 15 etcd rules in §4 remain inert. etcd is still not
+monitored on this cluster by anything.
 - **V6 — gates.** k8s-titan: `git add -A && make check` (`kustomize-listing` catches an unlisted
   file; `secrets-placement` rejects a token pasted into `scrape-token.yaml`), plus
   `make dry-run DRYRUN_CONTEXT=<admin context>` — the only check that asks the live API server, and

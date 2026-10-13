@@ -39,6 +39,38 @@ metrics leave the cluster through the kube-apiserver's service proxy on the alre
 and would be unauthenticated, handing every device on the home LAN titan's full cluster
 inventory — pod names, images, env var names, secret names, ingress hosts.
 
+## Measured on the live cluster (2026-10-13)
+
+All six targets, from casa's Prometheus, after both halves merged:
+
+| job | path / port | samples | limit |
+|---|---|---|---|
+| `apiserver` | `:6443/metrics` | 42,322 | 250k |
+| `kubelet` | `:10250/metrics` | 5,352 | 150k |
+| `kubelet` | `:10250/metrics/cadvisor` | 42,322 | 250k |
+| `kube-state-metrics` | `:6443` proxy | 2,027 | 150k |
+| `kube-controller-manager` | `:10257/metrics` | 42,322 scraped → 0 kept | — |
+| `kube-scheduler` | `:10259/metrics` | 42,322 scraped → 715 kept | — |
+
+All `up=1`. `count by (namespace) (kube_pod_status_ready{cluster="titan", condition="true"})`
+returns real namespaces — `auth`, `coder`, `databases`, `cnpg-system`, `flux-system`,
+`cert-manager`, `apps`, `monitoring`, `kube-system`, `coder-workspaces` — so the
+`exported_namespace` trap on the kubelet and kube-state-metrics scrapes did not fire.
+
+**It did fire on the apiserver, for a different reason.** k3s' single registry means `:6443` also
+serves `kubelet_volume_stats_*`, `kubelet_container_log_filesystem_used_bytes` and
+`pv_collector_bound_pvc_count`. Those carry a real namespace, the apiserver target preconfigures
+`namespace: titan` without `honorLabels`, and the preconfigured label wins — 31 titan series and 40
+casa series reported a namespace that was wrong. Fixed by dropping `kubelet_.*|pv_collector_.*` from
+both apiserver targets (k8s-casa#233); the kubelet scrape is the canonical source for those
+families. Check with `count({job="apiserver", exported_namespace!=""})` — it should read zero.
+
+**The guards were observed firing**, though not the way anyone would choose: the first merge set the
+`job` label on four ScrapeConfigs and not two, so `TitanSchedulerScrapeMissing` and
+`TitanControllerManagerScrapeMissing` went pending for targets that were healthy. `absent()` with an
+empty `cluster=""` matcher is also confirmed to return 1 for a job that does not exist, which is the
+assumption every casa-scoped guard rests on.
+
 ## First triage: is it the mesh, titan, or the credentials?
 
 Run this from anywhere with a path to the mesh — **from a host, not a podman container**
@@ -189,27 +221,30 @@ incident; it is the rotation in progress.
 
 Saying this out loud, because an unlisted metric looks exactly like a healthy zero.
 
-- **kube-controller-manager metrics beyond liveness.** The `titan-controller-manager`
-  scrape keeps only `up` and `scrape_*`, because k3s serves one merged metrics registry on
-  6443/10257/10259 and casa measured 54,241 identical samples on all three ports of *its*
-  cluster. That was measured on casa (v1.35.6+k3s1), not on titan (v1.35.8+k3s1). If titan's
-  `:10257` really does carry `controller_manager_*` families, this keep-list drops them and
-  **nothing will ever say so** — `KubeControllerManagerDown` is satisfied by `up` alone.
-  Check before trusting it:
-  `curl -sk -H "Authorization: Bearer $TOK" https://192.168.133.1:10257/metrics | grep -c '^controller_manager_'`
-  (spec §9 check V2). Scheduler is different: `:10259` carries genuinely unique `scheduler_*`
-  families, so those are kept.
-- **`sampleLimit` values are unmeasured placeholders**, generous by design on a Prometheus with
-  a 3 Gi limit and an OOM history. Retune to roughly 2× measured after a week. Know the
-  direction of the risk first: exceeding `sample_limit` **fails the scrape**, so `up` goes to 0
-  and `TargetDown` pages. A limit set too tight fabricates an outage; it does not silently drop
-  samples.
+- **kube-controller-manager metrics beyond liveness — and this one is now measured on titan,
+  not borrowed from casa.** k3s serves one merged registry: `:6443`, `:10257` and `:10259` each
+  return **42,322 samples**, identically. `controller_manager_*` on titan is **0 series**, so the
+  keep-list that retains only `up` and `scrape_*` drops nothing real. Scheduler differs: `scheduler_*`
+  is 715 series and all 715 are kept. Without the keep-lists these two jobs would store ~85k
+  duplicate copies of the apiserver payload.
+- **Nothing that would tighten `sampleLimit` yet.** Measured on day one: apiserver 42,322 against
+  a 250k limit (~6×), kube-state-metrics 2,027 against 150k (~74×). The limits are deliberately
+  loose until a week of data says otherwise. Know the direction of the risk before tightening:
+  exceeding `sample_limit` **fails the scrape**, so `up` goes to 0 and `TargetDown` pages. A limit
+  set too tight fabricates an outage; it does not silently drop samples.
 - **etcd.** k3s binds etcd's `:2381` to loopback (measured: connection refused). Reaching
   it needs a k3s flag change and a restart of the only server. The shipped
   `kube-prometheus-stack-etcd` group holds 15 rules, all keyed on `etcd_*` series or
   `up{job=~".*etcd.*"}`, so with no target they produce nothing and **never fire**. Nothing
   in this stack will tell you titan's embedded etcd is unhealthy. That is silence, not a
   passing check.
+
+  **The merged registry does not rescue this, and it looks like it should.** `:6443/metrics` does
+  carry 7,988 `etcd_*` series — but every one is *client*-side (`etcd_request_duration_seconds`,
+  `etcd_requests_total`, `etcd_bookmark_counts`). Measured across `etcd_server_*`, `etcd_disk_*`,
+  `etcd_cluster_*` and `etcd_network_*`: **zero**. The rules need server metrics; the apiserver
+  exposes the apiserver's own view of etcd. Do not conclude etcd is covered because a query for
+  `etcd_.*` returns thousands of series.
 - **kube-proxy.** There is no such rule to fire: chart 82.18.x ships no kube-proxy rule
   group at all (measured across 45 PrometheusRules / 326 rules in casa's `monitoring`).
   k3s has no kube-proxy — service proxying is kube-router inside `k3s-agent`. The note at
