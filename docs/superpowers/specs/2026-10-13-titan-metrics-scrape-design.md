@@ -1,6 +1,8 @@
 # titan — scraping titan's node and Kubernetes metrics from k8s-casa's Prometheus
 
-Status: **proposed**. Nothing here is implemented. The design was reached by answering three
+Status: **implemented on the `metrics-scrape` branch** — `apply/20-infra/monitoring/` in this repo
+and `apply/50-apps/monitoring/titan-k8s-*.yaml` in k8s-casa. Not live until both trees reach
+`main`, because Flux syncs `main` in both clusters. The design was reached by answering three
 questions in order — where node metrics come from, how much of the k8s surface is wanted, and
 how a component inside titan's cluster gets read from outside it — and each answer invalidated a
 piece of the obvious starting plan.
@@ -149,7 +151,7 @@ was not here for it.
 
 | file | contents |
 |---|---|
-| `apply/00-bootstrap/namespaces.yaml` | add `monitoring`, same shape and annotation style as the existing six |
+| `apply/00-bootstrap/namespaces.yaml` | add `monitoring`, same shape and annotation style as the eight namespaces already there |
 | `apply/20-infra/monitoring/scrape-identity.yaml` | SA `prometheus` in `monitoring`; ClusterRole + Binding with `nonResourceURLs: ["/metrics"] get` and `nodes/metrics get`; Role + Binding in `monitoring` for `services/proxy get` |
 | `apply/20-infra/monitoring/scrape-token.yaml` | the token *request* Secret, no `data` |
 | `apply/20-infra/monitoring/kube-state-metrics.yaml` | `OCIRepository` + `HelmRelease`, `replicas: 1`, ClusterIP `:8080`, small requests |

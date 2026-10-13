@@ -42,6 +42,15 @@ was replaced on 2026-10-05, the cluster archives on the replacement, and the sup
 deleted in IAM on 2026-10-06 — that deletion is the proof the rotation took, since anything still
 using the old key would have stopped archiving).
 
+Metrics: this cluster runs no Prometheus. k8s-casa's central Prometheus pulls node, control-plane,
+kubelet, cAdvisor and kube-state-metrics metrics over the WireGuard mesh from `192.168.133.1`, and
+`docs/titan-metrics-scrape.md` is the runbook. Two things there are load-bearing and easy to undo by
+accident: node metrics come from the NixOS `node_exporter` and never from a DaemonSet (the host owns
+`:9100`, and the `k3s_etcd_snapshot_*` gauges a broken backup depends on cannot be produced by a pod),
+and kube-state-metrics leaves the cluster through the kube-apiserver service proxy rather than a
+NodePort, because `publicHost.meshTCPPortExtraSources` opens mesh ports to the whole home LAN and KSM
+is unauthenticated. etcd is **not** scraped and no rule will ever report it unhealthy.
+
 ## Rules
 
 - Every stage directory has a `kustomization.yaml` listing its resources explicitly.
