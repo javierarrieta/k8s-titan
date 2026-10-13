@@ -90,6 +90,65 @@ spec:
       - configmaps
     rbac:
       create: true
+      # Needed by the customResourceState block below and nothing else. list/watch
+      # on kustomizations only -- not the whole fluxcd API surface, because this
+      # ClusterRole is already cluster-wide and the same reasoning that dropped the
+      # secrets collector applies to over-granting here.
+      extraRules:
+        - apiGroups: ["kustomize.toolkit.fluxcd.io"]
+          resources: ["kustomizations"]
+          verbs: ["list", "watch"]
+    # Emits `gotk_resource_info`, one Info series per Kustomization, carrying the
+    # Ready condition. This is how titan gets Flux alerting: titan runs no
+    # Prometheus, k8s-casa scrapes this Service through the apiserver proxy
+    # (see the header of this file), and the rules live in
+    # k8s-casa/apply/50-apps/monitoring/flux-alerts.yaml with cluster=titan.
+    #
+    # WHY NOT FLUX'S OWN METRICS: kustomize-controller v1.9.6 exposes no per-object
+    # state. Measured against titan's live controller on 2026-10-13 -- `:8080/metrics`
+    # has `gotk_reconcile_duration_seconds` and the controller-runtime set and
+    # nothing else Flux-specific. There is no `flux_kustomization_*` family and no
+    # `gotk_reconcile_condition` (removed in v1.8.0).
+    #
+    # NOT `--custom-resource-state-only=true`, which the upstream flux example sets:
+    # it would turn off every `kube_*` collector, and casa's titan-k8s-guards.yaml
+    # and the pod-level Flux rules depend on them.
+    #
+    # Cost: 5 Kustomizations on titan as measured 2026-10-13, so ~5 series at
+    # casa's 60s scrape. The scrape's sampleLimit is 150000 and the current
+    # payload is nowhere near it.
+    customResourceState:
+      enabled: true
+      config:
+        spec:
+          resources:
+            - groupVersionKind:
+                group: kustomize.toolkit.fluxcd.io
+                version: v1
+                kind: Kustomization
+              metricNamePrefix: gotk
+              metrics:
+                - name: "resource_info"
+                  help: "The current state of a Flux Kustomization resource."
+                  each:
+                    type: Info
+                    info:
+                      labelsFromPath:
+                        name: [metadata, name]
+                  labelsFromPath:
+                    # `exported_namespace`, not `namespace`: a CR-state series gets
+                    # no `namespace` label from KSM, and casa's Alertmanager inhibit
+                    # rules key on [namespace, cluster]. The rules there copy it
+                    # into `namespace`; do not "fix" that here by renaming it, or
+                    # every Flux alert from titan lands in the empty-namespace
+                    # inhibit group.
+                    exported_namespace: [metadata, namespace]
+                    ready: [status, conditions, "[type=Ready]", status]
+                    # Absent unless spec.suspend is set, so consumers filter
+                    # suspended!="true", never suspended="false".
+                    suspended: [spec, suspend]
+                    revision: [status, lastAppliedRevision]
+                    source_name: [spec, sourceRef, name]
     # 23 pods on titan as measured 2026-10-13. KSM's baseline RSS for a cluster
     # this size is well under the limit; the limit exists so a leak is contained
     # on a host whose root filesystem is 150 G and whose etcd is on it.
