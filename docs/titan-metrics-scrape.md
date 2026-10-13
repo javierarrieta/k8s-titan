@@ -82,27 +82,35 @@ a valid token whose RBAC is missing a grant — check `apply/20-infra/monitoring
 - **It is not `k8s-reader`.** That identity is the read-only investigation identity and is
   deliberately Forbidden on Secrets; keeping the two apart is the point.
 
-### Minting it for the first time
+### Getting the token — Flux applies it, nobody hand-applies
 
 The git file is a *request*, not a token: it carries no `data`, which is what lets
-`make secrets-placement` allow it. The token controller fills it once the ServiceAccount
-exists, so order matters — identity first, then the request.
+`make secrets-placement` allow it. Merge to `main` and the chain fills itself — Flux applies the
+ServiceAccount, then the request, then the token controller populates `.data.token`. Ordering is
+handled by the stage graph, not by a human holding `kubectl apply`.
 
 ```bash
-# On titan, with an admin context. Either merge the branch and let Flux apply it, or:
-kubectl --context <admin> apply -f apply/20-infra/monitoring/scrape-identity.yaml
-kubectl --context <admin> apply -f apply/20-infra/monitoring/scrape-token.yaml
-
-# The controller fills .data.token asynchronously; poll rather than guess a sleep.
-for i in $(seq 1 30); do
-  T=$(kubectl --context <admin> -n monitoring get secret scrape-token -o jsonpath='{.data.token}' 2>/dev/null)
-  [ -n "$T" ] && break; sleep 1
-done; echo "token: ${#T} chars of base64"
+# 1. merge the titan branch, then watch titan's Flux do the work
+kubectl --context k8s-titan -n flux-system get kustomization infra -o wide
+kubectl --context k8s-titan -n monitoring get sa,role,rolebinding | grep prometheus-scrape
+kubectl --context k8s-titan -n monitoring get helmrelease kube-state-metrics
 ```
 
-An empty `$T` after 30s means the controller never picked the Secret up — almost always a
-misspelled `kubernetes.io/service-account.name` annotation or a ServiceAccount that does not
-exist yet. It fails by staying empty, not by erroring.
+The read-only `k8s-reader` context sees all of that — it is admin-minus-Secrets — but the token
+is the one thing it is Forbidden on, so the operator's part is exactly one read and no apply:
+
+```bash
+# 2. the only step that needs an admin context
+T=$(kubectl --context <admin> -n monitoring get secret scrape-token -o jsonpath='{.data.token}')
+```
+
+Empty means the controller has not filled it yet, or `kubernetes.io/service-account.name` does
+not name a real ServiceAccount. It fails by staying empty rather than by erroring, so confirm
+the ServiceAccount exists before re-reading.
+
+**Why the filled token survives every later reconcile**, which is the question this raises: the
+token is not in git, so Flux's server-side apply never declares `data` and never claims that
+field — the token controller owns it. Re-applying the manifest does not blank it.
 
 Prove the grants before moving the value anywhere. `200` is the only acceptable answer:
 
@@ -145,12 +153,15 @@ and must be committed. If you shred the encrypted file by mistake, re-run the `c
 ### Rotating it
 
 ```bash
-# 1. on titan, with an admin context
-kubectl -n monitoring delete secret scrape-token
-kubectl -n monitoring get secret scrape-token -o jsonpath='{.data.token}'   # controller refills it
+# 1. on titan, with an admin context. The Secret object itself is Flux-owned, so deleting it
+# leaves it absent until Flux reconciles -- either wait for the sync interval or ask Flux now.
+kubectl --context <admin> -n monitoring delete secret scrape-token
+flux --context <admin> --namespace flux-system reconcile kustomization infra --with-source
+kubectl --context <admin> -n monitoring get secret scrape-token -o jsonpath='{.data.token}'
 
-# 2. in k8s-casa: re-stage, re-encrypt, commit
-B64=$(printf '%s' "$NEW_TOKEN" | base64 -w0)   # then edit apply/01-secrets/monitoring/titan-scrape-token-secrets.yaml
+# 2. in k8s-casa: re-stage (data: wants base64, and the value above already is base64),
+#    re-encrypt, commit
+#    apply/01-secrets/monitoring/titan-scrape-token-secrets.yaml -> data.token: <new value>
 sops --encrypt --in-place apply/01-secrets/monitoring/titan-scrape-token-secrets.yaml
 make validate
 ```
