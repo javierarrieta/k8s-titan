@@ -1,0 +1,26 @@
+# Long-lived API credential for the prometheus-scrape ServiceAccount.
+#
+# This Secret carries NO data in git. It is a token *request*: the
+# ServiceAccount token controller populates it in-cluster. That is the only
+# reason it is allowed to live outside apply/10-secrets, and `make
+# secrets-placement` enforces exactly that -- it exempts a Secret only while it
+# is typed kubernetes.io/service-account-token AND has no data/stringData, so
+# pasting a real token into this file fails the gate.
+#
+# The real value lives in k8s-casa, sops-encrypted, because ScrapeConfig has no
+# credentialsFile: auth there is Secret-only. Read it out with an admin context:
+#   kubectl -n monitoring get secret scrape-token -o jsonpath='{.data.token}' | base64 -d
+#
+# Rotate by deleting it and letting the controller recreate it, then re-copy into
+# k8s-casa -- docs/titan-metrics-scrape.md is the runbook. Until the new value
+# lands there, titan's six targets return 401 and TargetDown fires.
+#
+# This token does not expire.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: scrape-token
+  namespace: monitoring
+  annotations:
+    kubernetes.io/service-account.name: prometheus-scrape
+type: kubernetes.io/service-account-token
