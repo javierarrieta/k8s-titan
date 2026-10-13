@@ -119,7 +119,7 @@ fine on your laptop and fails in the cluster:
 
 ```bash
 grep -oE 'age1[a-z0-9]{12}' apply/10-secrets/ovh-domain-secrets.yaml | sort -u
-grep -oE 'age1[a-z0-9]{12}' .sops.yaml | sort -u    # must print the same four
+grep -oE 'age1[a-z0-9]{12}' .sops.yaml | sort -u    # must print the same five
 ```
 
 ## 3. Confirm it works in the cluster

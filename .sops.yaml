@@ -4,6 +4,7 @@ creation_rules:
       - age:
         - age1t5z4ef69wlwewylplzr5pphrgwn5weqetkrmyuel9p8qr9p7j39q5ux7ak  # titan-k8s cluster key (private key lives in the cluster only)
         - age1m5w6y8mh0cq00w8k3du5fk3ct92pyr5z3kdy9ww5w7avgwycgdtq2ezmt3  # Coder workspace (gray-sailfish-49)
+        - age1et4nveeh9wlsk4el5kaww60fy3n7vgylxejfte9y7qgv0d4e0d2qj5slae  # Coder workspace (dev.titan)
         - age1wynx7pnkg8z6n20zxg2krecmgyy5gdlj6xrs2tmfjctefy2xwv3qa2v24g  # MacBook Air
         - age1ewq0v3rjm0y4m86xq9z555weuspsklz4sz07emhx4awqttjd9sjqnf2t3u  # MacBook Pro
     encrypted_regex: "^(data|stringData)$"
