@@ -82,6 +82,66 @@ a valid token whose RBAC is missing a grant — check `apply/20-infra/monitoring
 - **It is not `k8s-reader`.** That identity is the read-only investigation identity and is
   deliberately Forbidden on Secrets; keeping the two apart is the point.
 
+### Minting it for the first time
+
+The git file is a *request*, not a token: it carries no `data`, which is what lets
+`make secrets-placement` allow it. The token controller fills it once the ServiceAccount
+exists, so order matters — identity first, then the request.
+
+```bash
+# On titan, with an admin context. Either merge the branch and let Flux apply it, or:
+kubectl --context <admin> apply -f apply/20-infra/monitoring/scrape-identity.yaml
+kubectl --context <admin> apply -f apply/20-infra/monitoring/scrape-token.yaml
+
+# The controller fills .data.token asynchronously; poll rather than guess a sleep.
+for i in $(seq 1 30); do
+  T=$(kubectl --context <admin> -n monitoring get secret scrape-token -o jsonpath='{.data.token}' 2>/dev/null)
+  [ -n "$T" ] && break; sleep 1
+done; echo "token: ${#T} chars of base64"
+```
+
+An empty `$T` after 30s means the controller never picked the Secret up — almost always a
+misspelled `kubernetes.io/service-account.name` annotation or a ServiceAccount that does not
+exist yet. It fails by staying empty, not by erroring.
+
+Prove the grants before moving the value anywhere. `200` is the only acceptable answer:
+
+```bash
+printf -v TOK '%s' "$(printf %s "$T" | base64 -d)"
+curl -m 8 -sk -o /dev/null -w 'apiserver  %{http_code}\n' -H "Authorization: Bearer $TOK" https://192.168.133.1:6443/metrics
+curl -m 8 -sk -o /dev/null -w 'kubelet    %{http_code}\n' -H "Authorization: Bearer $TOK" https://192.168.133.1:10250/metrics
+```
+
+`403` means the token is valid and RBAC is missing a grant; `401` means it is not the token the
+cluster issued. The kube-state-metrics proxy path 404s until the chart is actually running —
+that is a missing workload, not a broken grant.
+
+Then carry it to casa. `data:` wants base64 and `$T` already is base64, so do **not** re-encode
+it. Keep it out of shell history and out of any chat transcript:
+
+```bash
+cd ~/k8s-casa && git checkout metrics-scrape && umask 077
+cat > apply/01-secrets/monitoring/titan-scrape-token-secrets.yaml <<EOF
+apiVersion: v1
+kind: Secret
+metadata:
+  name: titan-scrape-token
+  namespace: monitoring
+type: Opaque
+data:
+  token: $T
+EOF
+sops --encrypt --in-place apply/01-secrets/monitoring/titan-scrape-token-secrets.yaml
+make validate            # proves it decrypts and the MAC is valid
+git add apply/01-secrets/monitoring/titan-scrape-token-secrets.yaml
+```
+
+Once `sops --encrypt` has run, that file *is* the artifact — commit it, do not delete it. If you
+need to abort instead, `shred -u` the plaintext file before encrypting, and clear `T`/`TOK`.
+
+The last line only applies *before* encryption; after `sops --encrypt` the file is the artifact
+and must be committed. If you shred the encrypted file by mistake, re-run the `cat` block.
+
 ### Rotating it
 
 ```bash
