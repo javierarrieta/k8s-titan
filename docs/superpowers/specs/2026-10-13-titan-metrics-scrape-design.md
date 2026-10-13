@@ -223,10 +223,12 @@ so it ships as its own commit **after** the scrape is live and its labels are co
 
 ### 7.3 Rules expected to misfire, and the policy about them
 
-`KubeProxyDown` — k3s has no kube-proxy at all; already a documented false positive in casa. The
-etcd rule group stays inactive per §3. Rather than pre-emptively muting, the policy is: ship, let a
-few days pass, read what actually fires for `cluster="titan"`, and suppress only what is
-demonstrably wrong. A rule muted on a guess is a rule nobody will ever re-enable.
+Re-measured against the live rule set on 2026-10-13, which corrected two assumptions made earlier in this spec:
+
+- **`KubeProxyDown` does not exist.** Chart 82.18.x ships no kube-proxy rule group at all — measured across all 45 `PrometheusRule` objects and 326 rules in casa's `monitoring` namespace, zero rules whose name mentions proxy. The note at the bottom of `k3s-control-plane-scrape.yaml` describing it as a standing false positive is stale relative to the current chart pin. Nothing to mute, and nothing that was ever firing.
+- **The etcd group exists but is inert, not wrong.** `kube-prometheus-stack-etcd` holds 15 rules, every one keyed on `etcd_*` series or on `up{job=~".*etcd.*"}` sums. With no etcd target on either cluster they produce no series and never fire — including `etcdMembersDown`, whose `up{job=~".*etcd.*"} == bool 0` needs a target to be false about. So the etcd gap is **silence, not noise**: no rule will ever tell you titan's embedded etcd is unhealthy. That is a real hole, it is what §3 is declining, and it should be read as a cost rather than as a passing check.
+
+Rather than pre-emptively muting, the policy is: ship, let a few days pass, read what actually fires for `cluster="titan"`, and suppress only what is demonstrably wrong. A rule muted on a guess is a rule nobody will ever re-enable.
 
 ## 8. Failure modes
 
