@@ -98,7 +98,8 @@ transits the apiserver every 30s, and KSM visibility dies with the apiserver —
 apiserver watcher and is useless in that moment anyway. In exchange, no firewall change, no new
 port, and no unauthenticated listener.
 
-**D3 — kube-state-metrics is a `HelmRelease` from an `OCIRepository`, semver-pinned.**
+**D3 — kube-state-metrics is a `HelmRelease` pulling from the OCI chart repository** (`HelmRepository`
+with `type: oci`, which is the OCI form without a separate `OCIRepository` object)**, semver-pinned.**
 Consistent with cert-manager and the CNPG operator in this repo, and it gets `driftDetection:
 enabled` for free. `replicas: 1`, autosharding off — one node. Rejected: a hand-written Deployment
 (fewer lines, but this repo's third-party software comes through Flux's Helm machinery) and the
@@ -152,9 +153,9 @@ was not here for it.
 | file | contents |
 |---|---|
 | `apply/00-bootstrap/namespaces.yaml` | add `monitoring`, same shape and annotation style as the eight namespaces already there |
-| `apply/20-infra/monitoring/scrape-identity.yaml` | SA `prometheus` in `monitoring`; ClusterRole + Binding with `nonResourceURLs: ["/metrics"] get` and `nodes/metrics get`; Role + Binding in `monitoring` for `services/proxy get` |
+| `apply/20-infra/monitoring/scrape-identity.yaml` | SA `prometheus-scrape` in `monitoring`; ClusterRole + Binding with `nonResourceURLs: ["/metrics"] get` and `nodes/metrics get`; Role + Binding in `monitoring` for `services/proxy get` |
 | `apply/20-infra/monitoring/scrape-token.yaml` | the token *request* Secret, no `data` |
-| `apply/20-infra/monitoring/kube-state-metrics.yaml` | `OCIRepository` + `HelmRelease`, `replicas: 1`, ClusterIP `:8080`, small requests |
+| `apply/20-infra/monitoring/kube-state-metrics.yaml` | `HelmRepository` (`type: oci`) + `HelmRelease`, `replicas: 1`, ClusterIP `:8080`, small requests |
 | `apply/20-infra/kustomization.yaml` | **list all four.** `make kustomize-listing` exists because `coder-db.yaml` was committed, built green, reviewed green, and named by nothing |
 
 **k8s-casa**

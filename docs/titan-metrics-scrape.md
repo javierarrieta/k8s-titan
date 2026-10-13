@@ -22,7 +22,7 @@ on titan itself.
 | cAdvisor | `ScrapeConfig/titan-kubelet-cadvisor` | `:10250/metrics/cadvisor` | bearer token |
 | kube-controller-manager | `ScrapeConfig/titan-controller-manager` | `:10257/metrics` | bearer token |
 | kube-scheduler | `ScrapeConfig/titan-scheduler` | `:10259/metrics` | bearer token |
-| kube-state-metrics | `ScrapeConfig/titan-k8s-scrape` → `titan-kube-state-metrics` | `:6443` service proxy | bearer token |
+| kube-state-metrics | `ScrapeConfig/titan-kube-state-metrics` | `:6443` service proxy | bearer token |
 
 Two things about that list are easy to get wrong:
 
@@ -159,12 +159,26 @@ kubectl --context <admin> -n monitoring delete secret scrape-token
 flux --context <admin> --namespace flux-system reconcile kustomization infra --with-source
 kubectl --context <admin> -n monitoring get secret scrape-token -o jsonpath='{.data.token}'
 
-# 2. in k8s-casa: re-stage (data: wants base64, and the value above already is base64),
-#    re-encrypt, commit
-#    apply/01-secrets/monitoring/titan-scrape-token-secrets.yaml -> data.token: <new value>
+# 2. in k8s-casa: overwrite the file with fresh plaintext, THEN encrypt. Running
+#    `sops --encrypt --in-place` on a file that is already encrypted double-encrypts
+#    it and the result decrypts to garbage -- re-stage from scratch, do not edit in place.
+cd ~/k8s-casa && umask 077
+T=$(kubectl --context <admin> -n monitoring get secret scrape-token -o jsonpath='{.data.token}')
+cat > apply/01-secrets/monitoring/titan-scrape-token-secrets.yaml <<EOF
+apiVersion: v1
+kind: Secret
+metadata:
+  name: titan-scrape-token
+  namespace: monitoring
+type: Opaque
+data:
+  token: $T
+EOF
 sops --encrypt --in-place apply/01-secrets/monitoring/titan-scrape-token-secrets.yaml
 make validate
 ```
+
+`data:` wants base64 and the value read above already is base64 — do not re-encode it.
 
 **The consequence window is real and expected:** between the delete and casa's apply, all
 six authenticated targets return 401. `up` still exists — it is `0` — so every `absent()`
@@ -175,6 +189,21 @@ incident; it is the rotation in progress.
 
 Saying this out loud, because an unlisted metric looks exactly like a healthy zero.
 
+- **kube-controller-manager metrics beyond liveness.** The `titan-controller-manager`
+  scrape keeps only `up` and `scrape_*`, because k3s serves one merged metrics registry on
+  6443/10257/10259 and casa measured 54,241 identical samples on all three ports of *its*
+  cluster. That was measured on casa (v1.35.6+k3s1), not on titan (v1.35.8+k3s1). If titan's
+  `:10257` really does carry `controller_manager_*` families, this keep-list drops them and
+  **nothing will ever say so** — `KubeControllerManagerDown` is satisfied by `up` alone.
+  Check before trusting it:
+  `curl -sk -H "Authorization: Bearer $TOK" https://192.168.133.1:10257/metrics | grep -c '^controller_manager_'`
+  (spec §9 check V2). Scheduler is different: `:10259` carries genuinely unique `scheduler_*`
+  families, so those are kept.
+- **`sampleLimit` values are unmeasured placeholders**, generous by design on a Prometheus with
+  a 3 Gi limit and an OOM history. Retune to roughly 2× measured after a week. Know the
+  direction of the risk first: exceeding `sample_limit` **fails the scrape**, so `up` goes to 0
+  and `TargetDown` pages. A limit set too tight fabricates an outage; it does not silently drop
+  samples.
 - **etcd.** k3s binds etcd's `:2381` to loopback (measured: connection refused). Reaching
   it needs a k3s flag change and a restart of the only server. The shipped
   `kube-prometheus-stack-etcd` group holds 15 rules, all keyed on `etcd_*` series or

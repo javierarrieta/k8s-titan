@@ -78,10 +78,16 @@ spec:
     # Verified before excluding, not after: zero references to kube_secret_* across
     # all 45 PrometheusRule objects in casa's monitoring namespace and zero in
     # k8s-casa/apply. And the exclusion removes BOTH the --resources entry and the
-    # RBAC rule -- re-rendered 2026-10-13, 27 collectors remain and the rendered
-    # ClusterRole no longer mentions secrets at all.
+    # RBAC rule -- re-rendered 2026-10-13, 26 collectors remain and the rendered
+    # ClusterRole mentions neither secrets nor configmaps.
+    #
+    # configmaps goes for the same reason, added on review rather than originally:
+    # it is the identical grant shape -- cluster-wide get/list/watch so the collector
+    # can emit metadata -- and kube_configmap_* has zero consumers in casa too.
+    # Leaving it in would have been an inconsistency dressed as a decision.
     collectorsExclude:
       - secrets
+      - configmaps
     rbac:
       create: true
     # 23 pods on titan as measured 2026-10-13. KSM's baseline RSS for a cluster
