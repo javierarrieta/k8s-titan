@@ -40,3 +40,6 @@ resources:
   # in dependency order - redis before fleet-telemetry, the telemetry pipeline before the forwarder,
   # the forwarder before TeslaMate itself.
   - tesla/teslamate-db.yaml
+  # The public-key server next: Tesla will not finish pairing until it answers, and nothing
+  # else here depends on it, so it is early rather than buried behind the telemetry chain.
+  - tesla/wellknown.yaml
