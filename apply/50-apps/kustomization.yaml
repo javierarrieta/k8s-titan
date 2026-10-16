@@ -60,3 +60,7 @@ resources:
   # id. That last one is why it cannot start earlier — a missing Secret is a Pending pod, which is
   # the loud failure; a placeholder client id would have been the silent one.
   - tesla/teslamate.yaml
+  # Grafana last: it reads the same teslamate-secrets password as TeslaMate and the same CNPG
+  # database, and adds the only stateful volume in this group. Its admin password comes from
+  # tesla-grafana-admin because the upstream image ships admin/admin in its own ENV.
+  - tesla/grafana.yaml

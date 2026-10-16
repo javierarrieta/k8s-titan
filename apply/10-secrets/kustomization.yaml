@@ -40,9 +40,11 @@ resources:
   # cross-check compares, for the same reason make db-url-check exists for coder.
   - teslamate-secrets.yaml
   - teslamate-db-credentials.yaml
-  # tesla-wellknown.yaml is deliberately NOT listed: it does not exist yet. It holds the Tesla
-  # application's PUBLIC key, which only exists once the operator has minted the keypair
-  # (scripts/setup-tesla-secrets.sh --genkey) and registered it with Tesla. Listing it now would
-  # break `kustomize build` on a missing file - a manifest nobody has written is worse than a
-  # manifest nobody listed, because it fails the whole stage rather than one app. When the script
-  # writes it, add the line here; `make secrets-placement` fails until you do.
+  - tesla-grafana-admin.yaml
+  # tesla-wellknown.yaml and tesla-oauth.yaml are deliberately NOT listed: they do not exist yet.
+  # They hold the Tesla application's PUBLIC key and its OAuth client id, neither of which exists
+  # until the operator has minted the keypair (scripts/setup-tesla-secrets.sh --genkey) and
+  # registered the application with Tesla. Listing them now would break `kustomize build` on a
+  # missing file - a manifest nobody has written is worse than a manifest nobody listed, because it
+  # fails the whole stage rather than one app. When the script writes them, add the two lines here;
+  # `make secrets-placement` fails until you do.
