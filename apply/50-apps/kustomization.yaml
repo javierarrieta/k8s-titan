@@ -50,3 +50,8 @@ resources:
   # The bridge before the forwarder that POSTs to it: the forwarder retries with backoff, so this
   # order only avoids a noisy first minute.
   - tesla/streaming.yaml
+  # The forwarder last of the telemetry chain: it is the only consumer of the redis channel and the
+  # only client of the bridge, so starting it before either exists is a restart loop rather than a
+  # race. Its script lives in this file as a ConfigMap, and scripts/tesla-forwarder-tests.sh runs
+  # those exact bytes on every `make check`.
+  - tesla/forwarder.yaml

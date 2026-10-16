@@ -6,7 +6,7 @@
 
 **Architecture:** TeslaMate polls the EU Fleet API with deliberately coarse intervals while a self-hosted `fleet-telemetry` server receives realtime signals pushed directly from the car. fleet-telemetry dispatches each record to an in-cluster Redis; a dependency-free Node forwarder subscribes to Redis and re-POSTs each record to the MyTeslaMate websocket bridge, which speaks the old streaming protocol to TeslaMate. Everything lands in the shared CNPG Postgres, which is already backed up to S3.
 
-**Tech Stack:** k3s v1.35.x + Traefik 3.7.8, Flux v2 (Kustomization only — no HelmRelease in this plan), CloudNativePG 1.30.x, `tesla/fleet-telemetry:v0.9.5`, `ghcr.io/myteslamate/websocket:0.1.0`, `teslamate/teslamate:4.3.0`, `teslamate/grafana:4.3.0`, `library/redis:8.8.3-alpine`, `library/node:22-alpine`, sops+age.
+**Tech Stack:** k3s v1.35.x + Traefik 3.7.8, Flux v2 (Kustomization only — no HelmRelease in this plan), CloudNativePG 1.30.x, `tesla/fleet-telemetry:v0.9.5`, `ghcr.io/myteslamate/websocket:0.1.2`, `teslamate/teslamate:4.3.0`, `teslamate/grafana:4.3.0`, `library/redis:8.8.3-alpine`, `library/node:22-alpine`, sops+age.
 
 **Spec:** `docs/superpowers/specs/2026-10-16-titan-teslamate-fleet-telemetry-design.md` — read it alongside this plan. It carries the pricing arithmetic (§2), the decision table (§3) and the not-proven list (§9); this plan argues from it and does not repeat the reasoning.
 
@@ -69,6 +69,7 @@ The five things no task's own test catches by construction, most likely to bite 
 | `apply/50-apps/tesla/fleet-telemetry.yaml` | fleet-telemetry Deployment + config + Service + `IngressRouteTCP` passthrough |
 | `apply/50-apps/tesla/streaming.yaml` | MyTeslaMate websocket bridge + Ingress |
 | `apply/50-apps/tesla/forwarder.yaml` | the Node forwarder + its script ConfigMap |
+| `scripts/tesla-forwarder-tests.sh` | runs the shipped forwarder script — parser unit tests plus an end-to-end run against a fake Redis and a fake bridge; added during execution, wired into `check` and `check-ci` |
 | `apply/50-apps/tesla/teslamate.yaml` | TeslaMate Deployment + Service + Ingress |
 | `apply/50-apps/tesla/grafana.yaml` | Grafana PVC + Deployment + Service + Ingress |
 | `apply/50-apps/kustomization.yaml` | lists all eight new files, in apply order |
@@ -582,7 +583,7 @@ spec:
     spec:
       containers:
       - name: websocket
-        image: ghcr.io/myteslamate/websocket:0.1.0
+        image: ghcr.io/myteslamate/websocket:0.1.2@sha256:3d8b98e1df946d656814d428b5f0d9e2f246b55228ea0253f7884323f22f673f
         ports: [{containerPort: 8081, name: http}]
         env:
         - name: ENFORCE_TOKEN
@@ -832,66 +833,43 @@ spec:
 
 `node:22-alpine` is the only floating tag in this plan's inventory — no `node:22.20.x-alpine3.23` exists on Docker Hub (*verified*: the exact-patch tag 404s) — so Step 4 pins it by digest, which is the only way to make a moving alpine tag reproducible.
 
-- [ ] **Step 3: Unit-test the parser before it touches the cluster**
+- [ ] **Step 3: Test the parser and the whole process before it touches a cluster**
 
-This was run while writing the plan and it is the cheapest real proof in the whole plan, because a parser that mangles bulk strings fails silently in production. Split the script at the `// Serialised:` line — everything above it is pure functions with no side effects — and drive it directly:
+This became `scripts/tesla-forwarder-tests.sh`, wired into `make check` and `make check-ci`, rather
+than a step you run once by hand — a parser that mangles bulk strings fails silently in production,
+so it needs a gate and not a checklist item. It reads the script **out of
+`apply/50-apps/tesla/forwarder.yaml`**, so it tests the bytes that ship and cannot drift from them.
+
+Two layers:
+
+1. the RESP parser, required directly (everything above the `// Serialised:` marker is pure): full
+   pmessage consumed exactly, incomplete reply returns `null`, two replies coalesced into one read
+   both parsed, `+`/`:`/`-` replies, and a bulk string of `0xC3 0x28 0xA0 0x00 0xFF` surviving
+   byte-for-byte. That last one is Review Focus 1 made executable.
+2. the whole process, spawned for real against a fake Redis and a fake bridge on localhost, asserting
+   that it PSUBSCRIBEs first, that one published record becomes exactly one `POST`, that the body is
+   `{message:{data}}`, and that base64-decoding `data` reproduces the payload byte-for-byte with a
+   readable `vin` — which is precisely what the bridge's `app.post("/")` needs in order to route the
+   frame at all.
 
 ```bash
-awk '/^\/\/ Serialised:/{exit} {print}' /tmp/tesla-forwarder.js > /tmp/fwd-head.js
-echo 'module.exports = { read, encode };' >> /tmp/fwd-head.js
+make tesla-forwarder-test
 ```
 
-Then `test.js`, which builds every reply with `encode()` so no hand-counted byte length can be wrong:
-
-```js
-const { read, encode } = require('/tmp/fwd-head.js');
-const mk = (...p) => Buffer.from(encode(...p));
-
-const reply = mk('pmessage','tesla_telemetry_V_*','tesla_telemetry_V_{TEST}','hi');
-const [v, n] = read(reply, 0);
-console.assert(n === reply.length, 'consumed the whole reply');
-console.assert(v.length === 4 && v[0].toString() === 'pmessage' && v[3].toString() === 'hi', 'pmessage decoded');
-console.assert(Buffer.isBuffer(v[3]), 'bulk string is a Buffer, not a string');
-console.assert(read(reply.subarray(0, 20), 0) === null, 'incomplete reply returns null');
-
-const cmd = Buffer.from(encode('PSUBSCRIBE','tesla_telemetry_V_*'));
-const [ev, en] = read(cmd, 0);
-console.assert(ev[1].toString() === 'tesla_telemetry_V_*' && en === cmd.length, 'encode/read round-trip');
-
-const rec = mk('pmessage','*','tesla_telemetry_V_{ABC}','{"a":1}');
-const two = Buffer.concat([rec, rec]);
-const a = read(two, 0), b = read(two, a[1]);
-console.assert(a[0][3].toString()==='{"a":1}' && b[0][3].toString()==='{"a":1}', 'two replies in one buffer');
-
-console.assert(read(Buffer.from('+PONG\r\n'),0)[0] === 'PONG', 'simple string');
-console.assert(read(Buffer.from(':42\r\n'),0)[0] === '42', 'integer');
-console.log('all asserts passed');
-```
-
-Expected: `all asserts passed`, nothing else. Two things this is checking that are easy to get wrong, both found while writing it: array elements come back as **`Buffer`**, so `v[0] === 'pmessage'` is false and only `v[0].toString()` works (the script's `handle()` does this — do not "simplify" it); and `encode()` is only ever called with strings, so do not feed it binary in a test, because `${Buffer}` stringifies and the failure you see is the harness, not the parser.
-
-Binary safety needs the raw reply built by hand, since `encode` cannot carry it:
-
-```js
-const bin = Buffer.from([0xC3,0x28,0xA0,0x00,0xFF]);   // invalid UTF-8 + NUL
-let s = '*4\r\n';
-for (const p of ['pmessage','*','ch:x']) s += `$${Buffer.byteLength(p)}\r\n${p}\r\n`;
-s += `$${bin.length}\r\n`;
-const buf = Buffer.concat([Buffer.from(s,'utf8'), bin, Buffer.from('\r\n')]);
-const [v, n] = read(buf, 0);
-console.assert(n === buf.length && v[3].equals(bin), 'invalid UTF-8 preserved byte-for-byte');
-```
-
-Expected: silent pass. This is the assert that protects Review Focus 1.
+Expected: five parser assertions and one end-to-end assertion, all `ok`. Two traps this caught while
+being written, both worth knowing before "simplifying" anything: array elements come back as
+**`Buffer`**, so `v[0] === 'pmessage'` is false and only `v[0].toString()` works (the script's
+`handle()` does this deliberately); and the fake server must build its replies with a real encoder,
+because a hand-counted `$9` for `psubscribe` (ten characters) desyncs the parser — and the forwarder
+correctly throws the garbage buffer away, which is the forwarder working and the test being wrong.
 
 - [ ] **Step 4: Pin the digest, then gates and commit**
 
-```bash
-digest=$(docker buildx imagetools inspect library/node:22-alpine 2>/dev/null | awk '/^Digest:/{print $2}')
-echo "pin node:22-alpine to ${digest:?resolve the digest from the registry manifest}" && exit 1
-```
-
-The `exit 1` is deliberate: it stops the task until a real digest is written into the manifest. Docker is not installed on this workspace (*verified*), so resolve the digest from the registry with `gh api` or a `curl` against `ghcr`/`registry-1.docker.io` and paste it. Then:
+Docker is not installed on this workspace (*verified*), so resolve the digest from the registry API:
+request a scoped pull token from `auth.docker.io`, `HEAD`/`GET` the manifest with the index
+`Accept` types, and read `Docker-Content-Digest`. The value to pin is the **top-level** digest (the
+index), not the amd64 child — the child is what you read the image `User` from, which is a different
+question. Then:
 
 ```bash
 git add -A && make check-ci && make dry-run DRYRUN_CONTEXT=<admin context>
@@ -906,14 +884,18 @@ No car needed. Start a websocket subscriber, publish a record shaped like fleet-
 node -e '
 const WebSocket = require("ws");
 const ws = new WebSocket("wss://streaming.titan.arrieta.eu/streaming/");
-ws.on("open", () => ws.send(JSON.stringify({msg_type:"data:subscribe_all", tag:"TESTVIN"})));
+// data:subscribe_oauth, not data:subscribe_all. index.js rejects subscribe_all whenever the token
+// fails validation *regardless* of ENFORCE_TOKEN ("Raw passthrough mode: a valid token is
+// mandatory"), so the raw mode cannot be exercised without a live Tesla token. subscribe_oauth is
+// what TeslaMate actually sends and what the ENFORCE_TOKEN=false grace path accepts.
+ws.on("open", () => ws.send(JSON.stringify({msg_type:"data:subscribe_oauth", tag:"TESTVIN", token:"x", values:["VehicleSpeed"]})));
 ws.on("message", (m) => console.log("FRAME", String(m)));
 ' &
 kubectl --context titan -n apps exec deploy/tesla-redis -- redis-cli PUBLISH 'tesla_telemetry_V_{TESTVIN}' \
   '{"vin":"TESTVIN","createdAt":"2026-10-16T12:00:00Z","data":[{"key":"VehicleSpeed","value":{"doubleValue":42.5}}]}'
 ```
 
-Expected: the subscriber prints a `FRAME` naming `TESTVIN`. If it prints nothing, read the forwarder's `/` endpoint (`kubectl exec … -- wget -qO- localhost:8080/`) — `rejected` climbing while the bridge returns 200 is the signature of a payload-shape mismatch, which is spec §9's open item and the reason this step exists.
+Expected: the subscriber prints a `FRAME` naming `TESTVIN` (preceded by a `control:hello`). If it prints nothing, read the forwarder's `/` endpoint (`kubectl exec … -- wget -qO- localhost:8080/`) — `rejected` climbing while the bridge returns 200 is the signature of a payload-shape mismatch, which is spec §9's open item and the reason this step exists.
 
 ---
 

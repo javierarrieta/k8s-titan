@@ -4,12 +4,12 @@ KUSTOMIZE_DIRS := $(shell find apply -mindepth 1 -maxdepth 2 -name kustomization
 # not be able to slip between the encryption rule and the validation glob.
 SECRET_FIND := find apply/10-secrets \( -name '*.yaml' -o -name '*.yml' \) ! -name kustomization.yaml
 
-.PHONY: check check-ci kustomize-check kustomize-listing dry-run py-deps validate update-keys scan leak-check secrets-placement secrets-present secrets-list release-secrets db-url-check oidc-check crd-check update-cnpg-crds
+.PHONY: check check-ci kustomize-check kustomize-listing dry-run py-deps validate update-keys scan leak-check secrets-placement secrets-list secrets-present release-secrets db-url-check oidc-check crd-check tesla-forwarder-test update-cnpg-crds
 
 # leak-check runs FIRST: make has no -k, so it stops at the first failing prerequisite.
 # validate needs the age key, so an operator who forgot SOPS_AGE_KEY_FILE would never
 # reach a leak gate placed behind it.
-check: py-deps leak-check kustomize-check kustomize-listing validate secrets-placement release-secrets db-url-check oidc-check crd-check
+check: py-deps leak-check kustomize-check kustomize-listing validate secrets-placement release-secrets db-url-check oidc-check crd-check tesla-forwarder-test
 	@echo "check: all offline gates passed"
 
 # The subset provable from the tree alone - no age key, no cluster, no network.
@@ -29,7 +29,7 @@ check: py-deps leak-check kustomize-check kustomize-listing validate secrets-pla
 # Secret values, every Secret here is sops-encrypted, and the age key does not go in CI.
 check-ci:
 	@rc=0; \
-	for t in py-deps leak-check kustomize-check kustomize-listing secrets-placement release-secrets crd-check; do \
+	for t in py-deps leak-check kustomize-check kustomize-listing secrets-placement release-secrets crd-check tesla-forwarder-test; do \
 	  echo "--- $$t ---"; \
 	  $(MAKE) --no-print-directory $$t || rc=1; \
 	done; \
@@ -63,6 +63,18 @@ crd-check:
 	  || { echo "crd-check: PyYAML is missing (pip install pyyaml) - refusing to report clean"; exit 1; }; \
 	{ for d in $(KUSTOMIZE_DIRS); do kubectl kustomize "$$d" || exit 1; done; } \
 	  | python3 tools/crd-field-check.py vendor/cnpg-crds
+
+# tesla-forwarder-test: the only hand-written code in the tesla stack lives in a ConfigMap, so nothing
+# would otherwise ever execute it before it reaches a cluster. This extracts the script from
+# apply/50-apps/tesla/forwarder.yaml — the bytes that actually ship, not a copy that can drift — and
+# runs it against a fake Redis and a fake bridge on localhost.
+#
+# It skips out loud when node is absent, the way `scan` skips when ggshield is. That is a real cost
+# and it is stated so on purpose: a laptop without node does not get this gate, and the CI runner has
+# to have node for it to mean anything. The alternative — leaving the script untested because a gate
+# might be skipped somewhere — is how a RESP parser that stringifies flatbuffers gets merged.
+tesla-forwarder-test:
+	@scripts/tesla-forwarder-tests.sh
 
 # Re-vendor the CRDs against a specific operator tag. The names match the plural resource
 # names, which is exactly how upstream spells the file names.

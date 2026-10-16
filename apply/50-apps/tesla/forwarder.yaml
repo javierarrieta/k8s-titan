@@ -1,0 +1,221 @@
+# The glue: fleet-telemetry publishes decoded records to Redis, and the MyTeslaMate bridge wants
+# them POSTed to it. Nothing in either project does that translation, so this is it.
+#
+# Dependency-free Node on purpose. There is no image-build pipeline in this organisation, so the
+# alternative — a small Go or Node service of our own — would be a registry artifact nobody owns,
+# nobody can rebuild, and nobody can review in a diff. A ConfigMap script run by a pinned
+# `node:22-alpine` is readable in review, and `scripts/tesla-forwarder-tests.sh` runs the exact
+# bytes that ship here, against a fake Redis and a fake bridge, on every `make check`.
+#
+# Redis rather than MQTT, which is what fleet-telemetry's docs lead with: its MQTT driver publishes
+# one message per *field* and drops vin, createdAt and tx_type on the way out, so the bridge could
+# not route the frame or tell a new reading from a stale one. The Redis driver publishes one message
+# per *record*, with the VIN in the channel name. Spec §3 T5.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: tesla-forwarder-script
+  namespace: apps
+data:
+  tesla-forwarder.js: |
+    // tesla-forwarder.js — Redis pub/sub -> MyTeslaMate websocket bridge.
+    // No dependencies: raw RESP over net.Socket, built-in fetch, base64 from Buffer.
+    'use strict';
+    const net = require('node:net');
+    const http = require('node:http');
+
+    const REDIS_HOST = process.env.REDIS_HOST || 'tesla-redis';
+    const REDIS_PORT = Number(process.env.REDIS_PORT || 6379);
+    const REDIS_PASSWORD = process.env.REDIS_PASSWORD || '';
+    // PSUBSCRIBE glob. The channel fleet-telemetry builds is `tesla_telemetry_V_{VIN}` with literal
+    // braces — BuildTopicName + "_{" + vin + "}" — and braces are not glob metacharacters, so this
+    // matches it and nothing else.
+    const PATTERN = process.env.PATTERN || 'tesla_telemetry_V_*';
+    const BRIDGE_URL = process.env.BRIDGE_URL || 'http://tesla-streaming.apps.svc.cluster.local/';
+    const HEALTH_PORT = Number(process.env.HEALTH_PORT || 8080);
+
+    let connected = false, attempts = 0, forwarded = 0, rejected = 0, lastPost = 'never';
+
+    function encode(...args) {
+      let out = `*${args.length}\r\n`;
+      for (const a of args) out += `$${Buffer.byteLength(a)}\r\n${a}\r\n`;
+      return out;
+    }
+
+    // Returns [value, bytesConsumed], or null when the buffer holds an incomplete reply — the caller
+    // then waits for more bytes rather than guessing. Bulk strings come back as Buffer ON PURPOSE:
+    // with transmit_decoded_records the payload is JSON and a string would do, but the moment anyone
+    // turns it off the payload is flatbuffers, and a UTF-8 round-trip would silently replace the
+    // invalid sequences with U+FFFD while every layer upstream still reported success.
+    // Everything above this line is pure and is unit-tested directly; see tesla-forwarder-tests.sh.
+    function read(buf, i) {
+      if (i >= buf.length) return null;
+      const type = String.fromCharCode(buf[i]);
+      const eol = buf.indexOf('\r\n', i + 1);
+      if (eol === -1) return null;
+      const head = buf.toString('utf8', i + 1, eol);
+      if (type === '+' || type === ':' || type === '-') return [head, eol + 2];
+      if (type === '$') {
+        const n = Number(head);
+        if (n === -1) return [null, eol + 2];
+        if (buf.length < eol + 2 + n + 2) return null;
+        return [buf.subarray(eol + 2, eol + 2 + n), eol + 2 + n + 2];
+      }
+      if (type === '*') {
+        const n = Number(head);
+        const out = [];
+        let p = eol + 2;
+        for (let k = 0; k < n; k++) {
+          const r = read(buf, p);
+          if (r === null) return null;
+          out.push(r[0]); p = r[1];
+        }
+        return [out, p];
+      }
+      throw new Error(`unexpected RESP type ${JSON.stringify(type)}`);
+    }
+
+    function handle(v) {
+      if (!Array.isArray(v)) return;
+      // Elements are Buffers, so this comparison has to decode the type first. Comparing v[0] to a
+      // string directly is always false, and the symptom is that nothing is ever forwarded.
+      const kind = Buffer.isBuffer(v[0]) ? v[0].toString() : v[0];
+      if (kind === 'pmessage' && v.length === 4) post(v[3]);
+      else if (kind === 'message' && v.length === 3) post(v[2]);
+    }
+
+    // Serialised: the bridge queues per VIN itself (enqueueByVin, added in its 0.1.2), but two POSTs
+    // in flight can still be handled out of order, and its monotonic guard drops the older frame
+    // rather than reordering it — which is how a car ends up drawn driving backwards.
+    let queue = Promise.resolve();
+    function post(payload) {
+      queue = queue.then(async () => {
+        try {
+          const res = await fetch(BRIDGE_URL, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ message: { data: payload.toString('base64') } }),
+          });
+          // The bridge answers 200 even when it could not parse the body, so a 2xx here is proof of
+          // transport and nothing more. Counting it as forwarded is honest only because the counter
+          // is labelled as what it is: frames handed over, not frames applied.
+          if (!res.ok) { rejected++; lastPost = `HTTP ${res.status}`; console.error(`bridge ${res.status}`); }
+          else { forwarded++; lastPost = 'ok'; }
+        } catch (e) { rejected++; lastPost = e.message; console.error(`bridge unreachable: ${e.message}`); }
+      });
+    }
+
+    function connect() {
+      const sock = net.connect(REDIS_PORT, REDIS_HOST);
+      let buf = Buffer.alloc(0);
+      sock.on('connect', () => {
+        connected = true; attempts = 0;
+        if (REDIS_PASSWORD) sock.write(encode('AUTH', REDIS_PASSWORD));
+        sock.write(encode('PSUBSCRIBE', PATTERN));
+        console.log(`subscribed redis://${REDIS_HOST}:${REDIS_PORT} ${PATTERN}`);
+      });
+      sock.on('data', (chunk) => {
+        buf = Buffer.concat([buf, chunk]);
+        for (;;) {
+          const r = read(buf, 0);
+          if (r === null) break;
+          buf = buf.subarray(r[1]);
+          try { handle(r[0]); }
+          // A desync cannot be recovered from mid-stream without a framing resynchronisation point,
+          // so drop the buffer and let the next publish start clean rather than parse garbage.
+          catch (e) { console.error(`parse: ${e.message}`); buf = Buffer.alloc(0); break; }
+        }
+      });
+      const down = (why) => {
+        if (!connected) return;
+        connected = false; sock.destroy();
+        const wait = Math.min(30000, 1000 * 2 ** attempts++);
+        console.error(`redis down (${why}); retrying in ${wait}ms`);
+        setTimeout(connect, wait);
+      };
+      sock.on('error', (e) => down(e.message));
+      sock.on('close', () => down('close'));
+    }
+
+    // Liveness only, and deliberately not a freshness signal: a car asleep for six hours is healthy,
+    // and a probe that restarted the forwarder overnight would be worse than no probe at all.
+    http.createServer((_req, res) => {
+      const body = JSON.stringify({ connected, forwarded, rejected, lastPost });
+      res.writeHead(connected ? 200 : 503, { 'content-type': 'application/json' });
+      res.end(body);
+    }).listen(HEALTH_PORT);
+
+    connect();
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tesla-forwarder
+  namespace: apps
+  labels:
+    app: tesla-forwarder
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: tesla-forwarder
+  template:
+    metadata:
+      labels:
+        app: tesla-forwarder
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        # The node image declares no USER, so this is a choice rather than a restatement. uid 1000
+        # is the `node` user the alpine node image creates, and the forwarder writes nothing: it
+        # reads one file from a ConfigMap and talks to two endpoints.
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: forwarder
+        # Pinned by digest, not by tag: `22-alpine` is a moving tag and there is no exact-patch alpine
+        # tag on Docker Hub to pin instead (the 22.20.x-alpine3.23 shape does not exist — it 404s), so
+        # the digest is the only way this stays reproducible.
+        image: library/node:22-alpine@sha256:0a7108bf6c7bf5de370ffb1a3ed6be93d405b43ff159f681a8d18c0e2bc2e402
+        command: ["node", "/app/tesla-forwarder.js"]
+        env:
+        - name: REDIS_HOST
+          value: tesla-redis
+        - name: PATTERN
+          value: "tesla_telemetry_V_*"
+        - name: BRIDGE_URL
+          value: http://tesla-streaming.apps.svc.cluster.local/
+        ports:
+        - containerPort: 8080
+          name: health
+        livenessProbe:
+          httpGet:
+            path: /
+            port: health
+          initialDelaySeconds: 10
+          periodSeconds: 30
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+        volumeMounts:
+        - name: script
+          mountPath: /app
+          readOnly: true
+        resources:
+          requests:
+            cpu: 25m
+            memory: 64Mi
+          limits:
+            cpu: 250m
+            memory: 192Mi
+      volumes:
+      - name: script
+        configMap:
+          name: tesla-forwarder-script
+          defaultMode: 0444
