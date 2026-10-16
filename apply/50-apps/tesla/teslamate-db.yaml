@@ -1,0 +1,35 @@
+# TeslaMate's database and role, authored next to the app that owns them. Both live in `databases`:
+# a CNPG Database must share a namespace with its Cluster.
+#
+# The password is not here — it is in apply/10-secrets/teslamate-db-credentials.yaml, encrypted, and
+# referenced by name. Read auth/authentik-db.yaml first; everything it records about DatabaseRole
+# applies verbatim, including that `login: true` is required and silent when missing.
+#
+# Why a separate role at all, when the cluster has a superuser: TeslaMate runs in a pod on a node
+# that also runs untrusted-ish code, and the credential it carries should be able to do exactly one
+# thing. A role that owns one database cannot ALTER its way into someone else's.
+apiVersion: postgresql.cnpg.io/v1
+kind: Database
+metadata:
+  name: teslamate
+  namespace: databases
+spec:
+  name: teslamate
+  owner: teslamate
+  cluster:
+    name: postgres
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: DatabaseRole
+metadata:
+  name: teslamate
+  namespace: databases
+spec:
+  name: teslamate
+  cluster:
+    name: postgres
+  # Required, and nothing complains when it is absent. CNPG creates the role NOLOGIN by default, so
+  # a missing `login: true` is a TeslaMate that cannot connect and a Database that reports Ready.
+  login: true
+  passwordSecret:
+    name: teslamate-db-credentials

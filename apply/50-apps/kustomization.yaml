@@ -34,3 +34,9 @@ resources:
   # saw - and the quota is the only thing standing between a third workspace and the Postgres
   # every other app here depends on.
   - coder/workspaces.yaml
+  # TeslaMate. The Database and DatabaseRole first, for the same reason authentik's and coder's
+  # precede their apps: a TeslaMate that starts before its role exists crash-loops, and that reads
+  # as an app bug rather than as apply order. The rest of the tesla/ files append after this one,
+  # in dependency order - redis before fleet-telemetry, the telemetry pipeline before the forwarder,
+  # the forwarder before TeslaMate itself.
+  - tesla/teslamate-db.yaml
