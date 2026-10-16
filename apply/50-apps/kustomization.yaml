@@ -43,3 +43,7 @@ resources:
   # The public-key server next: Tesla will not finish pairing until it answers, and nothing
   # else here depends on it, so it is early rather than buried behind the telemetry chain.
   - tesla/wellknown.yaml
+  # Redis before fleet-telemetry: the producer connects at startup and exits if it cannot, so the
+  # order here is the difference between a slow start and a CrashLoopBackOff.
+  - tesla/redis.yaml
+  - tesla/fleet-telemetry.yaml

@@ -1,0 +1,76 @@
+# The Redis hop between fleet-telemetry and the forwarder.
+#
+# Ephemeral on purpose: pub/sub only, nothing to survive a restart. A lost frame is one frame, not a
+# lost trip — TeslaMate closes gaps from the Fleet API poll, and the car re-sends on the next
+# interval. Persisting here would buy nothing and cost a PVC, a backup question, and a restore path
+# nobody would ever drill.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tesla-redis
+  namespace: apps
+  labels:
+    app: tesla-redis
+spec:
+  replicas: 1
+  # Not RollingUpdate: two Redis instances behind one Service name would split subscribers across
+  # them, and a publisher and a subscriber landing on different ones silently drops every frame.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: tesla-redis
+  template:
+    metadata:
+      labels:
+        app: tesla-redis
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        # 999/1000, read out of the image's own /etc/passwd (`redis:x:999:1000`). The image config
+        # sets no User at all, so without these the container runs as root; the entrypoint only
+        # drops privileges when it starts as root, so naming the uid directly is what actually
+        # makes it non-root rather than pretending to.
+        runAsUser: 999
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: redis
+        image: library/redis:8.8.3-alpine@sha256:0b2b77d3ea5078274795e3177cdbdada8b96316684a38911d528534ed679b5ec
+        args: ["redis-server", "--save", "", "--appendonly", "no"]
+        ports:
+        - containerPort: 6379
+          name: redis
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+        volumeMounts:
+        - name: data
+          mountPath: /data
+        resources:
+          requests:
+            cpu: 25m
+            memory: 64Mi
+          limits:
+            cpu: 250m
+            memory: 256Mi
+      volumes:
+      - name: data
+        emptyDir:
+          sizeLimit: 64Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: tesla-redis
+  namespace: apps
+spec:
+  selector:
+    app: tesla-redis
+  ports:
+  - name: redis
+    port: 6379
+    targetPort: redis
