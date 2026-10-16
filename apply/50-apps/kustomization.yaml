@@ -47,3 +47,6 @@ resources:
   # order here is the difference between a slow start and a CrashLoopBackOff.
   - tesla/redis.yaml
   - tesla/fleet-telemetry.yaml
+  # The bridge before the forwarder that POSTs to it: the forwarder retries with backoff, so this
+  # order only avoids a noisy first minute.
+  - tesla/streaming.yaml
