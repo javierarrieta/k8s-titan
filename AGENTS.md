@@ -12,8 +12,10 @@ made and what was deliberately left out.
                             CloudNativePG operator + the read-only agent identity
     apply/40-certificates/  the titan.arrieta.eu wildcard, in namespace `certificates`
     apply/50-apps/          workloads — the shared Postgres `Cluster` and its daily
-                            `ScheduledBackup` in namespace `databases`, and authentik with
-                            its declarative `Database`/`DatabaseRole` in namespace `auth`
+                            `ScheduledBackup` in namespace `databases`, authentik with
+                            its declarative `Database`/`DatabaseRole` in namespace `auth`, and
+                            TeslaMate with its own `Database`/`DatabaseRole`, Grafana and the
+                            Tesla Fleet Telemetry intake in namespace `apps`
 
 Stage order: `flux-system` → `secrets` → `infra` → `certificates` → `apps`, wired by
 `dependsOn` in `apply/00-bootstrap/stage-*.yaml`. Add a stage as its own file there;
@@ -34,13 +36,17 @@ instead.
 
 Backups: the Postgres cluster ships base backups and continuous WAL to S3 and **nothing
 else does** — the generic PV stream is still deferred, so a PVC that is not that database
-has no backup. The same runbook records what has actually been drilled (a scratch-cluster
+has no backup. That covers TeslaMate's driving history and TeslaMate's settings,
+which are rows in that same cluster and are not in git; Grafana's PVC is not. The runbook at
+`docs/authentik-runbook.md` records what has actually been drilled (a scratch-cluster
 restore and a point-in-time recovery, both passing), and the two credentials with special
 rules: `AUTHENTIK_SECRET_KEY` (never rotate casually — it signs sessions and derives user IDs,
 and the sops file is its only copy) and the S3 backup key (the one exposed in a chat transcript
 was replaced on 2026-10-05, the cluster archives on the replacement, and the superseded key was
 deleted in IAM on 2026-10-06 — that deletion is the proof the rotation took, since anything still
-using the old key would have stopped archiving).
+using the old key would have stopped archiving). TeslaMate's own runbook is
+`docs/teslamate-runbook.md`, and its §10 is the list of what has NOT been proven yet — read that
+before trusting anything else in that file.
 
 Metrics: this cluster runs no Prometheus. k8s-casa's central Prometheus pulls node, control-plane,
 kubelet, cAdvisor and kube-state-metrics metrics over the WireGuard mesh from `192.168.133.1`, and

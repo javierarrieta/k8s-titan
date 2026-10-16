@@ -8,6 +8,29 @@
 
 **Tech Stack:** k3s v1.35.x + Traefik 3.7.8, Flux v2 (Kustomization only — no HelmRelease in this plan), CloudNativePG 1.30.x, `tesla/fleet-telemetry:v0.9.5`, `ghcr.io/myteslamate/websocket:0.1.2`, `teslamate/teslamate:4.3.0`, `teslamate/grafana:4.3.0`, `library/redis:8.8.3-alpine`, `library/node:22-alpine`, sops+age.
 
+## Status after implementation (2026-10-16)
+
+Tasks 1-6 and 8-9 are implemented and committed; the per-task record, including every ruling that
+changed this plan while it was being executed, is in
+`.superpowers/sdd/2026-10-16-titan-teslamate-fleet-telemetry/progress.md`. Task 11's runbook is
+`docs/teslamate-runbook.md`. What is NOT done, and why:
+
+- **Task 7 (migration) and every `make dry-run` in this plan** need an admin kube context. The
+  read-only `k8s-reader` identity is Forbidden on `pods/exec` in `databases` and on everything the
+  dry-run asks for — verified, not assumed. The scripts are written and their guards are tested;
+  they have not been run.
+- **Task 10 (pointing the car at it)** is the operator's, from their own machine, and now has a
+  script (`scripts/tesla-push-telemetry-config.sh`) instead of the curl one-liner below, so the
+  bearer token never appears in argv or shell history.
+- **Task 11 Step 4 (settle the budget)** needs a week of driving. The runbook carries the predicted
+  numbers with the measured column left empty on purpose.
+
+Deviations from this plan that are already baked into the manifests: `ghcr.io/myteslamate/websocket`
+is `0.1.2`, not `0.1.0` (0.1.2 fixes per-VIN frame ordering); `TESLA_AUTH_CLIENT_ID` is a fourth
+Secret rather than a ConfigMap; `DATABASE_HOST` is `postgres-rw.databases.svc.cluster.local`, since
+CNPG publishes no bare `postgres` service; and `setup-tesla-secrets.sh` is idempotent per file so
+that adding the public key days later cannot rotate `ENCRYPTION_KEY`.
+
 **Spec:** `docs/superpowers/specs/2026-10-16-titan-teslamate-fleet-telemetry-design.md` — read it alongside this plan. It carries the pricing arithmetic (§2), the decision table (§3) and the not-proven list (§9); this plan argues from it and does not repeat the reasoning.
 
 ## Global Constraints
