@@ -34,3 +34,15 @@ resources:
   # for the same reason as coder's blueprint, and it is rendered by scripts/setup-google-blueprint.sh
   # from authentik/blueprints-google.yaml.
   - authentik-google-blueprint.yaml
+  # TeslaMate. Two files rather than one because the same password has to reach two namespaces: the
+  # app reads DATABASE_PASS from `apps`, and CNPG's DatabaseRole needs a `kubernetes.io/basic-auth`
+  # Secret in `databases` carrying the identical value. That split is what the script's own
+  # cross-check compares, for the same reason make db-url-check exists for coder.
+  - teslamate-secrets.yaml
+  - teslamate-db-credentials.yaml
+  # tesla-wellknown.yaml is deliberately NOT listed: it does not exist yet. It holds the Tesla
+  # application's PUBLIC key, which only exists once the operator has minted the keypair
+  # (scripts/setup-tesla-secrets.sh --genkey) and registered it with Tesla. Listing it now would
+  # break `kustomize build` on a missing file - a manifest nobody has written is worse than a
+  # manifest nobody listed, because it fails the whole stage rather than one app. When the script
+  # writes it, add the line here; `make secrets-placement` fails until you do.
