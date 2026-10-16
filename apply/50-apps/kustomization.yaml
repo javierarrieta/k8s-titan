@@ -55,3 +55,8 @@ resources:
   # race. Its script lives in this file as a ConfigMap, and scripts/tesla-forwarder-tests.sh runs
   # those exact bytes on every `make check`.
   - tesla/forwarder.yaml
+  # TeslaMate itself, after everything it talks to: the database (first in this list), the streaming
+  # bridge its TESLA_WSS_HOST points at, and the tesla-oauth Secret carrying the application client
+  # id. That last one is why it cannot start earlier — a missing Secret is a Pending pod, which is
+  # the loud failure; a placeholder client id would have been the silent one.
+  - tesla/teslamate.yaml

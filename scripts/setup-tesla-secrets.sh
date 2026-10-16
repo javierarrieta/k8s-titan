@@ -32,9 +32,11 @@ cd "$REPO"
 RUNTIME_SECRET=apply/10-secrets/teslamate-secrets.yaml
 DB_SECRET=apply/10-secrets/teslamate-db-credentials.yaml
 PUBKEY_SECRET=apply/10-secrets/tesla-wellknown.yaml
+OAUTH_SECRET=apply/10-secrets/tesla-oauth.yaml
 STAGE_RUNTIME=apply/10-secrets/.staging.teslamate-secrets.yaml
 STAGE_DB=apply/10-secrets/.staging.teslamate-db-credentials.yaml
 STAGE_PUBKEY=apply/10-secrets/.staging.tesla-wellknown.yaml
+STAGE_OAUTH=apply/10-secrets/.staging.tesla-oauth.yaml
 # Key resolution: honour SOPS_AGE_KEY_FILE if it is set, otherwise try sops' own default and then
 # the name the rest of this repo's scripts use. Both are seen in practice - `keys.txt` is what this
 # Coder workspace actually has (verified: `sops -d` on an existing Secret succeeds with no env set),
@@ -53,7 +55,7 @@ fi
 # Never leave plaintext behind, whatever fails. All three staging paths are git-ignored by name
 # (.gitignore: apply/10-secrets/.staging.*.yaml), and they sit under apply/10-secrets/ because sops
 # picks recipients from the file's own path, not from your intent.
-trap 'rm -f "$STAGE_RUNTIME" "$STAGE_DB" "$STAGE_PUBKEY"' EXIT
+trap 'rm -f "$STAGE_RUNTIME" "$STAGE_DB" "$STAGE_PUBKEY" "$STAGE_OAUTH"' EXIT
 
 usage() {
   cat <<'EOF'
@@ -62,6 +64,11 @@ usage:
                                           (default ~/tesla), outside the repo, and stop
   setup-tesla-secrets.sh [PUBLIC_KEY_PEM]   write the Secrets; with no PEM, write only the two
                                           that do not need it and say which is still pending
+
+  TESLA_CLIENT_ID=<id from developer.tesla.com> must be set alongside the PEM. It is not a secret,
+  but it is not knowable before the application exists, and a ConfigMap placeholder that ships
+  unchanged breaks sign-in silently. A missing Secret leaves the pod Pending with an event naming
+  it, which is the loud version of the same mistake.
 
   FORCE=1 re-generates values that already exist. Expect TeslaMate to lose every stored vehicle
   token (ENCRYPTION_KEY) and CNPG to need a re-applied DatabaseRole (password).
@@ -156,12 +163,19 @@ fi
 PUBKEY=${1:-}
 if [ -n "$PUBKEY" ]; then
   [ -f "$PUBKEY" ] || { echo "FAIL: no public key at $PUBKEY - run '$(basename "$0") --genkey' first, or pass the PEM you registered"; exit 1; }
+  if [ -z "${TESLA_CLIENT_ID:-}" ]; then
+    echo "FAIL: TESLA_CLIENT_ID is not set. It is the client id shown on the developer application"
+    echo "you registered, the same one whose public key is in $PUBKEY. TeslaMate needs it to sign in;"
+    echo "refusing to write a half-complete set of Tesla Secrets."
+    exit 1
+  fi
 fi
 
 existing=()
 [ -f "$RUNTIME_SECRET" ] && existing+=("$RUNTIME_SECRET")
 [ -f "$DB_SECRET" ] && existing+=("$DB_SECRET")
 [ -n "$PUBKEY" ] && [ -f "$PUBKEY_SECRET" ] && existing+=("$PUBKEY_SECRET")
+[ -n "${TESLA_CLIENT_ID:-}" ] && [ -f "$OAUTH_SECRET" ] && existing+=("$OAUTH_SECRET")
 if [ ${#existing[@]} -gt 0 ]; then
   echo "FAIL: these already exist and would be replaced with new values:"
   printf '  %s\n' "${existing[@]}"
@@ -223,6 +237,7 @@ PY
 # value, and hand-rolled indentation is how you ship a Secret that parses as one opaque blob.
 render() {
   STAGE_RUNTIME="$STAGE_RUNTIME" STAGE_DB="$STAGE_DB" STAGE_PUBKEY="$STAGE_PUBKEY" \
+  STAGE_OAUTH="$STAGE_OAUTH" TESLA_CLIENT_ID="${TESLA_CLIENT_ID:-}" \
   EK="$EK" DBPASS="$DBPASS" PUB_PEM="$PUB_PEM" python3 - <<'PY'
 import os, yaml
 
@@ -269,6 +284,17 @@ if env.get("PUB_PEM"):
         # should live where a mistake gets caught. The key name becomes the filename nginx serves.
         "stringData": {"com.tesla.3p.public-key.pem": pem},
     })
+if env.get("TESLA_CLIENT_ID"):
+    dump(env["STAGE_OAUTH"], {
+        "apiVersion": "v1", "kind": "Secret",
+        "metadata": {"name": "tesla-oauth", "namespace": "apps"},
+        "type": "Opaque",
+        # The public client id of the Tesla developer application. Not secret, and it would be a
+        # ConfigMap if a ConfigMap could fail loudly: a committed placeholder ships green through
+        # every gate here and breaks sign-in quietly, whereas a missing Secret leaves the pod Pending
+        # with an event that names it. Encrypted with the rest for the same reason the public key is.
+        "stringData": {"TESLA_AUTH_CLIENT_ID": env["TESLA_CLIENT_ID"].strip()},
+    })
 PY
 }
 render
@@ -282,6 +308,10 @@ mv "$STAGE_DB" "$DB_SECRET"
 if [ -n "$PUB_PEM" ]; then
   sops --encrypt --in-place "$STAGE_PUBKEY"
   mv "$STAGE_PUBKEY" "$PUBKEY_SECRET"
+fi
+if [ -n "${TESLA_CLIENT_ID:-}" ]; then
+  sops --encrypt --in-place "$STAGE_OAUTH"
+  mv "$STAGE_OAUTH" "$OAUTH_SECRET"
 fi
 
 echo "== written (fingerprints only)"
@@ -306,6 +336,10 @@ sd = yaml.safe_load(sys.stdin.read())["stringData"]
 k = "com.tesla.3p.public-key.pem"
 print("  tesla-wellknown            " + k + " " + str(len(sd[k])) +
       " bytes, sha256:" + hashlib.sha256(sd[k].encode()).hexdigest()[:12])'
+  sops -d "$OAUTH_SECRET" | python3 -c '
+import sys, yaml
+sd = yaml.safe_load(sys.stdin.read())["stringData"]
+print("  tesla-oauth                TESLA_AUTH_CLIENT_ID " + sd["TESLA_AUTH_CLIENT_ID"][:8] + "...")'
 fi
 # The two halves of the DB password must agree, and they are two files. This is the same class of
 # split that make db-url-check exists for on the coder side; here it is cheap enough to check inline.
@@ -326,7 +360,7 @@ Next, in this order:
   1. List every file this wrote in apply/10-secrets/kustomization.yaml. An unlisted Secret builds
      fine and is silently never applied - \`make secrets-placement\` is the gate that says so.
   2. git add apply/10-secrets/teslamate-secrets.yaml apply/10-secrets/teslamate-db-credentials.yaml \\
-     $( [ -n "${PUBKEY:-}" ] && echo 'apply/10-secrets/tesla-wellknown.yaml' )
+     $( [ -n "${PUBKEY:-}" ] && echo 'apply/10-secrets/tesla-wellknown.yaml apply/10-secrets/tesla-oauth.yaml' )
   3. make check
   4. commit, merge, let Flux apply.
 $( [ -z "${PUBKEY:-}" ] && cat <<'PEND'
