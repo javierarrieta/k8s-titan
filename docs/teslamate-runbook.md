@@ -182,7 +182,7 @@ go install github.com/teslamotors/vehicle-command/cmd/tesla-http-proxy@v0.4.1   
 
 The token it asks for must be a **Fleet API** access token for the owner, minted by your own
 application — not the old Owner-API bearer this migration replaces. TeslaMate stores its copy
-encrypted in the database; doing the authorization-code flow again in a browser is less work than
+encrypted in the database; doing the authorization-code flow again (§5a) is less work than
 decrypting it.
 
 `ca` is deliberately absent from the request body. Omitting it is what tells the vehicle to validate
@@ -206,6 +206,68 @@ EOF
 
 **Not yet run.** Paste its output here when it has been; until then the public-CA question is an
 assumption with a command attached, not a fact.
+
+## 5a. Signing TeslaMate in — the token pair, and why it is not `TESLA_AUTH_CLIENT_ID` alone
+
+**TeslaMate v4.3.0 cannot start itself from a Fleet API client id.** Read in its source at v4.3.0,
+not inferred from the docs:
+
+- `teslamate/api.ex` `sign_in/2` accepts only a `%Tokens{access, refresh}` pair, or an
+  email-and-password pair for the retired Owner API. There is no OAuth flow in the application.
+- The sign-in page is two text boxes, "Access Token" and "Refresh Token", typed by hand.
+- `tesla_api/auth/refresh.ex` refreshes with `scope: "openid email offline_access"` hardcoded and
+  `client_id: TESLA_AUTH_CLIENT_ID`.
+- `tesla_api/middleware/fleet_auth.ex` sends `Authorization: Bearer <TOKEN>` **only when `TOKEN` is
+  set** — so the `TOKEN` third-party mode is the only path where TeslaMate does not carry a
+  per-account token itself.
+
+Two consequences, both cheap to hit and expensive to diagnose:
+
+1. **The pair has to be minted by *your* application**, because refresh sends `client_id` and Tesla
+   rejects a mismatch with `invalid_client` (TeslaMate issue #4091). A pair minted by any other
+   client dies at the first refresh, which is at most an hour after sign-in.
+2. **The grant must include `vehicle_device_data`.** Tesla requires `scope` on `/authorize`; a token
+   granted only `openid email offline_access` authorizes fine and then refreshes fine, and every
+   call returns 401 — TeslaMate issue #4081 is exactly that shape.
+
+### The flow
+
+The redirect endpoint is `https://authorize.titan.arrieta.eu/callback` — a Deployment that logs
+the request line and does nothing else (`apply/50-apps/tesla/auth-callback.yaml`, `replicas: 0`
+between uses). It exists because Tesla only returns the code to a URI the application registered,
+and exchanging the code in the cluster would drag `client_secret` into it.
+
+```bash
+# 0. one-time, at https://developer.tesla.com: register the application with
+#    Allowed Redirect URI(s)  = https://authorize.titan.arrieta.eu/callback
+#    Allowed Origin URL(s)    = https://tesla.titan.arrieta.eu
+#    Scopes: Vehicle Information, Vehicle Location  (Vehicle Commands NOT needed in v1)
+
+kubectl --context titan -n apps scale deploy/tesla-auth-callback --replicas=1
+TESLA_CLIENT_ID=<client id> ./scripts/tesla-auth.sh url      # open the URL it prints
+# approve; the browser lands on authorize.titan.arrieta.eu/callback?code=...&state=...
+kubectl --context titan -n apps logs deploy/tesla-auth-callback --tail=5
+TESLA_CLIENT_ID=<client id> ./scripts/tesla-auth.sh exchange '<the code from that log>'
+kubectl --context titan -n apps scale deploy/tesla-auth-callback --replicas=0
+```
+
+The script refuses a code with whitespace in it, compares nothing but reports the claimed audience,
+and prints the pair with an explicit warning that the refresh token is single use. Check the `state`
+in the log against the one the `url` command printed — a mismatched state means the code is not from
+your own authorization, and redeeming someone else's code is how an attacker gets your car.
+
+The **client secret** never leaves the operator's machine: `exchange` prompts for it, or reads stdin,
+and the token endpoint answers on `fleet-auth.prd.vn.cloud.tesla.com` — not `auth.tesla.com`, which
+is where the `/authorize` half lives. Exchanging against `auth.tesla.com` fails in a way that looks
+like a bad code.
+
+Paste both values into TeslaMate's sign-in page at `https://tesla.titan.arrieta.eu/sign_in`. After
+that, TeslaMate owns the refresh cycle and rotates the refresh token itself; the callback endpoint
+plays no further part and stays at `replicas: 0`.
+
+**If sign-in succeeds and every call 401s**, the grant was scoped-down: re-run the flow with the
+`vehicle_device_data` scope granted. **If refresh fails with `invalid_client`**, `TESLA_AUTH_CLIENT_ID`
+in `tesla-oauth` is not the client id that minted the pair.
 
 ## 6. Certificates
 
@@ -289,7 +351,8 @@ this file depends on and the command that retires it.
 |---|---|
 | the vehicle accepts a publicly trusted CA for `telemetry.titan.arrieta.eu` | `scripts/tesla-push-telemetry-config.sh status` → `synced: true`, then a frame in fleet-telemetry's log |
 | the decoded Redis payload shape matches what the forwarder and bridge expect | §4's synthetic publish, then a frame reaching TeslaMate |
-| TeslaMate's OAuth redirect URI is what the Tesla app has registered | read it off TeslaMate's sign-in page and compare with the app's registered URI — do not trust any document, including this one |
+| the Tesla app accepts `https://authorize.titan.arrieta.eu/callback` as a redirect URI | §5a's flow reaching the callback; Tesla rejects an unregistered URI before the login form appears |
+| Tesla honours a scoped-down refresh, so a `vehicle_device_data` grant survives `refresh.ex`'s hardcoded `openid email offline_access` | sign in via §5a, then wait past the first token refresh (≤1 h) and confirm `GET /api/1/vehicles` is not 401 — this is the single most likely silent failure in the whole pipeline |
 | the polling budget holds | a week of driving, then the developer dashboard's usage page, filled into §3 |
 | the migrated database is intact | §7's row-count comparison, run for real |
 | `nginx-unprivileged`'s UID 101 can read the mounted key | `kubectl -n apps logs deploy/tesla-wellknown` and the curl in §8 step 4 |

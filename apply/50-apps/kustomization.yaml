@@ -64,3 +64,8 @@ resources:
   # database, and adds the only stateful volume in this group. Its admin password comes from
   # tesla-grafana-admin because the upstream image ships admin/admin in its own ENV.
   - tesla/grafana.yaml
+  # The Tesla application's OAuth redirect endpoint. `replicas: 0` is its steady state: nothing is
+  # running between pairings, and the operator scales it to 1 for the one authorization that mints
+  # TeslaMate's token pair (runbook §5). It logs the request line and does nothing else — the code is
+  # exchanged on the operator's machine, so the client secret never enters the cluster.
+  - tesla/auth-callback.yaml

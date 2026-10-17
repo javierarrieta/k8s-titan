@@ -1,0 +1,136 @@
+# The OAuth redirect endpoint for the Tesla developer application.
+#
+# WHY THIS EXISTS AT ALL. TeslaMate v4.3.0 has no OAuth flow of its own: its sign-in page is two
+# text boxes for an access token and a refresh token, hand-typed (elixir/lib/teslamate_web/live/
+# signin_live/index.html.heex), and TeslaApi.Auth.post/2 is only ever pointed at the *refresh*
+# endpoint. Something has to mint the first pair through the authorization-code grant, and the
+# grant is only reachable from a URI the application has registered with Tesla. That is this.
+#
+# It is one shot, at install time. TeslaMate never calls it: it refreshes from `refresh.ex` against
+# the token endpoint, and the endpoint below is not involved after the first sign-in. That is why it
+# is allowed to be this dumb — and it is deliberately nothing more than a request logger.
+#
+# NO CODE IS EXCHANGED HERE, AND THAT IS THE POINT. The authorization code arrives as a query
+# parameter on a public hostname, so anyone who reads it first would get the tokens. Exchanging it
+# in-cluster would put `client_secret` in the cluster and add a moving part that can be left running.
+# Instead this container does nothing but print the request, and the operator copies the `code=` out
+# of the log and swaps it on their own machine, where the secret already is
+# (scripts/tesla-auth.sh). The code is single-use and short-lived; the operator redeems it seconds
+# after it appears, and a stolen copy is already spent.
+#
+# WHY ealen/echo-server AND NOT nginx. nginx's access log writes the URI percent-decoded and
+# re-quoted, and Tesla's codes contain characters that survive neither unchanged. echo-server logs
+# the raw request line, which is what has to be pasted back into a shell. It is also a request
+# *logger* by design rather than a web server being abused as one.
+#
+# PIPELINE ORDER MATTERS AND IS NOT OBVIOUS. flux-system's kustomize-controller already has SOPS
+# secrets in its environment, and echoing request headers on a public endpoint from that process
+# would leak whatever those decrypt to. The only value of echoing anything here is the request line,
+# and echoing the *whole* request line costs the decryption of every secret in apply/10-secrets on
+# each call — so ECHO_ECHO_REQUEST_HEADER / ECHO_ECHO_REQUEST_BODY / ECHO_ECHO_RESPONSE_HEADER are all
+# off and the default `request` pipeline (method, url, ip) stays on. That default is exactly one line
+# per request, which is the whole feature. A newline in the URL breaks the log framing rather than
+# injecting anything: pod logs are one JSON line per entry, so a forged newline cannot create a
+# second entry, only a mangled first one — and the state check in scripts/tesla-auth.sh catches that,
+# because a forged URL cannot know the state the shell generated.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tesla-auth-callback
+  namespace: apps
+  labels:
+    app: tesla-auth-callback
+spec:
+  # One shot per pairing, so 0 is the right steady state: nothing is running between authorizations
+  # and the endpoint 503s until the operator scales it up. That is the install step in the runbook,
+  # not a workaround.
+  replicas: 0
+  selector:
+    matchLabels:
+      app: tesla-auth-callback
+  template:
+    metadata:
+      labels:
+        app: tesla-auth-callback
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        # 1000:1000 is `node` in the image's own /etc/passwd (the entrypoint is `node webserver`),
+        # read out of the layer rather than guessed. The image config sets no User, so it would
+        # otherwise run as root. 65534/nobody also exists there but owns nothing; 1000 is the home
+        # directory the entrypoint expects.
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: echo-server
+        image: ealen/echo-server:0.9.2@sha256:006b92e1d6682442e29d1d0d73c34a61166d42f8a5bf1ea10c318f07ad4790e2
+        ports:
+        - containerPort: 8080
+          name: http
+        env:
+        - name: PORT
+          value: "8080"
+        # The default pipeline logs method, full URL and client IP, once per request. `?code=...`
+        # is part of that URL, which is the entire mechanism.
+        - name: ECHO_ECHO_REQUEST_HEADER
+          value: "false"
+        - name: ECHO_ECHO_REQUEST_BODY
+          value: "false"
+        - name: ECHO_ECHO_RESPONSE_HEADER
+          value: "false"
+        # The response body is a fixed 200 and says nothing about what it received. The operator
+        # reads the log, never the browser page, so a leaked code cannot arrive by screen-share.
+        - name: ECHO_ECHO_RESPONSE_BODY
+          value: "false"
+        resources:
+          requests:
+            cpu: 10m
+            memory: 16Mi
+          limits:
+            cpu: 100m
+            memory: 64Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+          readOnlyRootFilesystem: true
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: tesla-auth-callback
+  namespace: apps
+spec:
+  selector:
+    app: tesla-auth-callback
+  ports:
+  - name: http
+    port: 80
+    targetPort: http
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: tesla-auth-callback
+  namespace: apps
+spec:
+  ingressClassName: traefik
+  rules:
+  - host: authorize.titan.arrieta.eu
+    http:
+      paths:
+      # Exact, not Prefix: the registered redirect URI is one specific path and nothing else should
+      # answer on this hostname.
+      - path: /callback
+        pathType: Exact
+        backend:
+          service:
+            name: tesla-auth-callback
+            port:
+              number: 80
+  tls:
+  - hosts:
+    - authorize.titan.arrieta.eu
+    secretName: titan-tls
