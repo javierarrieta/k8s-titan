@@ -18,6 +18,40 @@ spec:
   owner: teslamate
   cluster:
     name: postgres
+  # TeslaMate's first migration runs `CREATE EXTENSION IF NOT EXISTS cube` and the same for
+  # `earthdistance` (elixir/priv/repo/migrations), and `earthdistance` is a superuser-only
+  # extension: `cube` succeeds because it needs no privilege, then the migration dies on
+  # 42501 "permission denied to create extension earthdistance / Must be superuser".
+  # Observed live on the first deploy, and the pod CrashLooped.
+  #
+  # Declaring them here is the whole fix. The operator creates extensions AS THE SUPERUSER on
+  # behalf of a low-privilege owner, which is precisely the point of spec.extensions (upstream
+  # declarative_database_management.md: "installing certain extensions may require superuser
+  # privileges, which CloudNativePG recommends disabling by default"). TeslaMate then finds both
+  # present and its `IF NOT EXISTS` is a no-op.
+  #
+  # WHY NOT THE OBVIOUS ALTERNATIVES, all of which were considered live and rejected:
+  #   - DatabaseRole `superuser: true` — narrowest diff, widest blast radius: the TeslaMate
+  #     credential could then read authentik's and coder's data, which is what this role exists
+  #     to prevent.
+  #   - `spec.managed.extensions` on the Cluster — does not exist in CNPG 1.30.x. `managed` has
+  #     only `roles` and `services` (checked against the live CRD). Writing it would have had the
+  #     API server reject the whole Cluster and take the apps stage down.
+  #   - `bootstrap.initdb.postInitApplicationSQL` — runs as superuser, correct, but only when the
+  #     Cluster is CREATED. postgres is older than this manifest; it would have been a no-op.
+  #   - a one-off `psql` as the postgres superuser — works, needs an admin context, and leaves
+  #     state git cannot describe. This file is the version that survives a rebuild.
+  extensions:
+  # `schema: public` is not decoration: TeslaMate's migration names it explicitly
+  # (`WITH SCHEMA public`) because it looks the functions up unqualified.
+  - name: cube
+    ensure: present
+    schema: public
+  # earthdistance depends on cube; the operator rejects a missing dependency, so order matters
+  # here even though both are declared.
+  - name: earthdistance
+    ensure: present
+    schema: public
 ---
 apiVersion: postgresql.cnpg.io/v1
 kind: DatabaseRole
