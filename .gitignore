@@ -8,6 +8,11 @@
 # real way to commit plaintext secrets.
 **/.decrypted*.yaml
 
+# Database dumps. `make check` is preceded by `git add -A`, and the TeslaMate migration
+# leaves a ~176 MB pg_dump archive in the tree; this repo is public, and the archive holds
+# drive history and the API token pair. Refuse it by default rather than trusting memory.
+*.dump
+
 # Plaintext staging for `sops --encrypt --in-place`: sops selects recipients by the
 # file's own path, so the plaintext must sit under apply/10-secrets/ briefly. The name
 # is ignored so `git add -A` cannot stage it. See docs/ovh-dns-credential.md.
