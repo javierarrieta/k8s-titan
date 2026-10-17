@@ -291,18 +291,45 @@ Same hazard, same fix, for `tesla-streaming` and anything else mounting `titan-t
 
 ## 7. Migration
 
-`scripts/migrate-teslamate-db.sh` moves the old techdelivery database into CNPG. It needs an **admin
-kube context**: the read-only `k8s-reader` identity is Forbidden on `pods/exec` in `databases`, which
-was checked rather than assumed, and the script says so plainly instead of hanging.
+**Done on 2026-10-17.** The trip history moved from techdelivery into CNPG and was verified by row
+count: `cars 2`, `drives 3251`, `charges 520368`, `addresses 1025`, `positions 9453030`,
+`geofences 19` — identical on both sides, `private.tokens` holding exactly one row, and TeslaMate
+starting clean. What follows is how it has to be done, because three plausible approaches failed.
+
+`scripts/restore-now.sh <dump>` is the one that worked. It needs an **admin kube context**: the
+read-only `k8s-reader` identity is Forbidden on `pods/exec` in `databases`, which was checked rather
+than assumed.
 
 ```bash
-SRC_CONTEXT=<admin ctx on techdelivery> DST_CONTEXT=<admin ctx on titan> \
-  ./scripts/migrate-teslamate-db.sh
+./scripts/restore-now.sh ./teslamate.dump
 ```
 
-It dumps with `pg_dump -Fc`, restores with `--no-owner --no-privileges`, and compares row counts for
-`drives`, `trips`, `charges` and `addresses` before and after. A count mismatch is a failed migration,
-not a warning.
+`scripts/import-teslamate.sh` is the same procedure with a dump-from-source mode (`dump`, `restore`,
+`all`) for when the archive has to be taken as well.
+
+Three things about this that are not obvious and cost real time:
+
+- **`pg_restore` has no stdin.** `-` is taken as a literal filename. The archive must be staged as a
+  real file inside the pod; `/dev/shm` is used because the CNPG container's root filesystem is
+  read-only (`readOnlyRootFilesystem`) and `/tmp` cannot be written. The staged byte count is
+  compared with the local one before anything is dropped — a truncated transfer otherwise restores
+  partially and looks like success.
+- **`--clean` cannot drop TeslaMate's schema.** It emits `DROP TABLE IF EXISTS` without `CASCADE`,
+  and the tables hold foreign keys into each other, so the first drop fails, the matching `CREATE`
+  then fails `already exists`, and the restore aborts mid-archive. The schema is dropped wholesale
+  instead — which is only safe because the target is empty, and the script prints the BEFORE counts
+  to prove that before it drops anything.
+- **Schema `private` must be dropped too.** TeslaMate keeps its token pairs in `private.tokens`, not
+  in `public`. Leaving a previous attempt's rows behind makes the `COPY` append a second pair, the
+  primary key then fails on duplicate keys, and TeslaMate refuses to start with
+  `Found 2 token pairs!`. This was observed live, not theorised.
+
+`pg_restore` exits 1 for warnings as well as errors, so its exit status proves nothing; the row
+counts are the proof. A count mismatch is a failed migration, not a warning.
+
+The old `scripts/migrate-teslamate-db.sh` still exists but counts tables that TeslaMate 4.3.0 does
+not have (`trips`, `locations`); its counts were corrected to the real table set, but prefer the two
+scripts above, which stage the archive rather than piping it.
 
 After a migration with a **new** `ENCRYPTION_KEY`, the migrated vehicles' stored tokens cannot be
 decrypted. Sign out of the vehicle in TeslaMate's Settings, then sign in again through the Fleet API
@@ -354,8 +381,11 @@ this file depends on and the command that retires it.
 | the Tesla app accepts `https://authorize.titan.arrieta.eu/callback` as a redirect URI | §5a's flow reaching the callback; Tesla rejects an unregistered URI before the login form appears |
 | Tesla honours a scoped-down refresh, so a `vehicle_device_data` grant survives `refresh.ex`'s hardcoded `openid email offline_access` | sign in via §5a, then wait past the first token refresh (≤1 h) and confirm `GET /api/1/vehicles` is not 401 — this is the single most likely silent failure in the whole pipeline |
 | the polling budget holds | a week of driving, then the developer dashboard's usage page, filled into §3 |
-| the migrated database is intact | §7's row-count comparison, run for real |
 | `nginx-unprivileged`'s UID 101 can read the mounted key | `kubectl -n apps logs deploy/tesla-wellknown` and the curl in §8 step 4 |
+
+Retired by the migration of 2026-10-17: **the migrated database is intact**. §7 records the counts
+that proved it, and `private.tokens` holding exactly one row is part of that proof — TeslaMate will
+start with zero token pairs and refuse to start with two.
 
 ## 11. Deliberately not done
 

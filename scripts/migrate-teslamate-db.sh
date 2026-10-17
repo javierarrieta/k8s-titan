@@ -25,12 +25,17 @@ NS=databases
 # *outside* the quotes makes the following quoted word a separate argument to the assignment, and bash
 # then tries to execute it — a confusing `command not found` at line 24 instead of a SQL error.
 # (That is exactly what the first version did, and `bash -n` plus a guard test caught it.)
+# TeslaMate 4.3.0 has no `trips` and no `locations` table (verified against the live schema during the
+# 2026-10-17 migration: cars, addresses, car_settings, charges, charging_processes, drives, geofences,
+# import_*, positions, schema_migrations, settings, states, updates, plus private.tokens). Asking for
+# a table that is not there makes the count query fail rather than report, so the real set is used.
 COUNTS="select
+  (select count(*) from cars)      cars,
   (select count(*) from drives)    drives,
-  (select count(*) from trips)     trips,
   (select count(*) from charges)   charges,
   (select count(*) from addresses) addresses,
-  (select count(*) from locations) locations"
+  (select count(*) from positions) positions,
+  (select count(*) from geofences) geofences"
 
 for tool in kubectl; do command -v "$tool" >/dev/null || { echo "FAIL: $tool not on PATH"; exit 1; } done
 
