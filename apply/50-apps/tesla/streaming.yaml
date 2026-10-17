@@ -1,0 +1,121 @@
+# The MyTeslaMate websocket bridge: it speaks the old Owner-API streaming protocol to TeslaMate and
+# takes POSTs from the forwarder on the other side. TeslaMate was not modified to receive Fleet API
+# telemetry — this is what makes it accept it.
+#
+# Pinned to 0.1.2 rather than the 0.1.0 the plan named. v0.1.2's only change is
+# "fix(forwarder): preserve per-VIN frame order and stop the GPS backtrack" (PR #12), which adds the
+# per-VIN queue this pipeline depends on: the forwarder can have several POSTs in flight, and without
+# that queue a late frame overwrites a newer position and TeslaMate draws the car driving backwards.
+# The plan's own forwarder comment describes that hazard; the release that fixes it is the one to run.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tesla-streaming
+  namespace: apps
+  labels:
+    app: tesla-streaming
+spec:
+  # Stateful by design. For a given VIN the telemetry POST and the websocket must land on the same
+  # pod, because the tag map and the lastValue state are in-memory — the upstream chart says so, and
+  # index.js confirms it (`tags[js.tag] = ws`, one process, no shared store). One replica, and
+  # Recreate so old and new never overlap and misroute a VIN.
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: tesla-streaming
+  template:
+    metadata:
+      labels:
+        app: tesla-streaming
+    spec:
+      containers:
+      - name: websocket
+        image: ghcr.io/myteslamate/websocket:0.1.2@sha256:3d8b98e1df946d656814d428b5f0d9e2f246b55228ea0253f7884323f22f673f
+        ports:
+        - containerPort: 8081
+          name: http
+        env:
+        # Read out of index.js rather than guessed, and the answer is the opposite of what it looks
+        # like it should be. validateToken() calls
+        #   https://api.myteslamate.com/api/1/vehicles/<vin>/fleet_telemetry_config?token=...
+        # — the third-party proxy this whole migration exists to get away from. With
+        # ENFORCE_TOKEN=true every subscribe whose token that call rejects is closed, so turning it
+        # on would re-couple TeslaMate to the service that broke it. Left false, the call still
+        # happens, its failure logs a warning, and streaming continues — which is the behaviour
+        # wanted here. It is not "no validation"; it is "do not let a dead proxy stop the car".
+        - name: ENFORCE_TOKEN
+          value: "false"
+        # Elevation enrichment off for v1 (spec §9). Empty string is the documented off switch:
+        # `process.env.OPENTOPODATA_URL || ""`.
+        - name: OPENTOPODATA_URL
+          value: ""
+        # GET / is a two-line health handler in index.js; the liveness probe must not be pointed at
+        # /streaming/, which is a websocket upgrade and answers 400 to a plain GET.
+        livenessProbe:
+          httpGet:
+            path: /
+            port: http
+          initialDelaySeconds: 5
+          periodSeconds: 15
+        readinessProbe:
+          httpGet:
+            path: /
+            port: http
+        securityContext:
+          # Deliberately not runAsNonRoot: the upstream image declares no USER (verified from its
+          # Dockerfile — `FROM node:21-alpine3.18`, no USER line), so it runs as root, and npm wants
+          # a writable $HOME. Hardening that is a change to the image, not to this manifest, and
+          # setting a uid here on an image that cannot be pulled and tested from this workspace is
+          # how you get a CrashLoop on a public endpoint. Recorded as a known residual in the
+          # runbook. What is safe to drop without knowing the image's internals is dropped here.
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+        resources:
+          requests:
+            cpu: 50m
+            memory: 128Mi
+          limits:
+            cpu: 500m
+            memory: 512Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: tesla-streaming
+  namespace: apps
+spec:
+  selector:
+    app: tesla-streaming
+  ports:
+  - name: http
+    port: 80
+    targetPort: http
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: tesla-streaming
+  namespace: apps
+spec:
+  ingressClassName: traefik
+  rules:
+  - host: streaming.titan.arrieta.eu
+    http:
+      paths:
+      # Prefix `/` covers both surfaces: `/streaming/` for TeslaMate's websocket and `POST /` for
+      # the forwarder. Only the one TeslaMate pod ever POSTs here, and it is in-cluster; the public
+      # host exists because TeslaMate's TESLA_WSS_HOST wants a wss:// URL with a real certificate.
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: tesla-streaming
+            port:
+              number: 80
+  tls:
+  - hosts:
+    - streaming.titan.arrieta.eu
+    secretName: titan-tls

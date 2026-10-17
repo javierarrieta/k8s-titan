@@ -34,3 +34,38 @@ resources:
   # saw - and the quota is the only thing standing between a third workspace and the Postgres
   # every other app here depends on.
   - coder/workspaces.yaml
+  # TeslaMate. The Database and DatabaseRole first, for the same reason authentik's and coder's
+  # precede their apps: a TeslaMate that starts before its role exists crash-loops, and that reads
+  # as an app bug rather than as apply order. The rest of the tesla/ files append after this one,
+  # in dependency order - redis before fleet-telemetry, the telemetry pipeline before the forwarder,
+  # the forwarder before TeslaMate itself.
+  - tesla/teslamate-db.yaml
+  # The public-key server next: Tesla will not finish pairing until it answers, and nothing
+  # else here depends on it, so it is early rather than buried behind the telemetry chain.
+  - tesla/wellknown.yaml
+  # Redis before fleet-telemetry: the producer connects at startup and exits if it cannot, so the
+  # order here is the difference between a slow start and a CrashLoopBackOff.
+  - tesla/redis.yaml
+  - tesla/fleet-telemetry.yaml
+  # The bridge before the forwarder that POSTs to it: the forwarder retries with backoff, so this
+  # order only avoids a noisy first minute.
+  - tesla/streaming.yaml
+  # The forwarder last of the telemetry chain: it is the only consumer of the redis channel and the
+  # only client of the bridge, so starting it before either exists is a restart loop rather than a
+  # race. Its script lives in this file as a ConfigMap, and scripts/tesla-forwarder-tests.sh runs
+  # those exact bytes on every `make check`.
+  - tesla/forwarder.yaml
+  # TeslaMate itself, after everything it talks to: the database (first in this list), the streaming
+  # bridge its TESLA_WSS_HOST points at, and the tesla-oauth Secret carrying the application client
+  # id. That last one is why it cannot start earlier — a missing Secret is a Pending pod, which is
+  # the loud failure; a placeholder client id would have been the silent one.
+  - tesla/teslamate.yaml
+  # Grafana last: it reads the same teslamate-secrets password as TeslaMate and the same CNPG
+  # database, and adds the only stateful volume in this group. Its admin password comes from
+  # tesla-grafana-admin because the upstream image ships admin/admin in its own ENV.
+  - tesla/grafana.yaml
+  # The Tesla application's OAuth redirect endpoint. `replicas: 0` is its steady state: nothing is
+  # running between pairings, and the operator scales it to 1 for the one authorization that mints
+  # TeslaMate's token pair (runbook §5). It logs the request line and does nothing else — the code is
+  # exchanged on the operator's machine, so the client secret never enters the cluster.
+  - tesla/auth-callback.yaml

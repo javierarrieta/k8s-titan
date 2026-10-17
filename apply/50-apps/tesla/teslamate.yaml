@@ -1,0 +1,167 @@
+# TeslaMate against the official EU Fleet API.
+#
+# Every TESLA_* name below was checked against TeslaMate's own environment_variables.md at tag
+# v4.3.0, and the values against its "Guide to using the official Tesla API directly" — which
+# prescribes exactly this shape: fleet-api.<region> as TESLA_API_HOST, auth.tesla.com + /oauth2/v3,
+# your application's client id, and TESLA_WSS_HOST pointed at a self-hosted MyTeslaMate streaming
+# server. The guide routes telemetry through GCP PubSub push; this tree uses Redis plus the
+# forwarder instead, which is the same shape with no third party in it.
+#
+# There is deliberately no TOKEN= here. That variable is for third-party providers (MyTeslaMate,
+# Teslemetry) and is sent as the bearer token on every call — setting it is how the old setup ended
+# up dependent on a proxy that went away.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: teslamate
+  namespace: apps
+  labels:
+    app: teslamate
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: teslamate
+  template:
+    metadata:
+      labels:
+        app: teslamate
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        # The image's own User is the *string* "nonroot:nonroot" and the image ships no /etc/passwd
+        # at all (every layer was extracted and checked), so kubelet cannot verify runAsNonRoot
+        # against it — it needs a number. 10000/10001 is what actually owns /opt/app inside the
+        # image, read from the layer's own tar metadata, and those paths are world-readable, so any
+        # uid could execute them; naming the real one just keeps the process's identity honest.
+        runAsUser: 10000
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: teslamate
+        image: teslamate/teslamate:4.3.0@sha256:516fc9f0a14369f541b1a70ff2f65dd9b57c2e01c1f533b6d43b375445404955
+        ports:
+        - containerPort: 4000
+          name: http
+        envFrom:
+        # ENCRYPTION_KEY and the four DATABASE_* values. DATABASE_HOST is postgres-rw, not
+        # `postgres`: CNPG publishes postgres-r / -ro / -rw and there is no bare `postgres` service
+        # in `databases` (verified against the live cluster). DATABASE_SSL stays unset — CNPG
+        # accepts plaintext client connections by default, which is how authentik already connects.
+        - secretRef:
+            name: teslamate-secrets
+        env:
+        - name: VIRTUAL_HOST
+          value: tesla.titan.arrieta.eu
+        - name: CHECK_ORIGIN
+          value: "true"
+        - name: TZ
+          value: UTC
+        # No Home Assistant integration in v1 (spec §3 T12). If it is ever wanted, this is the only
+        # thing to flip plus MQTT_HOST.
+        - name: DISABLE_MQTT
+          value: "true"
+        # Europe, Middle East, Africa. The region is not cosmetic: a EU vehicle against the NA
+        # fleet endpoint does not resolve.
+        - name: TESLA_API_HOST
+          value: https://fleet-api.prd.eu.vn.cloud.tesla.com
+        - name: TESLA_AUTH_HOST
+          value: https://auth.tesla.com
+        - name: TESLA_AUTH_PATH
+          value: /oauth2/v3
+        # Not a secret, and it would be a ConfigMap if a ConfigMap could fail loudly: the value does
+        # not exist until the operator registers the application, so a committed placeholder would
+        # build green, review green, and break sign-in quietly. A missing Secret leaves the pod
+        # Pending with an event that names it.
+        - name: TESLA_AUTH_CLIENT_ID
+          valueFrom:
+            secretKeyRef:
+              name: tesla-oauth
+              key: TESLA_AUTH_CLIENT_ID
+        - name: TESLA_WSS_HOST
+          value: wss://streaming.titan.arrieta.eu
+        - name: TESLA_WSS_USE_VIN
+          value: "true"
+        # TESLA_WSS_TLS_ACCEPT_INVALID_CERTS is deliberately absent even though TeslaMate's own guide
+        # includes it in the self-hosted example — there it covers a self-signed cert from the
+        # bridge's chart. Here the bridge is behind the Ingress, which serves the wildcard from
+        # Let's Encrypt, so the certificate is valid and accepting invalid ones would only be a
+        # hole. If streaming ever fails to connect, the certificate is the bug to fix.
+        #
+        # Spec §3.1. TeslaMate's documented defaults are driving 2.5 s, charging 5 s, online 60 s,
+        # asleep 30 s, default 15 s. Against the Fleet API that is roughly $65/month and blows the
+        # free 200 device-data calls per vehicle per day inside one trip. These values put a
+        # typical day near $8.60, inside the $10/month individual discount. Realtime detail comes
+        # from the telemetry stream, not from polling; polling only has to notice state changes.
+        - name: POLLING_DRIVING_INTERVAL
+          value: "30"
+        - name: POLLING_CHARGING_INTERVAL
+          value: "60"
+        - name: POLLING_ONLINE_INTERVAL
+          value: "300"
+        - name: POLLING_ASLEEP_INTERVAL
+          value: "1800"
+        - name: POLLING_DEFAULT_INTERVAL
+          value: "120"
+        # No startupProbe: TeslaMate boots in a few seconds, and / is a LiveView route that answers
+        # 200 once the endpoint is up. Liveness with a generous initial delay is enough and one less
+        # thing to get wrong.
+        livenessProbe:
+          httpGet:
+            path: /
+            port: http
+          initialDelaySeconds: 30
+          periodSeconds: 30
+        readinessProbe:
+          httpGet:
+            path: /
+            port: http
+        resources:
+          requests:
+            cpu: 100m
+            memory: 256Mi
+          limits:
+            cpu: 600m
+            memory: 512Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: teslamate
+  namespace: apps
+spec:
+  selector:
+    app: teslamate
+  ports:
+  - name: http
+    port: 80
+    targetPort: http
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: teslamate
+  namespace: apps
+spec:
+  ingressClassName: traefik
+  rules:
+  - host: tesla.titan.arrieta.eu
+    http:
+      paths:
+      # Prefix `/`, which is the less specific rule on this host: `/.well-known` in
+      # wellknown.yaml wins for the public key and everything else lands here.
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: teslamate
+            port:
+              number: 80
+  tls:
+  - hosts:
+    - tesla.titan.arrieta.eu
+    secretName: titan-tls

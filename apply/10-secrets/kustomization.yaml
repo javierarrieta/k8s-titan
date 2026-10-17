@@ -34,3 +34,24 @@ resources:
   # for the same reason as coder's blueprint, and it is rendered by scripts/setup-google-blueprint.sh
   # from authentik/blueprints-google.yaml.
   - authentik-google-blueprint.yaml
+  # TeslaMate. Two files rather than one because the same password has to reach two namespaces: the
+  # app reads DATABASE_PASS from `apps`, and CNPG's DatabaseRole needs a `kubernetes.io/basic-auth`
+  # Secret in `databases` carrying the identical value. That split is what the script's own
+  # cross-check compares, for the same reason make db-url-check exists for coder.
+  - teslamate-secrets.yaml
+  - teslamate-db-credentials.yaml
+  - tesla-grafana-admin.yaml
+  # The Tesla application's PUBLIC key and its OAuth client id, both written by
+  # scripts/setup-tesla-secrets.sh once the application existed at developer.tesla.com. Neither is a
+  # credential: the public half is meant to be published at /.well-known/appspecific/ and Tesla
+  # re-fetches it forever, and the client id appears in every consent URL. They are Secrets because
+  # a committed ConfigMap placeholder for a value that did not exist yet would build green, review
+  # green, and break sign-in quietly, whereas a missing Secret leaves the pod Pending with an event
+  # that names it.
+  #
+  # tesla-wellknown is served by the nginx Pod at tesla.titan.arrieta.eu/.well-known/..., which is
+  # the URL pairing depends on. tesla-oauth is read by TeslaMate as TESLA_AUTH_CLIENT_ID, and it must
+  # be the SAME client id that minted TeslaMate's token pair: refresh.ex sends client_id, and Tesla
+  # answers a mismatch with invalid_client (TeslaMate issue #4091).
+  - tesla-wellknown.yaml
+  - tesla-oauth.yaml

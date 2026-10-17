@@ -1,0 +1,169 @@
+# Tesla's own fleet-telemetry server, receiving the vehicle's real-time stream.
+#
+# This is the piece that makes the Fleet API affordable: the car pushes signals here, so TeslaMate
+# does not have to poll for them. Spec §2 is the arithmetic; the short version is that polling alone
+# runs about $65/month and blows the free 200 device-data calls per vehicle per day inside a single
+# trip.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: tesla-fleet-telemetry-config
+  namespace: apps
+data:
+  # Every key here was checked against config/config.go at tag v0.9.5 of
+  # github.com/teslamotors/fleet-telemetry, not copied from a blog post. Three of them are load
+  # bearing and each fails in a different silent way:
+  #
+  #   transmit_decoded_records  with it false the payload is flatbuffers, the bridge's JSON.parse
+  #                             throws, the bridge answers 200 anyway, and TeslaMate quietly never
+  #                             sees a frame.
+  #   publish_vin_topics        the redis producer refuses to start without this or
+  #                             subscriber_set_prefix ("otherwise no records are published") — that
+  #                             one at least fails loudly, at startup.
+  #   records.V                 routes the vehicle record to redis; anything not routed here is
+  #                             decoded and thrown away.
+  config.json: |
+    {
+      "host": "0.0.0.0",
+      "port": 8443,
+      "status_port": 8080,
+      "log_level": "info",
+      "json_log_enable": true,
+      "namespace": "tesla_telemetry",
+      "transmit_decoded_records": true,
+      "rate_limit": {
+        "enabled": true,
+        "message_interval_time": 30,
+        "message_limit": 1000
+      },
+      "records": {
+        "alerts": ["logger"],
+        "errors": ["logger"],
+        "V": ["redis"]
+      },
+      "redis": {
+        "addrs": ["tesla-redis:6379"],
+        "publish_vin_topics": true
+      },
+      "tls": {
+        "server_cert": "/etc/certs/tls.crt",
+        "server_key": "/etc/certs/tls.key"
+      }
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tesla-fleet-telemetry
+  namespace: apps
+  labels:
+    app: tesla-fleet-telemetry
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: tesla-fleet-telemetry
+  template:
+    metadata:
+      labels:
+        app: tesla-fleet-telemetry
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        # 65532 is the image's own numeric User, so this is a restatement rather than a guess.
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: fleet-telemetry
+        image: tesla/fleet-telemetry:v0.9.5@sha256:7cb5f429210128b8edc5aac1e403589315893106f4c5a3ff85cb32213e2f8e37
+        # No command: the image's Cmd is already
+        # ["/fleet-telemetry", "-config", "/etc/fleet-telemetry/config.json"], which is exactly
+        # where the ConfigMap below lands. Restating it would only create a second place to be wrong.
+        ports:
+        - containerPort: 8443
+          name: telemetry
+        - containerPort: 8080
+          name: status
+        # /status is the only route the status server registers — checked against
+        # server/monitoring/status_server.go at v0.9.5, not assumed from a /healthz habit.
+        livenessProbe:
+          httpGet:
+            path: /status
+            port: status
+          initialDelaySeconds: 10
+          periodSeconds: 30
+        readinessProbe:
+          httpGet:
+            path: /status
+            port: status
+        volumeMounts:
+        - name: config
+          mountPath: /etc/fleet-telemetry
+          readOnly: true
+        - name: certs
+          mountPath: /etc/certs
+          readOnly: true
+        resources:
+          requests:
+            cpu: 50m
+            memory: 128Mi
+          limits:
+            cpu: 500m
+            memory: 512Mi
+      volumes:
+      - name: config
+        configMap:
+          name: tesla-fleet-telemetry-config
+      - name: certs
+        # titan-tls is Reflector's *copy* of the wildcard, reflected into `apps`. A copy, not a live
+        # reference: when the wildcard renews, the mounted bytes in a running pod do not change, so
+        # the car's handshake starts failing while every Flux condition stays green. The runbook
+        # carries the two commands that compare the mounted cert with the live Secret, and the
+        # rollout that fixes it.
+        secret:
+          secretName: titan-tls
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: tesla-fleet-telemetry
+  namespace: apps
+spec:
+  selector:
+    app: tesla-fleet-telemetry
+  ports:
+  - name: telemetry
+    port: 8443
+    targetPort: telemetry
+  - name: status
+    port: 8080
+    targetPort: status
+---
+# TLS passthrough, not termination: the vehicle must see the wildcard certificate directly, and
+# fleet-telemetry is mTLS-only by construction — ExtractServiceTLSConfig in config.go returns
+# ClientAuth: RequireAndVerifyClientCert against Tesla's production CA, which is compiled into the
+# binary (defaultProdCA), so no ca_file is configured and none would work.
+#
+# `passthrough` lives at spec.tls on this CRD, NOT at spec.routes[].tls. That was verified against
+# the live ingressroutetcps.traefik.io schema on Traefik 3.7.8, where a route has only
+# match/middlewares/priority/services/syntax. The v2 examples that float around set routes[].tls
+# and would be silently ignored here.
+apiVersion: traefik.io/v1alpha1
+kind: IngressRouteTCP
+metadata:
+  name: tesla-telemetry
+  namespace: apps
+spec:
+  entryPoints:
+  - websecure
+  routes:
+  - match: HostSNI(`telemetry.titan.arrieta.eu`)
+    services:
+    - name: tesla-fleet-telemetry
+      port: 8443
+  tls:
+    passthrough: true

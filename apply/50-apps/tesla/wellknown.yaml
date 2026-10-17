@@ -1,0 +1,118 @@
+# Tesla re-fetches the application's public key, forever, from
+# https://tesla.titan.arrieta.eu/.well-known/appspecific/com.tesla.3p.public-key.pem
+# Pairing fails with a misleading "application has not registered" when that 404s, so this is a
+# server in its own right rather than a path bolted onto TeslaMate: it must outlive TeslaMate, and a
+# TeslaMate outage must never look like a revoked registration.
+#
+# The whole app is one static file, mounted straight from the Secret. No template, no rewrite: the
+# bytes Tesla gets are the bytes `scripts/setup-tesla-secrets.sh` wrote, which it verifies
+# byte-for-byte against the PEM that was registered.
+#
+# Why a Secret and not a ConfigMap: this repo's gates look hard at apply/10-secrets and hardly at
+# apply/50-apps. The key is public — that is not why — but a file Tesla depends on should live where
+# a mistake gets caught.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tesla-wellknown
+  namespace: apps
+  labels:
+    app: tesla-wellknown
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: tesla-wellknown
+  template:
+    metadata:
+      labels:
+        app: tesla-wellknown
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        # 101, measured, not remembered: the image config for
+        # nginxinc/nginx-unprivileged:1.31.7-alpine carries User=101, and the upstream nginx image
+        # runs as 1000 — the unprivileged variant is the whole reason for the +1.
+        runAsUser: 101
+        runAsGroup: 101
+        fsGroup: 101
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: nginx
+        image: nginxinc/nginx-unprivileged:1.31.7-alpine@sha256:378d0c32f6562f7fd9629170797f57d2b953aa09be983b3daaf4809bb039ca00
+        # No command, no config: the image's own server block is
+        #   listen 8080; location / { root /usr/share/nginx/html; }
+        # (read out of the image layer, not assumed), which is exactly a static file server rooted
+        # where the Secret is mounted. A ConfigMap here would be one more thing to keep in sync with
+        # an upstream default that has not moved in a decade.
+        ports:
+        - containerPort: 8080
+          name: http
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+        volumeMounts:
+        - name: pubkey
+          mountPath: /usr/share/nginx/html/.well-known/appspecific
+          readOnly: true
+        resources:
+          requests:
+            cpu: 10m
+            memory: 16Mi
+          limits:
+            cpu: 100m
+            memory: 64Mi
+      volumes:
+      - name: pubkey
+        secret:
+          secretName: tesla-wellknown
+          # Secret volumes default to 0644; 0444 says "nobody is meant to write here" in the mode
+          # bits rather than only in a comment. nginx (uid 101) can still read it.
+          defaultMode: 0444
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: tesla-wellknown
+  namespace: apps
+spec:
+  selector:
+    app: tesla-wellknown
+  ports:
+  - name: http
+    port: 80
+    targetPort: http
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: tesla-wellknown
+  namespace: apps
+spec:
+  ingressClassName: traefik
+  rules:
+  - host: tesla.titan.arrieta.eu
+    http:
+      paths:
+      # Prefix on /.well-known against TeslaMate's Prefix on / for the same host. Traefik orders
+      # longest-prefix-first, so this wins for the key and everything else reaches TeslaMate.
+      #
+      # No redirect middleware here, and none exists to reference: the traefik pod's args are
+      # `--entryPoints.web.address=:8000`, `--entryPoints.websecure.address=:8443` and
+      # `--entryPoints.websecure.http.tls=true` — there is no `web.redirect` configured, so k3s does
+      # not force HTTP to HTTPS at the entrypoint. A middleware reference to an object this repo does
+      # not create would 404 every route on this router, which is a silent, total failure; cleartext
+      # HTTP serving a public key is not one. Same situation as every other Ingress in this tree.
+      - path: /.well-known
+        pathType: Prefix
+        backend:
+          service:
+            name: tesla-wellknown
+            port:
+              number: 80
+  tls:
+  - hosts:
+    - tesla.titan.arrieta.eu
+    secretName: titan-tls
