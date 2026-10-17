@@ -5,9 +5,11 @@
 # referenced by name. Read auth/authentik-db.yaml first; everything it records about DatabaseRole
 # applies verbatim, including that `login: true` is required and silent when missing.
 #
-# Why a separate role at all, when the cluster has a superuser: TeslaMate runs in a pod on a node
-# that also runs untrusted-ish code, and the credential it carries should be able to do exactly one
-# thing. A role that owns one database cannot ALTER its way into someone else's.
+# THIS ROLE IS A SUPERUSER, AND THAT WAS NOT THE FIRST CHOICE. The intent was a role that could do
+# exactly one thing. TeslaMate's own migrations make that impossible on PostgreSQL without patching
+# the app: they create `earthdistance` (a superuser-only extension), `ALTER FUNCTION` its members
+# (ownership), and later `DROP EXTENSION` it (ownership again). See the note on the Database below
+# for the four migrations and what each one requires. Read it before narrowing this back.
 apiVersion: postgresql.cnpg.io/v1
 kind: Database
 metadata:
@@ -18,40 +20,37 @@ spec:
   owner: teslamate
   cluster:
     name: postgres
-  # TeslaMate's first migration runs `CREATE EXTENSION IF NOT EXISTS cube` and the same for
-  # `earthdistance` (elixir/priv/repo/migrations), and `earthdistance` is a superuser-only
-  # extension: `cube` succeeds because it needs no privilege, then the migration dies on
-  # 42501 "permission denied to create extension earthdistance / Must be superuser".
-  # Observed live on the first deploy, and the pod CrashLooped.
+  # LEFT MINIMAL ON PURPOSE: no `extensions` stanza.
   #
-  # Declaring them here is the whole fix. The operator creates extensions AS THE SUPERUSER on
-  # behalf of a low-privilege owner, which is precisely the point of spec.extensions (upstream
-  # declarative_database_management.md: "installing certain extensions may require superuser
-  # privileges, which CloudNativePG recommends disabling by default"). TeslaMate then finds both
-  # present and its `IF NOT EXISTS` is a no-op.
+  # The role is a superuser because TeslaMate's migrations need to be, and that is not adjustable
+  # without patching the app. Read the history before "fixing" this:
   #
-  # WHY NOT THE OBVIOUS ALTERNATIVES, all of which were considered live and rejected:
-  #   - DatabaseRole `superuser: true` — narrowest diff, widest blast radius: the TeslaMate
-  #     credential could then read authentik's and coder's data, which is what this role exists
-  #     to prevent.
-  #   - `spec.managed.extensions` on the Cluster — does not exist in CNPG 1.30.x. `managed` has
-  #     only `roles` and `services` (checked against the live CRD). Writing it would have had the
-  #     API server reject the whole Cluster and take the apps stage down.
-  #   - `bootstrap.initdb.postInitApplicationSQL` — runs as superuser, correct, but only when the
-  #     Cluster is CREATED. postgres is older than this manifest; it would have been a no-op.
-  #   - a one-off `psql` as the postgres superuser — works, needs an admin context, and leaves
-  #     state git cannot describe. This file is the version that survives a rebuild.
-  extensions:
-  # `schema: public` is not decoration: TeslaMate's migration names it explicitly
-  # (`WITH SCHEMA public`) because it looks the functions up unqualified.
-  - name: cube
-    ensure: present
-    schema: public
-  # earthdistance depends on cube; the operator rejects a missing dependency, so order matters
-  # here even though both are declared.
-  - name: earthdistance
-    ensure: present
-    schema: public
+  #   20190925152807  CREATE EXTENSION IF NOT EXISTS earthdistance WITH SCHEMA public
+  #                   ALTER FUNCTION ll_to_earth SET search_path = public
+  #   20240929084639  DROP EXTENSION cube CASCADE  /  CREATE EXTENSION cube ...
+  #   20250407155134  ALTER EXTENSION earthdistance UPDATE
+  #
+  # `earthdistance` is a superuser=true extension, so it cannot be created by this role without
+  # elevation; `ALTER FUNCTION` requires ownership of the function; and `DROP EXTENSION` requires
+  # ownership of the extension. Ownership follows the creator, so a superuser that creates them
+  # elsewhere leaves TeslaMate unable to alter or drop them - it fails on a database that already
+  # has data, several versions later, which is the worst time to find out.
+  #
+  # `spec.extensions` on the Database was tried and does create them, as superuser, correctly. It
+  # is gone anyway: with a superuser role the app can create them itself, so keeping both means two
+  # mechanisms owning the same objects, which upstream's declarative_database_management.md warns
+  # about by name. Observed live: with extensions declared and the role not elevated, the migration
+  # got past `CREATE EXTENSION` and died on `must be owner of function ll_to_earth`.
+  #
+  # ACL IS NOT THE MITIGATION FOR A SUPERUSER, and pretending otherwise would be the lie. This role
+  # can read authentik's and coder's data in this cluster - `superuser` overrides every grant. What
+  # actually bounds the risk:
+  #   - the credential lives in one Secret in `apps` and is mounted by one container;
+  #   - the pod runs no user-supplied code, no shell, no network listener beyond :4000;
+  #   - `securityContext` runs it as uid 10000 with no capabilities and a read-only root.
+  # If that is not acceptable later, the answer is a dedicated Postgres for TeslaMate, not a
+  # narrower grant here: extension ownership is per-object and cannot be delegated declaratively on
+  # CNPG 1.30.x (`ExtensionSpec` carries only Name/Ensure/Version/Schema - no owner).
 ---
 apiVersion: postgresql.cnpg.io/v1
 kind: DatabaseRole
@@ -65,5 +64,8 @@ spec:
   # Required, and nothing complains when it is absent. CNPG creates the role NOLOGIN by default, so
   # a missing `login: true` is a TeslaMate that cannot connect and a Database that reports Ready.
   login: true
+  # See the long note on the Database above. This is the one credential in this cluster with
+  # superuser reach, and both halves of the reason are in the app's own migrations, not in a guess.
+  superuser: true
   passwordSecret:
     name: teslamate-db-credentials
