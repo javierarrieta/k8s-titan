@@ -41,10 +41,17 @@ resources:
   - teslamate-secrets.yaml
   - teslamate-db-credentials.yaml
   - tesla-grafana-admin.yaml
-  # tesla-wellknown.yaml and tesla-oauth.yaml are deliberately NOT listed: they do not exist yet.
-  # They hold the Tesla application's PUBLIC key and its OAuth client id, neither of which exists
-  # until the operator has minted the keypair (scripts/setup-tesla-secrets.sh --genkey) and
-  # registered the application with Tesla. Listing them now would break `kustomize build` on a
-  # missing file - a manifest nobody has written is worse than a manifest nobody listed, because it
-  # fails the whole stage rather than one app. When the script writes them, add the two lines here;
-  # `make secrets-placement` fails until you do.
+  # The Tesla application's PUBLIC key and its OAuth client id, both written by
+  # scripts/setup-tesla-secrets.sh once the application existed at developer.tesla.com. Neither is a
+  # credential: the public half is meant to be published at /.well-known/appspecific/ and Tesla
+  # re-fetches it forever, and the client id appears in every consent URL. They are Secrets because
+  # a committed ConfigMap placeholder for a value that did not exist yet would build green, review
+  # green, and break sign-in quietly, whereas a missing Secret leaves the pod Pending with an event
+  # that names it.
+  #
+  # tesla-wellknown is served by the nginx Pod at tesla.titan.arrieta.eu/.well-known/..., which is
+  # the URL pairing depends on. tesla-oauth is read by TeslaMate as TESLA_AUTH_CLIENT_ID, and it must
+  # be the SAME client id that minted TeslaMate's token pair: refresh.ex sends client_id, and Tesla
+  # answers a mismatch with invalid_client (TeslaMate issue #4091).
+  - tesla-wellknown.yaml
+  - tesla-oauth.yaml
