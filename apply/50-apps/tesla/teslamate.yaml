@@ -192,22 +192,29 @@ kind: Ingress
 metadata:
   name: teslamate
   namespace: apps
-  # No middleware attached, deliberately, until the reference is proven. TeslaMate was 404 on every path
-  # for as long as the annotation below pointed at a middleware Traefik would not bind — see the plan's
-  # Task 3 notes. The Middleware object above stays in place and inert: an unreferenced Middleware costs
-  # nothing, an unbindable reference on a live router takes the whole host down.
+  # Forward-auth to the embedded authentik outpost.
   #
-  # What was tried, on traefik 3.7.8, both rejected with `middleware "..." does not exist`:
-  #   apps-teslamate-auth@kubernetescrd   (PR #63)
-  #   apps-teslamate-auth@kubernetes      (PR #64)
-  # The object is in Flux's inventory as apps_teslamate-auth_traefik.io_Middleware, the group matches the
-  # IngressRouteTCP that telemetry uses successfully, and traefik logs no RBAC or reflector error. So the
-  # answer is not the suffix, and guessing again is not an acceptable way to find out.
+  # The suffix is `@kubernetescrd`, which is the CRD provider's own name: `ProviderName = "kubernetescrd"`
+  # (traefik `pkg/provider/kubernetes/crd/kubernetes.go:47`, tag v3.7.0). `@kubernetes` is the Ingress
+  # provider and does not resolve a CRD middleware. PR #64 claimed the reverse on this repo's own
+  # paraphrased evidence and was wrong; the plan's Task 3 carries the correction so nobody trusts it.
   #
-  # Also NOT a guess: the car's telemetry path is untouched by any of this. It is
-  # telemetry.titan.arrieta.eu over an IngressRouteTCP matched on HostSNI, a different router entirely,
-  # and /.well-known kept its exact body hash throughout. Only the TeslaMate web UI was ever affected.
-  annotations: {}
+  # The 404 that made this look like a suffix problem was never a suffix problem. The proxy provider had
+  # no Application, so /outposts/proxy/ filtered it out (`application__isnull=False`) and the embedded
+  # outpost had no apps at all — silently, because it suppresses its own empty-provider warning for
+  # embedded outposts. See the application entry in auth/tesla-outpost-blueprint.yaml and runbook §9.
+  #
+  # maxResponseBodySize is the value authentik's own Traefik-3 generator sets
+  # (providers/proxy/controllers/k8s/traefik_3.py:145). Without it traefik logs a DoS warning and buffers
+  # an unbounded auth response body.
+  #
+  # What is NOT gated, deliberately: the car's telemetry path is telemetry.titan.arrieta.eu over an
+  # IngressRouteTCP matched on HostSNI — a different router — and /.well-known is a separate Ingress with
+  # no middleware, so Tesla's public-key fetch never reaches forward-auth. That is the invariant the whole
+  # tree is arranged to protect; if this annotation ever 404s the host, those two are the first things to
+  # re-check, not the middleware.
+  annotations:
+    traefik.ingress.kubernetes.io/router.middlewares: apps-teslamate-auth@kubernetescrd
 spec:
   ingressClassName: traefik
   rules:
