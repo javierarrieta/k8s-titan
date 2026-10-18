@@ -129,6 +129,22 @@ If measured device-data is near or above 200/day, **raise the intervals**; do no
 to cover a mistake. If the bill is above $0, the discount is gone and the intervals need re-deriving
 from the numbers, not from this table.
 
+**What those numbers cost is detection latency, and it compounds.** The state machine doubles the wait
+every time a check still finds the car `:asleep` or `:offline` —
+`{:next_state, {state, min(interval * 2, asleep_interval())}, data, schedule_fetch(interval, data)}` in
+`lib/teslamate/vehicles/vehicle.ex` — so a parked car is polled at 30 s, then 60, 120, 240 … up to the
+`POLLING_ASLEEP_INTERVAL` cap of 1800 s. **Nothing pushes to TeslaMate**, so waking the car by hand does
+not shorten the wait. Measured 2026-10-18: both cars entered `:offline` at 18:06:53 and no check came due
+for the following half hour, which made a woken car look dead. To see state now, use the wake-up control
+on the car page, or force a fetch with `kubectl -n apps rollout restart deploy/teslamate` — the state
+machine starts at `:start` and fetches immediately, which is why a restart always appears to "fix" it.
+Do not lower `POLLING_ASLEEP_INTERVAL` to chase this: at 1800 s a parked car costs ~48 calls/day, and
+300 s would put an all-day-asleep car at ~288/day, past the 200/day cap above.
+
+Related, and a reason not to over-react to flapping: current TeslaMate `main` carries a `pre_online_check`
+field because MCU2-upgraded cars wake for 2–3 minutes each hour for subsystem checks, and treating that
+as a real wakeup forces a ~15-minute full wake. Brief hourly `:online` blips are the car, not the gate.
+
 ## 4. Telemetry path
 
 `tesla-fleet-telemetry` is configured by `apply/50-apps/tesla/fleet-telemetry.yaml`. Three settings
@@ -360,6 +376,8 @@ of them can be done by the agent.
 |---|---|
 | TeslaMate sign-in fails | `tesla-oauth` missing or wrong client id; region mismatch between the app and `TESLA_API_HOST` |
 | signed in, but "vehicle not responding" | the migrated token is undecryptable — sign out and in again (§7) |
+| car is awake but the dashboard stays stale for tens of minutes | the `:asleep`/`:offline` backoff, doubling up to `POLLING_ASLEEP_INTERVAL` (1800 s) — by design, see §3; force a fetch with the wake-up control or a pod restart |
+| API logs `Account <client_id> must be registered in the current region` | **not** a region mismatch. It means the partner account registration was never done — spec §7 step 3, `POST /api/1/partner_accounts` with `{"domain":"<app domain>"}` (field is `domain`, not `domain_code`) and a partner token whose `audience` is the EU Fleet API base URL. Prove it with `GET /api/1/partner_accounts/public_key?domain=…`, which must return the key served at `/.well-known`. A successful token exchange does **not** prove registration is complete, which is what made this look like a region problem. |
 | no live speed/elevation, but positions appear | that is expected: the bridge reports live power as 0 and there is no elevation enrichment (§10) |
 | `synced: false` forever | car asleep or offline; the config only applies on a sync |
 | car connects, fleet-telemetry rejects | the public-CA assumption (§5), or the cert hazard (§6) |
