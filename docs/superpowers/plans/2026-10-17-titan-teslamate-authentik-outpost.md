@@ -196,9 +196,35 @@ how you tell "the mount is wrong" from "the blueprint is wrong". A `BlueprintIns
 `status=error` is discovered-and-rejected; no row at all is never-discovered. Those are different
 diagnoses with different fixes, and only this table distinguishes them.
 
+**Why the outpost endpoint cannot be probed the obvious way.** The embedded outpost is dispatched by the
+Rust server inside authentik-server: `route_core_and_outpost` (`src/server/mod.rs:260-289`) resolves the
+provider with `app_for_request(&host, uri)` and falls through to Django when nothing matches, which is
+where a `404` comes from. Two consequences, both measured here rather than read off a diagram:
+
+1. Host resolution prefers `X-Forwarded-Host` over `Host`
+   (`packages/ak-axum/src/extract/host.rs:13, 52-59`). That is what makes Traefik `forwardAuth` work at
+   all: Traefik sets XFH to the original request's host, so a forward request for
+   `tesla.titan.arrieta.eu` resolves the provider even though the connection goes to the authentik
+   Service.
+2. The same header is why a hand-made probe is worthless. Traefik rewrites `X-Forwarded-Host` on inbound
+   requests, so
+   `curl -H 'X-Forwarded-Host: tesla...' https://auth.titan.arrieta.eu/outpost.goauthentik.io/auth/traefik`
+   arrives with XFH `auth.titan.arrieta.eu`, matches no provider, and 404s — identically whether or not
+   the provider exists, and identically to a control request for a host that does not exist. **This
+   endpoint is not a usable pre-Task-3 signal.** The first request that can reach it is Task 3's own
+   route, so the `404 -> challenge` test belongs there, not here.
+
+What Task 2 can prove is the two queries above, and both need `pods/exec` in `auth`, which `k8s-reader`
+does not have. They are operator commands; everything else in this task is agent-readable.
+
 **Files:** none
 
-- [ ] **Step 1: apply and wait for the worker.** Flux syncs on its own; to watch rather than wonder:
+- [x] **Step 1: apply and wait for the worker.** Done, and the agent can watch all of it except the
+  blueprint outcome: `apps` moved to the merged revision, the ConfigMap `resourceVersion` changed, and
+  Stakater's reloader rolled the worker (`authentik-worker-5bcf6b95c-cfr5s` → `authentik-worker-5d99f6f948-85758`)
+  without anyone touching it — which is the annotation from Task 1 doing its job. `blueprints_discovery`
+  ran and reported `Task finished, exc: null`, **and that line means nothing**: the rejected blueprint in
+  the previous section reported exactly the same thing.
 
 ```bash
 kubectl --context titan -n flux-system logs deploy/kustomize-controller --since=5m | grep -i authentik
@@ -208,10 +234,30 @@ kubectl --context titan -n auth logs deploy/authentik-worker --since=5m | grep -
 Expected: the blueprint is applied with no validation error. A wrong model name or attribute shows
 **only here** — no Kubernetes object reflects it.
 
-- [ ] **Step 2: re-run Task 0 Step 2.** The code must now differ from the recorded `404`. If it is
-  still `404`, the path is wrong; stop and fix the path before Task 3, because Task 3 fails closed.
+- [x] **Step 2: re-run Task 0 Step 2.** **Retired, not passed.** The endpoint cannot distinguish the two
+  states from outside — see the dispatch note above: Traefik rewrites `X-Forwarded-Host`, so every probe
+  arrives with the front door's own host, matches no provider, and 404s whether or not the provider
+  exists. A control request for a host that does not exist returns the same code. The plan's "if it is
+  still `404`, the path is wrong" would have sent the next person chasing a phantom; the first request
+  that can reach the outpost is Task 3's own route.
 
-- [ ] **Step 3: confirm authentik actually has the objects**, from the admin API rather than the UI:
+- [x] **Step 3: confirm authentik actually has the objects.** This is the only real proof Task 2 has,
+  and it needs `pods/exec` in `auth`:
+
+```bash
+kubectl --context k8s-titan -n auth exec deploy/authentik-worker -- ak shell -c 'from authentik.blueprints.models import BlueprintInstance; from authentik.outposts.models import Outpost; [print(b.name, "|", b.status) for b in BlueprintInstance.objects.filter(name="titan-tesla")]; [print(o.name, list(o.providers.values_list("name", flat=True))) for o in Outpost.objects.all()]'
+```
+
+  Live output after the second merge:
+
+```
+titan-tesla | successful
+authentik Embedded Outpost ['titan-tesla']
+```
+
+  Which is also the record that the first merge did **not** work: the same query returned
+  `titan-tesla | error` with `authentik Embedded Outpost []`, and the reason was two required provider
+  fields, not anything about the outpost.
 
 ```bash
 kubectl --context titan -n auth exec deploy/authentik-server -- ak shell -c \
@@ -242,14 +288,28 @@ different attribute name — fix it here, not after the routes exist.
 curl -s https://tesla.titan.arrieta.eu/.well-known/appspecific/com.tesla.3p.public-key.pem | sha256sum
 ```
 
-- [ ] **Step 2: write the `Middleware`.** `forwardAuth` with `address` the endpoint proven in Task 2,
-  `trustForwardHeader: true`, and `authResponseHeaders` limited to what the apps read
-  (`X-Forwarded-User`, `X-Forwarded-Email`, `X-Forwarded-Preferred-Username`, `X-Forwarded-Groups`).
-  Do **not** forward `Authorization`: a header the proxy sets must not be one a client can set itself.
+- [x] **Step 2: write the `Middleware`.** `forwardAuth` with `address` the embedded outpost
+  (`http://authentik-server.auth.svc.cluster.local/outpost.goauthentik.io/auth/traefik` — that Service is
+  `80 -> 9000`, measured, and 9000 is the Rust server that dispatches the outpost path) and
+  `trustForwardHeader: true`. **`authResponseHeaders` is deliberately unset.** The plan said to forward
+  `X-Forwarded-User`/`-Email`/`-Preferred-Username`/`-Groups`; that is the legacy nginx-auth-proxy set and
+  authentik does not emit it — authentik's own Traefik-3 generator forwards the `X-authentik-*` set
+  (`providers/proxy/controllers/k8s/traefik_3.py:124-145`). Neither TeslaMate nor Grafana reads any
+  identity header, so nothing is forwarded: forward-auth here is a gate, not an identity handoff, and an
+  app that has no use for a JWT should not be sent one.
 
-- [ ] **Step 3: replace the `Ingress` with an `IngressRoute`** for `tesla.titan.arrieta.eu`,
-  `tls.secretName: titan-tls`, one route on `Host(...) && PathPrefix(/)` with the middleware
-  attached, service `teslamate:80`. Delete the old `Ingress` in the same edit.
+- [x] **Step 3: attach the `Middleware` to the existing `Ingress` by annotation** —
+  `traefik.ingress.kubernetes.io/router.middlewares: apps-teslamate-auth@kubernetescrd`. The plan said to
+  replace the `Ingress` with an `IngressRoute`; that was rejected on precedence. Today `/.well-known`
+  (wellknown.yaml) and `/` are both plain Ingresses and Traefik's ordering between them is proven in
+  production by Tesla's own daily fetch. Moving only one side to an IngressRoute puts the two routers in
+  different providers with different default-priority arithmetic, and if the catch-all ever wins, the
+  public key starts 404ing and pairing reports "application has not registered" — the single failure mode
+  this whole tree is arranged to avoid. Same provider, same ordering, two-line diff.
+
+  Note what that ordering is actually load-bearing for: the public key is served by a **different router
+  with no middleware attached**, so the forward-auth call is never made for it. `skip_path_regex` in the
+  blueprint is a backstop, not the mechanism.
 
 - [ ] **Step 4: dry-run — mandatory, because `crd-check` cannot see Traefik schemas**
 
