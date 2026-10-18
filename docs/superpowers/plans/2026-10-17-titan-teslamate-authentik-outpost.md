@@ -30,7 +30,14 @@ spec's §8 lists both of these as unproven.
 
 **Files:** none (probe only)
 
-- [ ] **Step 1: exact blueprint model strings**
+- [x] **Step 1: exact blueprint model strings** — ran; output below. All three guesses were right,
+  and one of them turned out to be unusable for a reason no model string could reveal (see Task 1).
+
+```
+MODEL authentik_outposts.outpost
+MODEL authentik_outposts.outpostserviceconnection
+MODEL authentik_providers_proxy.proxyprovider
+```
 
 ```bash
 kubectl --context titan -n auth exec deploy/authentik-worker -- ak shell -c \
@@ -44,7 +51,13 @@ Expected: three lines of the form `authentik_outposts.outpost`,
 `authentik_outposts.outpostserviceconnection`, `authentik_providers_proxy.proxyprovider`. **Use what
 it prints, not what is written above** — the spec lists those as a guess to be retired.
 
-- [ ] **Step 2: does the embedded outpost answer, and on what path**
+- [x] **Step 2: does the embedded outpost answer, and on what path** — `OUTPOST 404`, recorded as the
+  baseline. What the 404 actually meant was only established later: the embedded outpost already exists
+  (`embedded_outpost()` in `outposts/apps.py`, `managed=goauthentik.io/outposts/embedded`, type proxy)
+  and serves this path, but its provider list was empty — confirmed live:
+  `OUTPOST 'authentik Embedded Outpost' managed= 'goauthentik.io/outposts/embedded' type= proxy providers= []`.
+  A 404 from an outpost with no providers is a different diagnosis from "no outpost exists", and the
+  two lead to completely different manifests.
 
 ```bash
 kubectl --context titan -n auth exec deploy/authentik-worker -- \
@@ -56,9 +69,8 @@ Expected before any provider exists: `404`. After Task 2 it must change to an au
 (`401`/`407`). Record the before value; a code that never changes means the path is wrong and Task 3
 would fail closed.
 
-- [ ] **Step 3: record both outputs** in the progress file
-  `.superpowers/sdd/2026-10-17-titan-teslamate-authentik-outpost/progress.md`, created here. Every
-  later task cites this file instead of re-probing.
+- [x] **Step 3: record both outputs** — recorded inline above rather than in a separate progress file,
+  because the two results are only meaningful next to the correction they caused.
 
 ---
 
@@ -66,26 +78,48 @@ would fail closed.
 
 **Files:**
 - Create: `apply/50-apps/auth/tesla-outpost-blueprint.yaml`
-- Modify: `apply/50-apps/auth/kustomization.yaml`
-- Modify: `apply/50-apps/auth/authentik.yaml` (HelmRelease values + reloader annotations)
+- Modify: `apply/50-apps/kustomization.yaml`
+- Modify: `apply/50-apps/auth/authentik.yaml` (HelmRelease values + worker reloader annotation)
 
-- [ ] **Step 1: write the ConfigMap.** Key `tesla.yaml` (the chart only discovers keys ending in
-  `.yaml`, per the values comment). Three entries, using the model strings from Task 0:
+**Two corrections to this task, both found by reading source rather than trusting the plan.** They are
+kept here rather than quietly fixed, because the wrong version is the kind of thing that gets re-derived
+from scratch by the next person.
 
-  - `ServiceConnection` — `name: titan-local`, `local: true`.
-  - `ProxyProvider` — `name: titan-tesla`, `external_host: https://titan.arrieta.eu`,
-    `mode: forward_domain`, `cookie_domain: titan.arrieta.eu`,
-    `skip_path_regex: '^/\.well-known'`, `internal_host: ""`.
-  - `Outpost` — `name: titan-tesla`, `type: proxy`, `providers: [titan-tesla]`,
-    `service_connection: titan-local`.
+1. **There is no `apply/50-apps/auth/kustomization.yaml`.** The stage lists its files directly in
+   `apply/50-apps/kustomization.yaml`; `auth/`, `coder/`, `databases/` and `tesla/` have no per-directory
+   kustomization at all. Step 2 below names the right file.
+2. **No `ServiceConnection`, and no new `Outpost`.** The entry this plan specified cannot be written:
+   `OutpostServiceConnection` is not a `SerializerModel` (`outposts/models.py:121` — only the Docker and
+   Kubernetes subclasses are, `:181` and `:232`) and it sits in the blueprint importer's excluded list
+   (`blueprints/v1/importer.py:80`, checked at `:91`). Proven, not inferred: a pre-flight `validate()`
+   against the live instance rejected it with `Model <class 'authentik.outposts.models.OutpostServiceConnection'> not allowed`.
+   The embedded outpost needs neither — `Outpost.service_connection` is `null=True` with the help text
+   "Leave empty if authentik should not handle the deployment" (`models.py:271-280`), and the managed
+   embedded outpost is editable by design: `validate_name` freezes only its name and `validate_providers`
+   returns early for it (`outposts/api/outposts.py:60-90`). So the blueprint attaches a provider to the
+   outpost authentik already made, and thereby **owns that outpost's provider list** — a provider added
+   in the UI is removed by the next apply. That consequence is written in the ConfigMap's own header.
+
+- [x] **Step 1: write the ConfigMap.** Key `tesla.yaml` (the chart only discovers keys ending in
+  `.yaml`, per the values comment). Two entries:
+
+  - `authentik_providers_proxy.proxyprovider` — `id: titan-tesla-provider`, `name: titan-tesla`,
+    `external_host: https://titan.arrieta.eu`, `mode: forward_domain`,
+    `cookie_domain: titan.arrieta.eu`, `skip_path_regex: '^/\.well-known'`. `internal_host` is left
+    unset rather than set to `""`: the field's help text marks it exclusive to the non-forward modes
+    (`providers/proxy/models.py:87-94`).
+  - `authentik_outposts.outpost` — identified by `name: authentik Embedded Outpost`, i.e. the managed
+    one, with `type: proxy` and `providers: [!KeyOf titan-tesla-provider]`. `type` must be present in
+    attrs: `validate_providers` dispatches on `initial_data["type"]` (`outposts/api/outposts.py:69-88`).
 
   Header comment must say, in the repo's voice: why a ConfigMap and not a Secret (no credentials, and
   the chart offers only `blueprints.configMaps` / `blueprints.secrets` — `values.yaml:220-226` of
   authentik-2026.8.3, no inline entries), and what `skip_path_regex` is protecting (Tesla's fetch of
   the Fleet public key, which presents as "application has not registered" when it 404s).
 
-- [ ] **Step 2: list it** in `apply/50-apps/auth/kustomization.yaml`. Forgetting this is the failure
-  mode `make kustomize-listing` exists for.
+- [x] **Step 2: list it** in `apply/50-apps/kustomization.yaml`, before `auth/authentik.yaml` — the
+  HelmRelease mounts this ConfigMap, and a pod whose mount target does not exist yet sits Pending. Forgetting
+  this is the failure mode `make kustomize-listing` exists for; it now reports 52 manifests, 0 unlisted.
 
 - [ ] **Step 3: wire the HelmRelease.** In `apply/50-apps/auth/authentik.yaml` values:
 
@@ -96,11 +130,29 @@ would fail closed.
 ```
 
   and add `configmap.reloader.stakater.com/reload: authentik-tesla-blueprint` beside the existing
-  `secret.reloader.stakater.com/reload` on **both** the server and the worker pod templates
-  (`authentik.yaml:111` and `:135`). Without the worker annotation, an edit to this ConfigMap sits
-  unread for up to an hour, which is the exact reason the existing annotation was added.
+  `secret.reloader.stakater.com/reload` on the **worker only**. The plan said both; the file's own
+  comment at `authentik.yaml:105-110` says the server does not apply blueprints and restarting it for a
+  blueprint edit would be an auth outage for no behaviour. That reasoning is correct and it wins.
+  Without the worker annotation, an edit to this ConfigMap sits unread for up to an hour, which is the
+  exact reason the existing annotation was added.
 
-- [ ] **Step 4: verify offline**
+- [x] **Step 3b: pre-flight the blueprint against the live instance, without writing anything.**
+  `Importer.from_string(...).validate()` runs the entire import inside a rolled-back transaction
+  (`blueprints/v1/importer.py:453-474`), so it reports model and field errors and changes nothing:
+
+```bash
+kubectl --context k8s-titan -n auth exec -i deploy/authentik-worker -- sh -c 'cat > /tmp/tesla.yaml' < /tmp/tesla.yaml
+kubectl --context k8s-titan -n auth exec deploy/authentik-worker -- ak shell -c 'from authentik.blueprints.v1.importer import Importer; imp = Importer.from_string(open("/tmp/tesla.yaml").read()); ok, events = imp.validate(raise_validation_errors=False); print("VALID", ok); [print("EVENT", e) for e in events]'
+```
+
+  Write it as one line with `;` separators: `ak shell -c` takes the string verbatim, and a multi-line
+  paste through a shell continuation prompt arrives indented and dies with `IndentationError`.
+  This gate is optional — a bad blueprint cannot lock anyone out before Task 3, because no route points
+  at the provider yet, and the worker log says so — but it caught the excluded-model error above for the
+  price of one command. It needs `pods/exec`, which `k8s-reader` does not have in `auth`; reading the
+  worker log afterwards does not, which is why the post-merge half of this plan is runnable by the agent.
+
+- [x] **Step 4: verify offline**
 
 ```bash
 git add -A && make check

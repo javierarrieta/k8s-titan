@@ -1,0 +1,109 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  # Named `authentik-tesla-blueprint` so it reads beside authentik-coder-blueprint and
+  # authentik-google-blueprint, which are Secrets. This one is a ConfigMap on purpose: it carries no
+  # credential, and a ConfigMap is readable in plain view by anyone who can read the namespace — which
+  # is exactly the right exposure for a proxy provider definition and exactly the wrong one for
+  # coder's client_secret. See docs/superpowers/specs/2026-10-17-titan-teslamate-authentik-outpost-design.md §5.
+  name: authentik-tesla-blueprint
+  namespace: auth
+data:
+  # Only keys ending in .yaml are discovered by the worker (chart authentik-2026.8.3,
+  # values.yaml:220-226 — the chart offers blueprints.configMaps and blueprints.secrets and nothing
+  # else; there is no inline blueprints.entries in this release).
+  tesla.yaml: |
+    # authentik blueprint: forward-auth for TeslaMate and Grafana, served by the embedded outpost.
+    #
+    # WHY A BLUEPRINT AND NOT A UI CLICK
+    # authentik ships no CRDs (verified on this cluster; the pinned chart has no crds/ directory), so
+    # blueprints are the only declarative path. A rebuilt authentik gets these objects back from git.
+    #
+    # WHY THERE IS NO OUTPOST DEPLOYMENT AND NO SERVICE CONNECTION HERE
+    # The proxy outpost is Rust (src/outpost/proxy/ in the authentik tree) and the *embedded* one runs
+    # inside authentik-server. That outpost already exists on this cluster: outposts/apps.py creates
+    # it on reconcile as MANAGED_OUTPOST = "goauthentik.io/outposts/embedded",
+    # MANAGED_OUTPOST_NAME = "authentik Embedded Outpost", type PROXY. It is what serves
+    # /outpost.goauthentik.io/auth/traefik, and it answered 404 here before this blueprint for exactly
+    # one reason — it had no providers attached, and OutpostSerializer's own comment
+    # (outposts/api/outposts.py:42-43, "allow_empty=True for the embedded outpost with no providers")
+    # is the other half of the same fact.
+    #
+    # So this blueprint does not create an outpost. It attaches a provider to the one authentik made.
+    # Editing the managed outpost is allowed on purpose, and the serializer says so twice:
+    #   validate_name      (outposts/api/outposts.py:60-69)  -> only the name is frozen
+    #   validate_providers (outposts/api/outposts.py:69-90)  -> returns early for the managed outpost,
+    #                                                          so its provider list is manageable
+    # A service connection is not needed and cannot be declared here: OutpostServiceConnection is not a
+    # SerializerModel (outposts/models.py:121 — only the Docker and Kubernetes subclasses are, :181 and
+    # :232), and it is in the blueprint importer's excluded list (blueprints/v1/importer.py:80, with
+    # the check at :91). That is not an obstacle to work around; it is authentik saying connections are
+    # discovered, not declared. Outpost.service_connection is null=True anyway, with the help text
+    # "Leave empty if authentik should not handle the deployment" (models.py:271-280) — which is the
+    # embedded case exactly.
+    #
+    # THE CONSEQUENCE OF THIS CHOICE, STATED OUT LOUD
+    # This blueprint now OWNS the embedded outpost's provider list. A provider added to the embedded
+    # outpost in the UI will be removed by the next apply of this file, because `providers` is set, not
+    # appended to. Any future proxy provider must be added here or in its own blueprint that also
+    # carries the full list — not clicked into existence.
+    #
+    # WHAT THE PROVIDER SETTINGS ARE FOR
+    # mode: forward_domain — one provider covering titan.arrieta.eu, so TeslaMate and Grafana share
+    #   one session cookie. The alternative, forward_single per host, would make Grafana authenticate
+    #   independently, and TeslaMate embeds Grafana in an iframe: a second authentication would have to
+    #   complete *inside the frame*. Same-site cookies make that survivable (tesla., grafana. and auth.
+    #   all share the registrable domain arrieta.eu) but one cookie removes the question instead of
+    #   answering it. Field and choices read from authentik/providers/proxy/models.py:87-95.
+    # cookie_domain — so that one cookie is accepted by every host under it. models.py:141.
+    # skip_path_regex — THE PUBLIC KEY MUST STAY PUBLIC. Tesla's servers fetch
+    #   https://tesla.titan.arrieta.eu/.well-known/appspecific/com.tesla.3p.public-key.pem during
+    #   pairing, and when that 404s Tesla reports "application has not registered", which points at
+    #   the wrong thing entirely (docs/teslamate-runbook.md §8). Excluding it here keeps the exception
+    #   in one place with one test, rather than also encoding it in Traefik route priority.
+    #   Field and its own help text: models.py:96-103 ("Each new line is interpreted as a new
+    #   Regular Expression").
+    #
+    # WHAT IS DELIBERATELY ABSENT
+    # internal_host is left unset: it is "Exclusive with" forward-auth mode per the field's own help
+    # text (models.py:87-94), and setting it would silently change what the provider does.
+    # access_group is left unset, so any authentik-authenticated user reaches both apps. Tightening
+    # that is a separate change with its own review, not a side effect of this one.
+    # intercept_header_auth is left at its default: nothing here authenticates by header.
+    version: 1
+    metadata:
+      name: titan-tesla
+    entries:
+      # The provider. `id` is set so the outpost entry below can point at it with !KeyOf instead of
+      # hunting the database for an object this same blueprint creates — the pattern
+      # authentik/blueprints-coder.yaml already uses, and the reason is recorded there: validate()
+      # runs the whole import inside a rolled-back transaction (blueprints/v1/importer.py:453-474),
+      # so a !Find against an object created in this blueprint would not see it.
+      - model: authentik_providers_proxy.proxyprovider
+        id: titan-tesla-provider
+        identifiers:
+          name: titan-tesla
+        state: present
+        attrs:
+          name: titan-tesla
+          external_host: https://titan.arrieta.eu
+          mode: forward_domain
+          cookie_domain: titan.arrieta.eu
+          skip_path_regex: '^/\.well-known'
+
+      # The outpost authentik created for itself. The identifier must match MANAGED_OUTPOST_NAME
+      # exactly, and `type` must be present in attrs: validate_providers dispatches on
+      # initial_data["type"] (outposts/api/outposts.py:69-88), and a proxy provider only passes the
+      # ProxyProvider branch. !KeyOf resolves inside a list because the tag walker descends into both
+      # lists and dicts (blueprints/v1/common.py:133-146) and returns the entry's pk
+      # (common.py:239-253) — which is what OutpostSerializer wants, providers being a
+      # PrimaryKeyRelatedField (outposts/api/outposts.py:44).
+      - model: authentik_outposts.outpost
+        identifiers:
+          name: authentik Embedded Outpost
+        state: present
+        attrs:
+          name: authentik Embedded Outpost
+          type: proxy
+          providers:
+            - !KeyOf titan-tesla-provider

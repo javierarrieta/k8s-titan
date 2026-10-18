@@ -56,6 +56,13 @@ spec:
         # to the same trap: a valid blueprint that is never mounted looks exactly like a blueprint
         # that was never written.
         - authentik-google-blueprint
+      # A ConfigMap, not a Secret: this blueprint carries no credential, so it gets the exposure that
+      # matches — readable by anyone who can read the namespace, which is fine for a proxy provider
+      # definition and would not be for coder's client_secret. The outpost it declares is the embedded
+      # one inside authentik-server, so there is no outpost token to encrypt either
+      # (OutpostServiceConnection.local, outposts/models.py:127).
+      configMaps:
+        - authentik-tesla-blueprint
     authentik:
       log_level: info
       error_reporting:
@@ -133,3 +140,9 @@ spec:
       #    up to an hour after a merge. That delay is what made PR #42's fix look like it had not landed.
       podAnnotations:
         secret.reloader.stakater.com/reload: "authentik-secrets,authentik-coder-blueprint,authentik-google-blueprint"
+        # The Tesla blueprint arrives as a ConfigMap and needs the same treatment for the same reason:
+        # kubelet rewrites the mounted file in place and the worker only discovers blueprints hourly
+        # plus at startup, so an edit would otherwise sit unread for up to an hour after a merge.
+        # Worker only, deliberately — the comment above records that the server does not apply
+        # blueprints, so restarting it for a blueprint edit would be an auth outage for no behaviour.
+        configmap.reloader.stakater.com/reload: authentik-tesla-blueprint

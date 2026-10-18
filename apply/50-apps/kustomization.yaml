@@ -28,6 +28,11 @@ resources:
   # `make kustomize-listing` was added to close.
   # After the Database and DatabaseRole it connects with. The HelmRelease would install and
   # authentik would crash-loop on a missing role, so ordering here is cheap insurance.
+  # authentik's blueprint for the Tesla apps, before the HelmRelease that mounts it: the chart mounts
+  # this ConfigMap into the worker, and a pod whose mounted ConfigMap does not exist yet sits Pending
+  # rather than converging. It is a ConfigMap and not a Secret because it carries no credential - see
+  # the file's own header for why that distinction is the whole point.
+  - auth/tesla-outpost-blueprint.yaml
   - auth/authentik.yaml
   # Quota, limit range and the provisioner Role, all in coder-workspaces. They precede coder's
   # HelmRelease because a workspace built before the quota exists is a workspace the quota never
