@@ -192,13 +192,22 @@ kind: Ingress
 metadata:
   name: teslamate
   namespace: apps
-  annotations:
-    # The suffix is `@kubernetes`, not `@kubernetescrd`. That is a Traefik v2 → v3 rename and it is not
-    # forgiving: with the v2 suffix Traefik logs `middleware "apps-teslamate-auth@kubernetescrd" does not
-    # exist` and drops the router, so the host answers 404 for everything — which reads as TeslaMate being
-    # down, not as a bad string. Measured on this cluster (traefik 3.7.8): the middleware registers as
-    # `apps-teslamate-auth@kubernetes`, and that is the only spelling that resolves.
-    traefik.ingress.kubernetes.io/router.middlewares: apps-teslamate-auth@kubernetes
+  # No middleware attached, deliberately, until the reference is proven. TeslaMate was 404 on every path
+  # for as long as the annotation below pointed at a middleware Traefik would not bind — see the plan's
+  # Task 3 notes. The Middleware object above stays in place and inert: an unreferenced Middleware costs
+  # nothing, an unbindable reference on a live router takes the whole host down.
+  #
+  # What was tried, on traefik 3.7.8, both rejected with `middleware "..." does not exist`:
+  #   apps-teslamate-auth@kubernetescrd   (PR #63)
+  #   apps-teslamate-auth@kubernetes      (PR #64)
+  # The object is in Flux's inventory as apps_teslamate-auth_traefik.io_Middleware, the group matches the
+  # IngressRouteTCP that telemetry uses successfully, and traefik logs no RBAC or reflector error. So the
+  # answer is not the suffix, and guessing again is not an acceptable way to find out.
+  #
+  # Also NOT a guess: the car's telemetry path is untouched by any of this. It is
+  # telemetry.titan.arrieta.eu over an IngressRouteTCP matched on HostSNI, a different router entirely,
+  # and /.well-known kept its exact body hash throughout. Only the TeslaMate web UI was ever affected.
+  annotations: {}
 spec:
   ingressClassName: traefik
   rules:
