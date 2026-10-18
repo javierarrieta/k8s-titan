@@ -81,3 +81,11 @@ spec:
       namespaces:
         - coder
         - auth
+        # Added 2026-10-18 for the promtail DaemonSet, which carries
+        # `reloader.stakater.com/auto: "true"` and lives here. Until this line that annotation was
+        # inert: Reloader does not look at a namespace outside this list, so editing promtail-config
+        # rolled nothing and the pod kept running whatever it read at start. That made a DaemonSet
+        # appear to ignore its own ConfigMap, which is most of what made one afternoon expensive;
+        # docs/titan-logs-loki.md records how to tell "the edit did not land" from "the edit landed
+        # and the pod never restarted".
+        - monitoring

@@ -183,11 +183,16 @@ the CLI flag `-server.profiling_enabled=true` — **not** `server.pprof_enabled`
 config and **not** `-pprof.enabled`, neither of which exist in 3.6.11; both fail, the
 second one loudly at startup.
 
-Two procedural notes from the same investigation. Live edits to the ConfigMap and the
+Three procedural notes from the same investigation. Live edits to the ConfigMap and the
 DaemonSet are reverted by the next Flux sync, so an experiment can silently test the
 committed config instead of the intended one; promtail logs `sha3sum` of the config it
 loaded, and comparing that hash against the previous pod is the only cheap proof that
-an edit actually took effect. And a diagnostic pattern must be built from the real path
+an edit actually took effect. A third, and the one that fooled this investigation for
+longest: **editing the ConfigMap does not restart the pod.** Reloader rolls it only if
+`monitoring` is in its namespace list (`apply/20-infra/reloader/reloader.yaml`), and
+until it was, the `reloader.stakater.com/auto: "true"` annotation on the DaemonSet did
+nothing at all — `kubectl -n monitoring rollout restart ds/promtail` was the only way
+to make a config change real. Compare the `sha3sum`; never assume the restart happened. And a diagnostic pattern must be built from the real path
 shape: `/var/log/pods/<ns>_<pod>_<uid>/<container>/<file>.log` is **three** segments, so
 the catch-all is `/var/log/pods/*/*/*.log`; a four-wildcard version matches nothing and
 looks exactly like the bug being hunted.
