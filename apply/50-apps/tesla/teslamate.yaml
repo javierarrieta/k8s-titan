@@ -181,6 +181,11 @@ spec:
     # Tesla apps and belongs to authentik, not to either of them.
     address: http://authentik-server.auth.svc.cluster.local/outpost.goauthentik.io/auth/traefik
     trustForwardHeader: true
+    # Traefik 3.7.8 warns out loud if this is unset: "maxResponseBodySize is not configured, allowing
+    # unlimited response body size which can lead to DoS attacks" (measured in the traefik pod log on the
+    # first apply of this Middleware). 4 MiB is not an invented number — it is what authentik's own
+    # Traefik-3 generator sets (providers/proxy/controllers/k8s/traefik_3.py:145).
+    maxResponseBodySize: 4194304
 ---
 apiVersion: networking.k8s.io/v1
 kind: Ingress
@@ -188,10 +193,12 @@ metadata:
   name: teslamate
   namespace: apps
   annotations:
-    # The Traefik k8s provider names a CRD middleware as `<namespace>-<name>@kubernetescrd`. A typo here
-    # is not a warning: Traefik drops the router and the host stops answering, which looks like TeslaMate
-    # being down rather than like a bad string.
-    traefik.ingress.kubernetes.io/router.middlewares: apps-teslamate-auth@kubernetescrd
+    # The suffix is `@kubernetes`, not `@kubernetescrd`. That is a Traefik v2 → v3 rename and it is not
+    # forgiving: with the v2 suffix Traefik logs `middleware "apps-teslamate-auth@kubernetescrd" does not
+    # exist` and drops the router, so the host answers 404 for everything — which reads as TeslaMate being
+    # down, not as a bad string. Measured on this cluster (traefik 3.7.8): the middleware registers as
+    # `apps-teslamate-auth@kubernetes`, and that is the only spelling that resolves.
+    traefik.ingress.kubernetes.io/router.middlewares: apps-teslamate-auth@kubernetes
 spec:
   ingressClassName: traefik
   rules:
