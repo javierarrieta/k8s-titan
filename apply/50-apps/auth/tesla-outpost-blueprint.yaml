@@ -90,6 +90,38 @@ data:
           mode: forward_domain
           cookie_domain: titan.arrieta.eu
           skip_path_regex: '^/\.well-known'
+          # Both flows are required by the Provider base with no default, and the live apply is what
+          # said so. The first apply of this blueprint was rejected with exactly:
+          #   Entry invalid: Serializer errors {'authorization_flow': ['This field is required.'],
+          #                                     'invalidation_flow': ['This field is required.']}
+          # and nothing reached stdout: blueprints/v1/tasks.py:211-222 hands the captured importer logs
+          # to self.logs(), so the rejection text lives as TaskLog rows on the apply_blueprint task
+          # (uid = slugify of the blueprint name) and `kubectl logs` shows a clean run.
+          #
+          # These were the ONLY two missing. DRF reports every failing field in one pass, and the rest
+          # of the OAuth2Provider inheritance has defaults: client_id is default=generate_id
+          # (providers/oauth2/models.py:233-238), client_secret and logout_uri are blank=True (:239-253),
+          # signing_key and encryption_key are null=True (:321-329). So this is the complete set, not
+          # the first of several rounds.
+          #
+          # !Find and not a lookup dict: these are PrimaryKeyRelatedFields, and the importer only rewrites
+          # values that are keys in its own pk_map (blueprints/v1/importer.py:175-197), so a dict reaches
+          # the serializer verbatim and dies with "is not a valid UUID". authentik/blueprints-coder.yaml
+          # records its own first apply failing the same way. !Find runs .filter(...).first() and
+          # resolves to the pk (blueprints/v1/common.py:369-413).
+          #
+          # implicit-consent, not explicit: this cluster serves one operator, and a consent screen for an
+          # app they own adds a click and no security. Same reasoning coder's provider carries.
+          authorization_flow: !Find [authentik_flows.flow, [slug, default-provider-authorization-implicit-consent]]
+          # The shipped provider invalidation flow — a stage-less terminal page, "You've logged out of
+          # %(app)s" (blueprints/default/flow-default-provider-invalidation.yaml). coder's OIDC provider
+          # points at the generic default-invalidation-flow instead; this is the provider-specific one and
+          # the right landing page for a proxy logout. The divergence from coder is deliberate, not an
+          # oversight — they are different objects with different content.
+          # Both slugs are proven present on this cluster, not assumed: their blueprints appear in
+          # BlueprintInstance as successful (default/flow-default-provider-invalidation.yaml and
+          # default/flow-default-provider-authorization-implicit-consent.yaml).
+          invalidation_flow: !Find [authentik_flows.flow, [slug, default-provider-invalidation-flow]]
 
       # The outpost authentik created for itself. The identifier must match MANAGED_OUTPOST_NAME
       # exactly, and `type` must be present in attrs: validate_providers dispatches on

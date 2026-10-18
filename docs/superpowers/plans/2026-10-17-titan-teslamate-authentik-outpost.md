@@ -81,9 +81,9 @@ would fail closed.
 - Modify: `apply/50-apps/kustomization.yaml`
 - Modify: `apply/50-apps/auth/authentik.yaml` (HelmRelease values + worker reloader annotation)
 
-**Two corrections to this task, both found by reading source rather than trusting the plan.** They are
-kept here rather than quietly fixed, because the wrong version is the kind of thing that gets re-derived
-from scratch by the next person.
+**Three corrections to this task, all found by reading source or by the live apply rather than trusting
+the plan.** They are kept here rather than quietly fixed, because the wrong version is the kind of thing
+that gets re-derived from scratch by the next person.
 
 1. **There is no `apply/50-apps/auth/kustomization.yaml`.** The stage lists its files directly in
    `apply/50-apps/kustomization.yaml`; `auth/`, `coder/`, `databases/` and `tesla/` have no per-directory
@@ -99,6 +99,14 @@ from scratch by the next person.
    returns early for it (`outposts/api/outposts.py:60-90`). So the blueprint attaches a provider to the
    outpost authentik already made, and thereby **owns that outpost's provider list** — a provider added
    in the UI is removed by the next apply. That consequence is written in the ConfigMap's own header.
+3. **`authorization_flow` and `invalidation_flow` are required and were missing.** The first live apply was
+   rejected: `Entry invalid: Serializer errors {'authorization_flow': ['This field is required.'],
+   'invalidation_flow': [...]}`. Both are required on the `Provider` base with no default; everything else
+   inherited from `OAuth2Provider` has one (`client_id` is `default=generate_id` at
+   `providers/oauth2/models.py:233-238`, `client_secret` and `logout_uri` are `blank=True`, `signing_key`
+   and `encryption_key` are `null=True`), and because DRF reports every failing field in a single pass the
+   two named were the complete set rather than the first of several rounds. Both are resolved with `!Find`
+   against the shipped flow slugs, and both slugs were confirmed present on this cluster rather than assumed.
 
 - [x] **Step 1: write the ConfigMap.** Key `tesla.yaml` (the chart only discovers keys ending in
   `.yaml`, per the values comment). Two entries:
@@ -167,6 +175,26 @@ objects).
 ---
 
 ## Task 2: prove the outpost endpoint answers before anything depends on it
+
+**Where a blueprint failure actually gets written.** Not stdout. `blueprints/v1/tasks.py:211-222` calls
+`self.logs(logs)` on failure, so the importer's warnings become `TaskLog` rows (`tasks/models.py:181-198`,
+`related_name="tasklogs"`) on the `apply_blueprint` task whose `_uid` is the slugified blueprint name.
+`kubectl logs` on the worker shows a clean run for a blueprint that was rejected. Two queries, both
+read-only but both needing `pods/exec`, which `k8s-reader` does not have in `auth`:
+
+```bash
+# was it discovered, and did it take? status is one of successful | warning | error | orphaned
+kubectl --context k8s-titan -n auth exec deploy/authentik-worker -- ak shell -c 'from authentik.blueprints.models import BlueprintInstance; [print(b.name, "|", b.path, "|", b.status, "|", b.last_applied) for b in BlueprintInstance.objects.all()]'
+# why not, if it did not
+kubectl --context k8s-titan -n auth exec deploy/authentik-worker -- ak shell -c 'from authentik.tasks.models import Task; [print(t._uid, t.state, "|", l.log_level, "|", l.event) for t in Task.objects.filter(_uid="titan-tesla") for l in t.tasklogs.all()]'
+```
+
+The field names are `_uid` and `state`, not `uid` and `status` — a wrong guess fails with a `FieldError`
+that dutifully lists the real ones. The `path` column also settles a question no log answers: mounted
+blueprints land at `mounted/cm-<configMap>/<key>.yaml` and `mounted/secret-<secret>/<key>.yaml`, which is
+how you tell "the mount is wrong" from "the blueprint is wrong". A `BlueprintInstance` row with
+`status=error` is discovered-and-rejected; no row at all is never-discovered. Those are different
+diagnoses with different fixes, and only this table distinguishes them.
 
 **Files:** none
 
