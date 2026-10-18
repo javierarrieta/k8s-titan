@@ -1,0 +1,255 @@
+---
+# titan's POD logs, pushed to k8s-casa's Loki.
+#
+# Scope, and why it is only pod logs: titan's host journald is already in that same
+# Loki, shipped by the host itself — `rsyslog.enable = true` in
+# nixos-configurations/hosts/titan/configuration.nix forwards `*.*` over wg0 to casa's
+# rsyslog intake (192.168.0.41:514) and `rsyslog-promtail` labels it
+# `{hostname="titan", job="syslog"}`. Verified live, not inferred: `{hostname="titan"}`
+# returns real systemd lines. So this DaemonSet must NOT also ship the journal — doing
+# it twice would double the volume and produce two label shapes for one stream.
+#
+# Runbook: docs/titan-logs-loki.md. It records the four places this deliberately
+# diverges from the k8s-casa and k8s-techdelivery copies of the same agent, and why
+# copying either verbatim is wrong here.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: promtail
+  namespace: monitoring
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: promtail
+rules:
+  # kubernetes_sd_configs role: pod needs to list/watch pods; nodes and services are
+  # what the sibling manifests grant and promtail's SD does not object to. Read-only,
+  # no Secrets — promtail reads log FILES off the host, it never reads the API's
+  # Secret objects, so widening this would only widen what a pod compromise can read.
+  #
+  # This is a separate identity from `k8s-reader` on purpose: that one is the agent's
+  # read access and is Forbidden on postgresql.cnpg.io, and mixing a workload identity
+  # into it means every future grant for one is a grant for the other.
+  - apiGroups: [""]
+    resources:
+      - nodes
+      - services
+      - pods
+    verbs:
+      - get
+      - watch
+      - list
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: promtail
+subjects:
+  - kind: ServiceAccount
+    name: promtail
+    namespace: monitoring
+roleRef:
+  kind: ClusterRole
+  name: promtail
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: promtail-config
+  namespace: monitoring
+data:
+  promtail.yaml: |
+    server:
+      http_listen_port: 9080
+      grpc_listen_port: 0
+      log_level: info
+
+    clients:
+      # Expanded from the SOPS-decrypted Secret `promtail-secrets` (namespace
+      # `monitoring`) by `-config.expand-env=true`.
+      #
+      # The value is https://loki.local.arrieta.eu — published in PUBLIC,
+      # DNSSEC-valid DNS but returning 192.168.0.42, an RFC1918 address, so it is
+      # unreachable from the internet by construction rather than by firewall luck, and
+      # reachable from titan only because the OPNsense WireGuard peer advertises
+      # 192.168.0.0/24. Measured from a titan pod: HTTPS 200, certificate validates.
+      #
+      # Do NOT swap in loki.casa.arrieta, the other host on casa's loki-ingress. It is
+      # not in titan's split-horizon view — `casa.arrieta` resolves on titan's own
+      # unbound only for mesh CLIENTS, not for the hub itself — and it has no TLS entry
+      # on that ingress at all.
+      - url: ${LOKI_PUSH_URL}/loki/api/v1/push
+
+    # HostPath, not /tmp. With positions in the container's /tmp every promtail restart
+    # forgets where it stopped and re-reads every log file from the beginning, which
+    # is a duplicate burst of the whole retained /var/log/pods on exactly the pod
+    # that is crash-looping.
+    positions:
+      filename: /var/lib/promtail/positions.yaml
+
+    target_config:
+      sync_period: 10s
+
+    scrape_configs:
+      - job_name: pod-logs
+        kubernetes_sd_configs:
+          - role: pod
+        relabel_configs:
+          # The one label the siblings are missing. Loki has no `cluster` label at all
+          # today, so `namespace="auth"` currently means two different clusters and a
+          # Grafana panel cannot tell them apart. This matches the metrics convention
+          # already written down in k8s-casa/apply/50-apps/monitoring/titan-k8s-scrape.yaml:
+          # "EVERY series here carries cluster=titan, and casa's own series carry no
+          # cluster". casa and techdelivery can adopt the same label later; series
+          # already stored simply never get one, which is why this is worth doing now
+          # rather than "when it hurts".
+          - target_label: cluster
+            replacement: titan
+          - source_labels:
+              - __meta_kubernetes_pod_node_name
+            target_label: __host__
+          - action: replace
+            source_labels:
+              - __meta_kubernetes_namespace
+            target_label: namespace
+          - action: replace
+            source_labels:
+              - __meta_kubernetes_pod_name
+            target_label: pod
+          - action: replace
+            source_labels:
+              - __meta_kubernetes_pod_container_name
+            target_label: container
+          - action: replace
+            replacement: $1
+            separator: /
+            source_labels:
+              - __meta_kubernetes_namespace
+              - __meta_kubernetes_pod_name
+            target_label: job
+          - action: labelmap
+            regex: __meta_kubernetes_pod_label_(.+)
+          - replacement: /var/log/pods/*$1/*.log
+            separator: /
+            source_labels:
+              - __meta_kubernetes_pod_uid
+              - __meta_kubernetes_pod_container_name
+            target_label: __path__
+        pipeline_stages:
+          # `cri`, NOT the siblings' `docker`. All three clusters are k3s + containerd
+          # (casa's nodes report containerd://2.2.7-k3s1, techdelivery 2.3.4-k3s1,
+          # titan 2.2.7-k3s1). The docker stage expects a JSON object per line; a CRI
+          # line is not JSON, so it is passed through unparsed and every stored line
+          # keeps its transport prefix — visible in casa's own streams today:
+          #   2026-10-18T19:01:17.327514446Z stderr F {"level":"info",...}
+          # The cri stage strips it, takes the CRI timestamp as the entry timestamp,
+          # and exports `stream` (stdout/stderr).
+          - cri: {}
+          # Cardinality, not cosmetics. casa's Loki runs
+          # limits_config.max_label_names_per_series: 18, and the blanket labelmap
+          # above maps EVERY pod label into the stream. titan's worst-labelled pod
+          # carries 13; add namespace/pod/container/job/cluster plus promtail's
+          # `service_name` and Loki's ingest-time `detected_level` and the series is
+          # rejected outright — the failure is per-stream and silent at the DaemonSet,
+          # which reads as "promtail is healthy, Loki has no data".
+          #
+          # `filename` is the expensive one: it embeds the pod UID
+          # (/var/log/pods/<ns>_<pod>_<uid>/<container>/0.log), so every restart mints a
+          # brand-new series that nothing ever queries. `container` already separates
+          # containers, so dropping it costs nothing. casa keeps it; that is a
+          # cardinality leak, not a feature.
+          - labeldrop:
+              - filename
+              - pod_template_hash
+              - pod_template_generation
+              - controller_revision_hash
+              - batch_kubernetes_io_controller_uid
+              - batch_kubernetes_io_job_name
+              - app_kubernetes_io_managed_by
+              - app_kubernetes_io_version
+              - app_kubernetes_io_part_of
+              - helm_sh_chart
+              - chart
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: promtail
+  namespace: monitoring
+  annotations:
+    # titan runs stakater/Reloader (apply/20-infra/reloader/reloader.yaml), so editing
+    # the ConfigMap above actually rolls the pods. Without this the config is read once
+    # at start and a "just change the pipeline stage" commit does nothing until the node
+    # reboots — the kind of no-op that looks like the GitOps pipeline lying.
+    reloader.stakater.com/auto: "true"
+spec:
+  selector:
+    matchLabels:
+      app: promtail
+  template:
+    metadata:
+      labels:
+        app: promtail
+    spec:
+      serviceAccount: promtail
+      # No tolerations. The sibling manifests carry
+      # node-role.kubernetes.io/master:NoSchedule, which is dead config on k3s 1.35 —
+      # `titan` reports no taints at all (checked: .spec.taints is empty, and so is
+      # techdelivery's single node), and the label it names is `control-plane` now
+      # anyway. Adding a toleration the node does not carry is how a scheduling
+      # assumption survives past the point where it is true.
+      containers:
+        - name: promtail
+          image: grafana/promtail:3.6.11
+          args:
+            - -config.file=/etc/promtail/promtail.yaml
+            - -config.expand-env=true
+          env:
+            # The push URL. Deliberately a Secret even though the value is public DNS
+            # and Loki runs auth_enabled: false, so there is no token to hide: keeping
+            # the endpoint out of a plain ConfigMap means that if Loki ever grows an
+            # auth header or a tenant ID, the credential lands beside it instead of
+            # forcing a move out of 20-infra. It is listed in
+            # apply/10-secrets/kustomization.yaml — an unlisted Secret there builds
+            # green and is silently never applied, which `make secrets-placement` fails
+            # on. Note `make release-secrets` cannot vouch for this one: it walks
+            # HelmRelease valuesFrom, and this is a plain DaemonSet.
+            - name: LOKI_PUSH_URL
+              valueFrom:
+                secretKeyRef:
+                  name: promtail-secrets
+                  key: LOKI_PUSH_URL
+          resources:
+            requests:
+              cpu: 50m
+              memory: 200Mi
+            limits:
+              cpu: 200m
+              memory: 500Mi
+          volumeMounts:
+            - name: logs
+              mountPath: /var/log
+              readOnly: true
+            - name: positions
+              mountPath: /var/lib/promtail
+            - name: config
+              mountPath: /etc/promtail
+      volumes:
+        # /var/log alone is the whole requirement on k3s. Proven rather than assumed:
+        # casa runs the identical runtime (containerd://2.2.7-k3s1) with this same
+        # mount set and its streams carry filename=/var/log/pods/<ns>_<pod>_<uid>/...
+        # — so kubelet's pod log files are real files there, not symlinks into
+        # /var/lib/rancher/k3s. The siblings' /var/lib/docker/containers mount is a
+        # docker-era leftover and does nothing on a containerd node.
+        - name: logs
+          hostPath:
+            path: /var/log
+        - name: positions
+          hostPath:
+            path: /var/lib/promtail
+            type: DirectoryOrCreate
+        - name: config
+          configMap:
+            name: promtail-config

@@ -15,6 +15,10 @@ resources:
   - monitoring/scrape-token.yaml
   # After the identity it is scraped by: KSM is the thing the proxy grant exists for.
   - monitoring/kube-state-metrics.yaml
+  # The other half of titan's observability leaving the cluster: metrics are PULLED by
+  # casa over the mesh, logs are PUSHED by this to casa's Loki. Different direction,
+  # same single-node constraint - nothing here runs a Prometheus or a Loki of its own.
+  - monitoring/promtail.yaml
   - reflector/reflector.yaml
   - reloader/reloader.yaml
   - cnpg/operator.yaml

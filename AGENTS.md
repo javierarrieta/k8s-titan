@@ -57,6 +57,14 @@ and kube-state-metrics leaves the cluster through the kube-apiserver service pro
 NodePort, because `publicHost.meshTCPPortExtraSources` opens mesh ports to the whole home LAN and KSM
 is unauthenticated. etcd is **not** scraped and no rule will ever report it unhealthy.
 
+Logs: pod logs are **pushed** to k8s-casa's Loki by the promtail DaemonSet in
+`apply/20-infra/monitoring/promtail.yaml`, while metrics are pulled — opposite directions,
+and `docs/titan-logs-loki.md` is the runbook. Two things there are load-bearing: titan's host
+journald is already in that same Loki via the host's own `rsyslog.enable` in nixos-configurations,
+so a `journal` job here would ship it twice; and casa's Loki caps `max_label_names_per_series` at
+18, so the `labeldrop` list in that ConfigMap is a hard limit and not cleanup — over the line and
+the stream is rejected per-pod, silently, with promtail reporting healthy.
+
 ## Rules
 
 - Every stage directory has a `kustomization.yaml` listing its resources explicitly.
