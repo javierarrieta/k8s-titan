@@ -90,7 +90,21 @@ data:
         state: present
         attrs:
           name: titan-tesla
-          external_host: https://titan.arrieta.eu
+          # The callback host, not the app host. authentik builds the OIDC redirect_uri from
+          # external_host, and the apex `titan.arrieta.eu` this used to name has NO ingress and no
+          # router — measured: `https://titan.arrieta.eu/outpost.goauthentik.io/callback` returns 404
+          # from Traefik, while the same path on `auth.` returns 400 from authentik (handled, just
+          # missing its state params). So sign-in would have died at the callback, after a perfectly
+          # good authenticate.
+          #
+          # `auth.` is already routed to authentik-server, and the embedded outpost only claims
+          # `/outpost.goauthentik.io/*` plus signed callback/logout queries on it
+          # (src/outpost/proxy/application/mod.rs:192-202), so authentik's own UI on that host is
+          # untouched. Verified, not assumed: `should_handle_url` returns false for `/` in
+          # forward_domain mode.
+          #
+          # This does NOT change which hosts get gated — that is cookie_domain below.
+          external_host: https://auth.titan.arrieta.eu
           mode: forward_domain
           cookie_domain: titan.arrieta.eu
           skip_path_regex: '^/\.well-known'
