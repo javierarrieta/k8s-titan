@@ -99,6 +99,33 @@ rules:
   - apiGroups: ["kustomize.toolkit.fluxcd.io"]
     resources: ["kustomizations"]
     verbs: ["get", "list", "watch"]
+  # Traefik's own CRDs. This is the group that explains a router which exists but
+  # will not serve: Traefik builds its configuration out of these objects, so an
+  # agent that can read the Ingress and the Traefik pod log but not the Middleware
+  # named in the log's error can describe a failure it cannot inspect. Learned the
+  # hard way on 2026-10-18, when a forward-auth reference took every path on one
+  # host down and the object the error named was unreadable.
+  #
+  # Not credential-free, unlike `services`: a Middleware can carry a `basicAuth`
+  # users hash or forward-auth request headers, so treat a read of this group the
+  # way you treat reading a ConfigMap that holds config, not the way you treat
+  # reading a Service. It is still nowhere near Secrets.
+  - apiGroups: ["traefik.io"]
+    # All ten, taken from `kubectl api-resources --api-group=traefik.io` rather than
+    # from the subset tonight's incident happened to need. An enumerated list that is
+    # incomplete is just a slower version of the same blind spot.
+    resources:
+      - ingressroutes
+      - ingressroutetcps
+      - ingressrouteudps
+      - middlewares
+      - middlewaretcps
+      - serverstransports
+      - serverstransporttcps
+      - tlsoptions
+      - tlsstores
+      - traefikservices
+    verbs: ["get", "list", "watch"]
   # k3s owns its bundled add-ons (Traefik, ServiceLB) through its own HelmChart
   # CRDs. Without these an agent can see the Traefik pod but not the chart that
   # declares it, which is the half that explains why a hand-patched add-on gets
