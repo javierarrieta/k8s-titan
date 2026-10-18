@@ -141,11 +141,57 @@ spec:
     port: 80
     targetPort: http
 ---
+# Forward-auth to the embedded outpost. This is the object the blueprint's provider exists for:
+# `titan-tesla` (apply/50-apps/auth/tesla-outpost-blueprint.yaml) is attached to the embedded outpost,
+# and this Middleware is what makes Traefik ask it before serving TeslaMate.
+#
+# WHY THE INGRESS STAYS AN INGRESS
+# The plan called for replacing this Ingress with a Traefik IngressRoute. Rejected on precedence: today
+# `/.well-known` (wellknown.yaml) and `/` are both plain Ingresses and Traefik's longest-prefix ordering
+# is what makes the public key win — that ordering is proven in production on this host, every day, by
+# Tesla's own fetch. Converting only one side to an IngressRoute puts the two routers in different
+# providers with different default-priority arithmetic, and if the catch-all ever wins, Tesla's public
+# key starts 404ing and pairing reports "application has not registered". Attaching the Middleware by
+# annotation keeps both routers in the same provider and keeps the ordering that already works, for a
+# two-line diff instead of a rewrite.
+#
+# WHY NOTHING IS FORWARDED BACK TO THE APP
+# authentik's own Traefik-3 controller, when it manages this middleware for you, forwards the whole
+# X-authentik-* set — username, groups, entitlements, email, jwt, and the rest
+# (providers/proxy/controllers/k8s/traefik_3.py:124-145). Neither TeslaMate nor Grafana reads any of it.
+# Forward-auth here is a gate, not an identity handoff, so `authResponseHeaders` is left unset entirely:
+# an app that has no use for a JWT should not receive one, and every header forwarded is a header the
+# app has to be trusted not to echo. The plan listed X-Forwarded-User/-Email/-Preferred-Username, which
+# is the legacy nginx-auth-proxy set and is not what authentik emits.
+#
+# trustForwardHeader: true is what makes resolution work at all. The embedded outpost picks the provider
+# from X-Forwarded-Host ahead of Host (packages/ak-axum/src/extract/host.rs:13, 52-59, and
+# src/server/mod.rs:266-275), and Traefik sets that header from the original request when this is on.
+# authentik's own generator defaults it to true for the same reason (traefik_3.py:28, :144).
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: teslamate-auth
+  namespace: apps
+spec:
+  forwardAuth:
+    # The embedded outpost lives inside authentik-server; its Service is 80 -> 9000 (measured, not
+    # assumed), and 9000 is the Rust server that dispatches /outpost.goauthentik.io/* to the proxy
+    # outpost and everything else to Django. Cross-namespace on purpose: the outpost is shared by both
+    # Tesla apps and belongs to authentik, not to either of them.
+    address: http://authentik-server.auth.svc.cluster.local/outpost.goauthentik.io/auth/traefik
+    trustForwardHeader: true
+---
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: teslamate
   namespace: apps
+  annotations:
+    # The Traefik k8s provider names a CRD middleware as `<namespace>-<name>@kubernetescrd`. A typo here
+    # is not a warning: Traefik drops the router and the host stops answering, which looks like TeslaMate
+    # being down rather than like a bad string.
+    traefik.ingress.kubernetes.io/router.middlewares: apps-teslamate-auth@kubernetescrd
 spec:
   ingressClassName: traefik
   rules:
@@ -154,6 +200,11 @@ spec:
       paths:
       # Prefix `/`, which is the less specific rule on this host: `/.well-known` in
       # wellknown.yaml wins for the public key and everything else lands here.
+      #
+      # That ordering, not the provider's skip_path_regex, is the primary guarantee that Tesla's public
+      # key stays public: the key is served by a different router with no middleware attached, so the
+      # forward-auth call is never made for it. skip_path_regex in the blueprint is the backstop for a
+      # request that reaches this router some other way, not the mechanism.
       - path: /
         pathType: Prefix
         backend:
