@@ -30,6 +30,10 @@ data:
     # is the other half of the same fact.
     #
     # So this blueprint does not create an outpost. It attaches a provider to the one authentik made.
+    #
+    # ...and attaching the provider is NOT SUFFICIENT, which cost hours of outage to learn. The provider
+    # must also be owned by an Application, or the outpost cannot see it at all. See the application
+    # entry below, which carries the full explanation.
     # Editing the managed outpost is allowed on purpose, and the serializer says so twice:
     #   validate_name      (outposts/api/outposts.py:60-69)  -> only the name is frozen
     #   validate_providers (outposts/api/outposts.py:69-90)  -> returns early for the managed outpost,
@@ -122,6 +126,45 @@ data:
           # BlueprintInstance as successful (default/flow-default-provider-invalidation.yaml and
           # default/flow-default-provider-authorization-implicit-consent.yaml).
           invalidation_flow: !Find [authentik_flows.flow, [slug, default-provider-invalidation-flow]]
+
+      # The Application that owns the provider. THIS ENTRY IS WHAT MAKES THE OUTPOST WORK, and its
+      # absence is why TeslaMate answered 404 on every path with nothing in any log pointing at it.
+      #
+      # The embedded outpost gets its provider list from /outposts/proxy/, served by
+      # ProxyOutpostConfigViewSet, whose queryset is literally:
+      #     ProxyProvider.objects.filter(application__isnull=False)
+      # (authentik/providers/proxy/api.py:184-188). A proxy provider with no Application is therefore
+      # INVISIBLE to the outpost. Not an error, not a warning: the list comes back empty, no apps are
+      # built, and every host falls through to the core router, which answers 404.
+      #
+      # And the reason nothing was logged about it, in the outpost's own words (src/outpost/proxy/mod.rs:129):
+      #     if providers.is_empty() && !self.controller.is_embedded() {
+      #         warn!("no providers assigned to this outpost, check outpost configuration in authentik");
+      #     }
+      # The warning is suppressed for embedded outposts specifically — the one case where an empty list
+      # is normal at startup and pathological afterwards, with no way to tell those apart from outside.
+      #
+      # Everything else was ruled out by measurement, not assumption: the outpost's service account had
+      # view permission on the provider (True), mode was 'forward_domain' and cookie_domain
+      # 'titan.arrieta.eu' (both correct, and `host.ends_with(cookie_domain)` matches tesla.), a full
+      # authentik-server restart changed nothing, and `application` was None. That last one was the only
+      # anomaly left.
+      #
+      # One application, not two: the provider is forward_domain over titan.arrieta.eu and serves both
+      # TeslaMate and Grafana, so this is the group of apps rather than TeslaMate's own page.
+      - model: authentik_core.application
+        identifiers:
+          name: tesla
+        state: present
+        attrs:
+          name: Tesla
+          slug: tesla
+          # !KeyOf for the same reason authentik/blueprints-coder.yaml does it: the provider is created
+          # by this blueprint, and KeyOf fails loudly if the entry order ever changes, instead of writing
+          # a null provider that validates fine and then does nothing — which is precisely the failure
+          # this entry exists to prevent, so it must not be able to fail silently.
+          provider: !KeyOf titan-tesla-provider
+          meta_launch_url: https://tesla.titan.arrieta.eu/
 
       # The outpost authentik created for itself. The identifier must match MANAGED_OUTPOST_NAME
       # exactly, and `type` must be present in attrs: validate_providers dispatches on
