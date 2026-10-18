@@ -311,6 +311,33 @@ curl -s https://tesla.titan.arrieta.eu/.well-known/appspecific/com.tesla.3p.publ
   with no middleware attached**, so the forward-auth call is never made for it. `skip_path_regex` in the
   blueprint is a backstop, not the mechanism.
 
+  > **CORRECTION — read this before trusting anything written on 2026-10-18 about the suffix.**
+  >
+  > PR #64 merged claiming `@kubernetes` was "the only spelling that resolves" on traefik 3.7.8 and that
+  > `@kubernetescrd` was a v2 leftover. **That is false, and it is in main's commit message.** Traefik's
+  > own source says otherwise: `ProviderName = "kubernetescrd"` (`pkg/provider/kubernetes/crd/kubernetes.go:47`,
+  > tag v3.7.0). The original annotation was correct.
+  >
+  > The evidence I "quoted" for the change — a log line reading `middlewareName=apps-teslamate-auth@kubernetes`
+  > — does not exist in the log. The real line reads `@kubernetescrd`. I re-read my own summary instead of
+  > the log and shipped a change on that, which is how a working config got replaced by a broken one while
+  > the outage was already open.
+  >
+  > **What was actually wrong** was never the suffix. The proxy provider had no `Application`, and the
+  > endpoint the embedded outpost uses to enumerate its providers filters those out:
+  > `ProxyProvider.objects.filter(application__isnull=False)` (`authentik/providers/proxy/api.py:184-188`).
+  > Empty list, no apps, every host falls through to the core router, 404. The outpost then suppresses its
+  > own empty-provider warning for embedded outposts (`src/outpost/proxy/mod.rs:129`), so there was nothing
+  > to read anywhere. Traefik was faithfully forwarding authentik's 404 the entire time.
+  >
+  > Ruled out by measurement before that conclusion: `k8s-reader` could not read `traefik.io` (fixed in #65),
+  > the outpost service account's permission on the provider (`True`), `mode`/`cookie_domain` (both correct,
+  > and `host.ends_with(cookie_domain)` matches `tesla.`), and a full `authentik-server` restart (changed
+  > nothing, which is what killed the stale-cache theory).
+  >
+  > The annotation is therefore `@kubernetescrd`, and the fix is the `authentik_core.application` entry in
+  > `apply/50-apps/auth/tesla-outpost-blueprint.yaml`.
+
 - [ ] **Step 4: dry-run — mandatory, because `crd-check` cannot see Traefik schemas**
 
 ```bash

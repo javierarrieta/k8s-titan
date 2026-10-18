@@ -368,6 +368,34 @@ of them can be done by the agent.
 | two bridge pods, frames missing at random | someone set `replicas: 2` (§1) |
 | Grafana asks for a login and `admin`/`admin` works | `tesla-grafana-admin` is missing or not mounted (§2) |
 | a Tesla manifest builds and nothing changes | it is not listed in a `kustomization.yaml` — `make kustomize-listing` |
+| whole host 404s on every path, Traefik log clean | forward-auth is live and authentik is the one answering 404 — see below |
+| Traefik logs `middleware "..." does not exist` | wrong provider suffix; `@kubernetescrd` is correct on traefik 3.x, `@kubernetes` is the Ingress provider |
+
+**The 404 that looks like Traefik but is not.** A forward-auth subrequest that authentik answers with 404 is
+forwarded verbatim, so the browser sees a 404 from the app's own host and Traefik's log says nothing wrong.
+Distinguish it by asking Traefik what it thinks: if the router is serving at all, the 404 came from upstream.
+Then test the outpost directly, in-cluster, because Traefik rewrites `X-Forwarded-Host` inbound and an
+external curl cannot address a specific provider:
+
+```bash
+kubectl -n auth exec deploy/authentik-server -- python -c "
+import urllib.request as u, urllib.error as e
+for h in ['tesla.titan.arrieta.eu', 'nope.example.com']:
+    try:
+        r = u.urlopen(u.Request('http://127.0.0.1:9000/outpost.goauthentik.io/auth/traefik',
+                                headers={'X-Forwarded-Host': h}))
+        print(h, r.status, r.headers.get('Location'))
+    except e.HTTPError as x:
+        print(h, x.code, x.headers.get('Location'))
+"
+```
+
+`401` + a `Location` toward a flow is healthy. `404` on both hosts means the outpost has no apps, and the
+usual reason is that the proxy provider has no `Application`: the endpoint outposts use to enumerate their
+providers is `ProxyProvider.objects.filter(application__isnull=False)`
+(`authentik/providers/proxy/api.py:184-188`), and the embedded outpost **suppresses its own empty-provider
+warning** (`src/outpost/proxy/mod.rs:129`), so the failure is silent in both processes. This cost hours;
+the fix is the `authentik_core.application` entry in `apply/50-apps/auth/tesla-outpost-blueprint.yaml`.
 
 ## 10. Not yet proven, and what would prove it
 
