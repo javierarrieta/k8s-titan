@@ -1,0 +1,275 @@
+# TeslaMate and Grafana behind authentik — Implementation Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** Require an authentik session for `tesla.titan.arrieta.eu` and `grafana.titan.arrieta.eu`, while Tesla's machine-facing endpoints — the Fleet public key, the OAuth callback and the mTLS telemetry intake — stay exactly as reachable as they are today.
+
+**Architecture:** One authentik `ProxyProvider` in `forward_domain` mode, served by the **embedded** outpost inside the existing `authentik-server` process (no new workload, no new Secret). The provider is declared in a blueprint delivered as a plain ConfigMap, which is the chart's only declarative path. Traefik's `Middleware`/`IngressRoute` CRDs replace the two core `Ingress` objects, because a plain `Ingress` cannot express "forward-auth everything except `/.well-known`".
+
+**Tech Stack:** authentik 2026.8.3 (already installed, `apply/50-apps/auth/authentik.yaml`), Traefik 3.7.8 CRDs (already installed), Flux HelmRelease values, kustomize. No new images, no new Secrets, no new namespaces.
+
+**Spec:** `docs/superpowers/specs/2026-10-17-titan-teslamate-authentik-outpost-design.md` — read it alongside this plan. It carries the measured facts (§3), the field citations (§4) and the not-proven list (§8); this plan argues from it and does not repeat the reasoning.
+
+## Global Constraints
+
+- **Never set a top-level `namespace:` in a `kustomization.yaml`.** These trees span namespaces and that field rewrites them all.
+- **Every file added under `apply/` must be listed in that directory's `kustomization.yaml`.** `make kustomize-listing` enforces it; an unlisted manifest builds green and is silently never applied.
+- **No `kind: Secret` outside `apply/10-secrets/`.** This plan adds a **ConfigMap**, not a Secret — `make secrets-placement` must stay green without being edited.
+- **`Ingress` and `IngressRoute` for the same host+prefix must never coexist.** Delete and add in one commit. Rollback is `git revert` of that commit, which Flux reconciles back.
+- **`make crd-check` does not validate Traefik CRDs** — it only knows `vendor/cnpg-crds/`. `make dry-run DRYRUN_CONTEXT=<admin context>` is the only gate that will catch a mis-nested `IngressRoute` field, and it is mandatory in Tasks 3 and 4, not optional.
+- **Order matters.** The blueprint must be applied and proven (Task 2) before any route points at it (Tasks 3-4). A route pointing at a provider that does not exist fails closed: every request to TeslaMate breaks, including for the owner.
+- **`git add -A` then `make check` before any commit**, per AGENTS.md. `*.dump` is gitignored since PR #59; do not re-add it.
+
+---
+
+## Task 0: read the model names and the outpost path out of the running container
+
+Nothing is written in this task. It exists because the coder blueprint's own header records that a
+wrong blueprint model name fails validation in the worker's log and nowhere else, and because the
+spec's §8 lists both of these as unproven.
+
+**Files:** none (probe only)
+
+- [ ] **Step 1: exact blueprint model strings**
+
+```bash
+kubectl --context titan -n auth exec deploy/authentik-worker -- ak shell -c \
+  'from authentik.outposts.models import Outpost, OutpostServiceConnection
+from authentik.providers.proxy.models import ProxyProvider
+for m in (Outpost, OutpostServiceConnection, ProxyProvider):
+    print(f"{m._meta.app_label}.{m._meta.model_name}")'
+```
+
+Expected: three lines of the form `authentik_outposts.outpost`,
+`authentik_outposts.outpostserviceconnection`, `authentik_providers_proxy.proxyprovider`. **Use what
+it prints, not what is written above** — the spec lists those as a guess to be retired.
+
+- [ ] **Step 2: does the embedded outpost answer, and on what path**
+
+```bash
+kubectl --context titan -n auth exec deploy/authentik-worker -- \
+  curl -s -o /dev/null -w '%{http_code}\n' \
+  http://authentik-server.auth.svc.cluster.local/outpost.goauthentik.io/auth/traefik
+```
+
+Expected before any provider exists: `404`. After Task 2 it must change to an auth challenge
+(`401`/`407`). Record the before value; a code that never changes means the path is wrong and Task 3
+would fail closed.
+
+- [ ] **Step 3: record both outputs** in the progress file
+  `.superpowers/sdd/2026-10-17-titan-teslamate-authentik-outpost/progress.md`, created here. Every
+  later task cites this file instead of re-probing.
+
+---
+
+## Task 1: the blueprint, as a ConfigMap
+
+**Files:**
+- Create: `apply/50-apps/auth/tesla-outpost-blueprint.yaml`
+- Modify: `apply/50-apps/auth/kustomization.yaml`
+- Modify: `apply/50-apps/auth/authentik.yaml` (HelmRelease values + reloader annotations)
+
+- [ ] **Step 1: write the ConfigMap.** Key `tesla.yaml` (the chart only discovers keys ending in
+  `.yaml`, per the values comment). Three entries, using the model strings from Task 0:
+
+  - `ServiceConnection` — `name: titan-local`, `local: true`.
+  - `ProxyProvider` — `name: titan-tesla`, `external_host: https://titan.arrieta.eu`,
+    `mode: forward_domain`, `cookie_domain: titan.arrieta.eu`,
+    `skip_path_regex: '^/\.well-known'`, `internal_host: ""`.
+  - `Outpost` — `name: titan-tesla`, `type: proxy`, `providers: [titan-tesla]`,
+    `service_connection: titan-local`.
+
+  Header comment must say, in the repo's voice: why a ConfigMap and not a Secret (no credentials, and
+  the chart offers only `blueprints.configMaps` / `blueprints.secrets` — `values.yaml:220-226` of
+  authentik-2026.8.3, no inline entries), and what `skip_path_regex` is protecting (Tesla's fetch of
+  the Fleet public key, which presents as "application has not registered" when it 404s).
+
+- [ ] **Step 2: list it** in `apply/50-apps/auth/kustomization.yaml`. Forgetting this is the failure
+  mode `make kustomize-listing` exists for.
+
+- [ ] **Step 3: wire the HelmRelease.** In `apply/50-apps/auth/authentik.yaml` values:
+
+```yaml
+    blueprints:
+      configMaps:
+        - authentik-tesla-blueprint
+```
+
+  and add `configmap.reloader.stakater.com/reload: authentik-tesla-blueprint` beside the existing
+  `secret.reloader.stakater.com/reload` on **both** the server and the worker pod templates
+  (`authentik.yaml:111` and `:135`). Without the worker annotation, an edit to this ConfigMap sits
+  unread for up to an hour, which is the exact reason the existing annotation was added.
+
+- [ ] **Step 4: verify offline**
+
+```bash
+git add -A && make check
+```
+
+Expected: `kustomize-listing: ... 0 unlisted, 0 listed-but-missing`, `secrets-placement` clean (a
+ConfigMap is not a Secret), `crd-check` unchanged (it does not know Traefik or HelmRelease-internal
+objects).
+
+- [ ] **Step 5: commit** `auth: declare the Tesla apps in authentik, as a blueprint ConfigMap`.
+
+---
+
+## Task 2: prove the outpost endpoint answers before anything depends on it
+
+**Files:** none
+
+- [ ] **Step 1: apply and wait for the worker.** Flux syncs on its own; to watch rather than wonder:
+
+```bash
+kubectl --context titan -n flux-system logs deploy/kustomize-controller --since=5m | grep -i authentik
+kubectl --context titan -n auth logs deploy/authentik-worker --since=5m | grep -iE "blueprint|titan-tesla|error"
+```
+
+Expected: the blueprint is applied with no validation error. A wrong model name or attribute shows
+**only here** — no Kubernetes object reflects it.
+
+- [ ] **Step 2: re-run Task 0 Step 2.** The code must now differ from the recorded `404`. If it is
+  still `404`, the path is wrong; stop and fix the path before Task 3, because Task 3 fails closed.
+
+- [ ] **Step 3: confirm authentik actually has the objects**, from the admin API rather than the UI:
+
+```bash
+kubectl --context titan -n auth exec deploy/authentik-server -- ak shell -c \
+  'from authentik.providers.proxy.models import ProxyProvider
+from authentik.outposts.models import Outpost
+for p in ProxyProvider.objects.filter(name="titan-tesla"):
+    print(p.name, p.mode, p.cookie_domain, repr(p.skip_path_regex))
+for o in Outpost.objects.filter(name="titan-tesla"):
+    print(o.name, o.type, list(o.providers.values_list("name", flat=True)))'
+```
+
+Expected: `titan-tesla forward_domain titan.arrieta.eu '^/\\.well-known'` and
+`titan-tesla proxy ['titan-tesla']`. If `skip_path_regex` prints empty, the blueprint wrote a
+different attribute name — fix it here, not after the routes exist.
+
+---
+
+## Task 3: TeslaMate's front door
+
+**Files:**
+- Modify: `apply/50-apps/tesla/teslamate.yaml` (delete the `Ingress`, add `Middleware` + `IngressRoute`)
+- Modify: nothing else; `wellknown.yaml` stays as it is and must keep working untouched
+
+- [ ] **Step 1: capture the public key's current body hash**, so "unchanged" is a comparison and not
+  an impression:
+
+```bash
+curl -s https://tesla.titan.arrieta.eu/.well-known/appspecific/com.tesla.3p.public-key.pem | sha256sum
+```
+
+- [ ] **Step 2: write the `Middleware`.** `forwardAuth` with `address` the endpoint proven in Task 2,
+  `trustForwardHeader: true`, and `authResponseHeaders` limited to what the apps read
+  (`X-Forwarded-User`, `X-Forwarded-Email`, `X-Forwarded-Preferred-Username`, `X-Forwarded-Groups`).
+  Do **not** forward `Authorization`: a header the proxy sets must not be one a client can set itself.
+
+- [ ] **Step 3: replace the `Ingress` with an `IngressRoute`** for `tesla.titan.arrieta.eu`,
+  `tls.secretName: titan-tls`, one route on `Host(...) && PathPrefix(/)` with the middleware
+  attached, service `teslamate:80`. Delete the old `Ingress` in the same edit.
+
+- [ ] **Step 4: dry-run — mandatory, because `crd-check` cannot see Traefik schemas**
+
+```bash
+make dry-run DRYRUN_CONTEXT=<admin context>
+```
+
+- [ ] **Step 5: commit, push, let Flux apply, then run the three checks that decide it**
+
+```bash
+# must be 200 and the same hash as Step 1 — Tesla's fetch path, no cookie
+curl -s -o /dev/null -w '%{http_code}\n' https://tesla.titan.arrieta.eu/.well-known/appspecific/com.tesla.3p.public-key.pem
+curl -s https://tesla.titan.arrieta.eu/.well-known/appspecific/com.tesla.3p.public-key.pem | sha256sum
+# must redirect to auth.titan.arrieta.eu
+curl -s -o /dev/null -w '%{http_code} %{redirect_url}\n' https://tesla.titan.arrieta.eu/
+```
+
+- [ ] **Step 6: the human checks.** Sign in through authentik, then confirm the dashboard updates
+  (that is the websocket surviving forward auth — spec §8) and that no 401 loop appears in the
+  browser network tab. If the websocket loops, the fallback is a route for `/ws` without the
+  middleware — but only after confirming TeslaMate's `/ws` has no data worth protecting on its own.
+
+- [ ] **Step 7: if anything failed**, `git revert` the commit and let Flux restore the `Ingress`.
+  Do not hand-edit live objects: Helm/Kustomize drift here is permanent by design
+  (AGENTS.md, drift paragraph).
+
+---
+
+## Task 4: Grafana's front door, and the iframe
+
+**Files:**
+- Modify: `apply/50-apps/tesla/grafana.yaml` (same swap: `Ingress` → `Middleware` + `IngressRoute`)
+
+- [ ] **Step 1: reuse the middleware** from Task 3 if it is namespace-local, or duplicate it —
+  Traefik `Middleware` is namespaced, and both apps live in `apps`, so one middleware serves both.
+
+- [ ] **Step 2: replace the `Ingress`** for `grafana.titan.arrieta.eu` the same way. `Grafana`'s
+  `GF_SERVER_ROOT_URL` is already `https://grafana.titan.arrieta.eu/` with
+  `GF_SERVER_SERVE_FROM_SUB_PATH=true` (`grafana.yaml:68-70`), so no Grafana-side change is needed.
+
+- [ ] **Step 3: dry-run, commit, apply**, then:
+
+```bash
+curl -s -o /dev/null -w '%{http_code} %{redirect_url}\n' https://grafana.titan.arrieta.eu/
+```
+
+- [ ] **Step 4: the cookie test that decides `forward_domain` was right.** With one cookie jar, sign
+  in once and fetch both hosts:
+
+```bash
+curl -s -c /tmp/jar -b /tmp/jar -L -o /dev/null -w 'tesla   %{http_code}\n' https://tesla.titan.arrieta.eu/
+curl -s -c /tmp/jar -b /tmp/jar -o /dev/null -w 'grafana %{http_code}\n' https://grafana.titan.arrieta.eu/
+```
+
+Expected: the second call is `200` or a same-origin redirect, **not** a fresh redirect to
+`auth.titan.arrieta.eu`. If it redirects, `forward_domain` did not produce a shared cookie and the
+fallback is two `forward_single` providers — record that in the spec's §8 rather than leaving it in
+this plan.
+
+- [ ] **Step 5: the iframe test.** In a signed-in browser, open a drive's Grafana view from inside
+  TeslaMate and watch the network tab. This is the measurement that retires the spec's
+  "same-site by arithmetic" claim.
+
+---
+
+## Task 5: make the invariant a gate
+
+**Files:**
+- Create: `scripts/tesla-outpost-check.sh`
+- Modify: `Makefile`
+
+- [ ] **Step 1: write the script.** It asserts, from outside the cluster, that the two things which
+  must never regress hold: the public key is reachable **without a cookie** and hashes to the value
+  recorded in Task 3 Step 1, and `/` on both protected hosts redirects to `auth.titan.arrieta.eu`.
+  It must **skip out loud** when the hosts are unreachable — same rule as `make dry-run`, which skips
+  rather than passing vacuously when there is no admin context. A gate that passes because it could
+  not reach anything is worse than no gate.
+
+- [ ] **Step 2: wire it into `check` and not `check-ci`.** It needs network to the live cluster, which
+  CI does not have — the same division that keeps `validate` and `dry-run` out of `check-ci`.
+
+- [ ] **Step 3: prove it fails when it should.** Temporarily point the expected hash at a wrong value
+  and confirm non-zero exit; then revert. A gate that has never been seen to fail is not evidence.
+
+---
+
+## Task 6: write it down
+
+**Files:**
+- Modify: `docs/teslamate-runbook.md`
+- Modify: `docs/superpowers/specs/2026-10-17-titan-teslamate-authentik-outpost-design.md`
+
+- [ ] **Step 1: runbook.** A new section covering: what is behind authentik and what is deliberately
+  not; the lockout rollback (`git revert`, never `kubectl edit`); the fact that **the car's upload
+  path does not depend on authentik** and why that matters when authentik is down; and the new
+  symptom in troubleshooting — a TeslaMate that will not load is now possibly an authentik problem,
+  which it was not before.
+
+- [ ] **Step 2: spec §8.** Move each row to proven or leave it not-proven with what stopped it. Do
+  not delete a row without saying which test retired it; the table is the point of the document.
+
+- [ ] **Step 3: `git add -A && make check`, commit, branch, PR.** Pushing needs the operator's
+  explicit go-ahead, per AGENTS.md.
