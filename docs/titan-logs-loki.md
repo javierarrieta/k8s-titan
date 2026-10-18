@@ -137,6 +137,61 @@ change and is why the endpoint resolves to a private address. This file widens t
 writer set by one VPS; it does not introduce the property. If it ever needs to go away,
 the fix is at the gateway/ingress, not in this DaemonSet.
 
+## The `HOSTNAME` env var, which is the whole reason this failed
+
+The first merged version deployed healthy and shipped nothing, forever:
+`1/1 Running`, `RESTARTS 0`, five clean log lines, `positions.yaml` containing
+`positions: {}`, `/targets` empty, `promtail_targets_active_total 0`. There was no
+error to read at any `log_level`.
+
+Promtail injects a field selector into its own pod informer
+(`fulfillKubePodSelector`, `clients/pkg/promtail/targets/file/filetargetmanager.go`):
+
+```go
+kube.Selectors = tm.fulfillKubePodSelector(kube.Selectors, hostname)  // spec.nodeName=<hostname>
+
+func hostname() (string, error) {
+    if h := os.Getenv("HOSTNAME"); h != "" { return h, nil }
+    return os.Hostname()
+}
+```
+
+In a pod that is not `hostNetwork`, `os.Hostname()` is the **pod name**. Without the
+override the informer therefore asks the API for pods scheduled on a node called
+`promtail-abcde`. That is a legal query and the API answers it with a valid **empty
+list**: the informer syncs, the watch is live, zero target groups are produced, and
+nothing is ever logged. Both siblings set
+`HOSTNAME` from `fieldRef: spec.nodeName`; the first version of this manifest did not,
+and that omission was the entire bug.
+
+Why every obvious check passed anyway, which is what made this expensive:
+
+- `kubectl auth can-i list pods --as=system:serviceaccount:monitoring:promtail` → `yes`.
+  RBAC really was correct.
+- `kubectl get pods -A --as=system:serviceaccount:monitoring:promtail` → **32 pods**.
+  The LIST really does work. A field selector is not an authorization boundary, so the
+  empty result is invisible to both commands.
+- The pod's TCP connection to `10.63.0.1:443` was `ESTABLISHED`, and `reflector` in the
+  same namespace was mirroring Secrets normally, so the API was reachable from pods.
+- Editing `__path__` to a catch-all glob changed nothing, because no target group had
+  any target for the glob to act on.
+
+The goroutine dump is what ended it: `FileTargetManager.run`, `discovery.Manager.Run`,
+`kubernetes.(*Pod).process` and a reflector in `handleWatch` were all alive and healthy.
+Nothing was deadlocked; the informer was simply watching an empty set. Enable it with
+the CLI flag `-server.profiling_enabled=true` — **not** `server.pprof_enabled` in the
+config and **not** `-pprof.enabled`, neither of which exist in 3.6.11; both fail, the
+second one loudly at startup.
+
+Two procedural notes from the same investigation. Live edits to the ConfigMap and the
+DaemonSet are reverted by the next Flux sync, so an experiment can silently test the
+committed config instead of the intended one; promtail logs `sha3sum` of the config it
+loaded, and comparing that hash against the previous pod is the only cheap proof that
+an edit actually took effect. And a diagnostic pattern must be built from the real path
+shape: `/var/log/pods/<ns>_<pod>_<uid>/<container>/<file>.log` is **three** segments, so
+the catch-all is `/var/log/pods/*/*/*.log`; a four-wildcard version matches nothing and
+looks exactly like the bug being hunted.
+
 ## Proving it works
 
 Offline, before any push:
