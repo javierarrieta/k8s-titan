@@ -207,6 +207,24 @@ spec:
             - -config.file=/etc/promtail/promtail.yaml
             - -config.expand-env=true
           env:
+            # LOAD-BEARING — do not remove as "unused".
+            # promtail silently injects a field selector `spec.nodeName=<hostname>` into
+            # its pod informer (`fulfillKubePodSelector` in clients/pkg/promtail/targets/
+            # file/filetargetmanager.go), where hostname is os.Getenv("HOSTNAME") falling
+            # back to os.Hostname(). In a non-hostNetwork pod that fallback is the POD
+            # name, so the informer asks the API for pods scheduled on a node called
+            # "promtail-abcde" and gets back a perfectly valid EMPTY list. No error, no
+            # forbidden, the informer syncs, zero target groups are produced, positions
+            # stay `{}` and the pod logs five clean lines forever. That is the whole
+            # history of this DaemonSet deploying healthy and shipping nothing: RBAC is
+            # genuinely correct (`auth can-i list pods` says yes, and a bare LIST as the
+            # SA returns every pod) because a field selector is not an authorization
+            # boundary. Both siblings set this same fieldRef.
+            - name: HOSTNAME
+              valueFrom:
+                fieldRef:
+                  apiVersion: v1
+                  fieldPath: spec.nodeName
             # The push URL. Deliberately a Secret even though the value is public DNS
             # and Loki runs auth_enabled: false, so there is no token to hide: keeping
             # the endpoint out of a plain ConfigMap means that if Loki ever grows an
