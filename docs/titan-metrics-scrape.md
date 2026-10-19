@@ -252,6 +252,17 @@ Saying this out loud, because an unlisted metric looks exactly like a healthy ze
   positive is stale against this chart pin.
 - **CoreDNS, Traefik, CNPG's Postgres exporter, authentik, coder.** Each needs its own
   RBAC and, for Postgres, its own credential. Deferred as a separate slice.
+  Measured 2026-10-19 so the slice has a starting point: the exporter is **already running** —
+  `pod/postgres-1` listens on `:9187` (`metrics`) and `:8000` (instance-manager status) — and
+  nothing scrapes it. titan has no prometheus-operator CRDs at all (`kubectl get podmonitor`
+  returns "doesn't have a resource type"), and there is no metrics `Service` in `databases`,
+  only `postgres-r`/`-rw`/`-ro` on 5432. So the KSM trick does not transfer directly: there is
+  no Service for the apiserver proxy to reach, and even with one, postgres_exporter needs a
+  `pg_monitor`-role credential that does not exist yet. Two independent pieces of work, which
+  is why this stayed deferred.
+  In the meantime database health is answerable without metrics: `cnpg.io/instanceRole` is a pod
+  label, so the read-only identity can already say which instance is primary, and since 2026-10-19
+  it can read the `Cluster` status directly.
 - **`kube_secret_*`.** Excluded via `collectorsExclude` on the kube-state-metrics
   HelmRelease. The chart's default collector list grants that pod cluster-wide
   `get/list/watch` on Secrets so it can emit metadata, and on this cluster that grant

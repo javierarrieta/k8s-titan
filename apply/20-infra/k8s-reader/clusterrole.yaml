@@ -136,3 +136,29 @@ rules:
   - apiGroups: ["k3s.cattle.io"]
     resources: ["etcdsnapshotfiles"]
     verbs: ["get", "list", "watch"]
+  # CNPG, added 2026-10-19 at the operator's request. Before this, `get cluster` needed an
+  # admin context, which made routine database health checks impossible for an agent and left
+  # docs/authentik-runbook.md §5 proving health by effect instead.
+  #
+  # What this discloses: topology and state. Which instance is primary, whether replicas are
+  # streaming, backup and WAL archiving status, database and role names.
+  #
+  # What it does NOT disclose, and the reason this was judged safe: CNPG CRs reference Secrets
+  # by NAME only — `superuserSecret`, `replicationSecret`, `barmanObjectStore.s3Credentials`,
+  # `DatabaseRole.spec.passwordSecret` are all object references. The values live in Secrets,
+  # and Secrets remain absent from this role. Reading a `Cluster` tells you the name of the
+  # secret holding the replication password; it does not tell you the password.
+  #
+  # Enumerated, not `"*"`, per the note above: `publications`, `subscriptions`,
+  # `failoverquorums`, `imagecatalogs` and `clusterimagecatalogs` are deliberately absent
+  # because nothing here uses them. If one is introduced and a check goes Forbidden, that is
+  # the intended failure mode — add the line.
+  - apiGroups: ["postgresql.cnpg.io"]
+    resources:
+      - clusters
+      - databases
+      - databaseroles
+      - backups
+      - scheduledbackups
+      - poolers
+    verbs: ["get", "list", "watch"]

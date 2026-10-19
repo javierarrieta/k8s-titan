@@ -29,10 +29,12 @@ thing.
 
 For cluster investigation, use the `k8s-reader` ServiceAccount rather than an admin
 kubeconfig — read-only, and it cannot read Secrets. Minting, verification and
-rotation are in `docs/agent-read-access.md`. That identity is also Forbidden on
-`postgresql.cnpg.io`, so `get cluster`/`get database`/`get backup` need an admin context;
-`docs/authentik-runbook.md` §5 records what the read-only identity can prove by effect
-instead.
+rotation are in `docs/agent-read-access.md`. That identity can read `postgresql.cnpg.io`
+(`clusters`, `databases`, `databaseroles`, `backups`, `scheduledbackups`, `poolers`) as of
+2026-10-19, so `get cluster`/`get database`/`get backup` no longer need an admin context — CNPG
+CRs reference Secrets by name only, so this discloses topology, never credential values. It still
+cannot read Secrets, and `docs/authentik-runbook.md` §5 remains the record of what the identity
+could prove by effect before that grant, which is still the stronger evidence when it is available.
 
 Backups: the Postgres cluster ships base backups and continuous WAL to S3 and **nothing
 else does** — the generic PV stream is still deferred, so a PVC that is not that database
