@@ -20,6 +20,7 @@ If this gate cannot be met, **stop and say so.** Do not proceed "to see if it wo
 
 ## Global Constraints
 
+- **Sequenced after Plan A.** Once the stage split lands, the Tesla workloads live in their own `tesla` Kustomization, so this plan only edits the `namespace:` fields inside that unit — the reconcile-unit work is already done and is not repeated here. If Plan A has not landed, this plan still works, but it edits the shared `apps` unit and inherits its freeze radius.
 - **`ENCRYPTION_KEY` is the irreversible step.** It lives in `teslamate-secrets`. If a TeslaMate container starts in a namespace whose copy of that key is absent or different, every stored vehicle token becomes undecryptable and every vehicle must be paired again. Regenerating it makes that permanent. Never run `setup-tesla-secrets.sh --genkey` or `FORCE=1` as part of this plan. Values are **copied**, never regenerated.
 - **`prune: true` deletes the old objects.** The old namespace's Secrets must not be pruned until the new ones are proven in use. This is the same hazard as Plan A Task 2 and the same mitigation applies.
 - `teslamate-db-credentials` stays in `databases`. It is what CNPG's `DatabaseRole` reads. It does not move.
