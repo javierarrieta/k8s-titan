@@ -741,6 +741,14 @@ User "system:serviceaccount:k8s-reader:k8s-reader" cannot get resource "clusters
 below is what the read-only identity proves by effect, recorded 2026-10-05 at
 `main@c4e683f`, and it is a genuinely strong set:
 
+> **Updated 2026-10-19.** The first half of that is no longer true: `k8s-reader` now has
+> `get/list/watch` on `clusters`, `databases`, `databaseroles`, `backups`, `scheduledbackups` and
+> `poolers`, so `kubectl -n databases get cluster` works from the read-only identity and the
+> Forbidden error above is history. Secrets are still refused, and CNPG CRs name Secrets rather
+> than carry them, so nothing secret crossed with the grant. The by-effect table below is kept
+> unchanged on purpose — it is a dated record of what was observed, and proving health by effect
+> is still better evidence than reading a status field an operator wrote.
+
 | check | observed |
 |---|---|
 | `kubectl -n flux-system get kustomization` | all five stages `Ready=True`, applied at `main@c4e683f` |
