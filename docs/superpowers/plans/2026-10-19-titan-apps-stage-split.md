@@ -79,15 +79,23 @@ Five units was the spec's first guess. It buys nothing over three for auth/coder
 
 ```
 apply/00-bootstrap/
-  stage-apps.yaml        → replaced by three stage files
   stage-databases.yaml   → new
   stage-tesla.yaml       → new
   stage-apps.yaml        → rewritten, same name, narrower path
+  kustomization.yaml     → lists the new stage files in numeric order
+apply/30-databases/      ← NEW STAGE DIRECTORY: postgres.yaml, postgres-backup.yaml
+apply/60-tesla/          ← NEW STAGE DIRECTORY: the 9 Tesla files
 apply/50-apps/
-  kustomization.yaml     → loses the databases/ and tesla/ entries
-  databases/kustomization.yaml  → new
-  tesla/kustomization.yaml      → new
+  kustomization.yaml     → keeps auth/ and coder/ only
 ```
+
+**Stages are top-level numbered directories, not subdirectories.** The first draft of this plan put
+`databases/` and `tesla/` *inside* `apply/50-apps`, which builds and reconciles correctly and breaks
+the repo's layout convention: in this tree the numbered directories under `apply/` **are** the
+stages, one directory to one Flux `Kustomization`. The operator caught it in review. Nesting stages
+collapses separate failure domains back into one directory, which is the opposite of what the split
+is for, and it also pushed the new units to `find` depth 3 — where `KUSTOMIZE_DIRS`' `-maxdepth 2`
+cap silently dropped them out of `crd-check`. Both facts are in that second bullet for a reason.
 
 Graph:
 
@@ -217,7 +225,7 @@ ignore prune. Nobody here sets them; do not start.
 
 One commit. `databases` and `tesla` leave the shared unit; `auth`/`coder`/`coder-workspaces` stay.
 
-- [ ] Create `apply/50-apps/databases/kustomization.yaml` and `apply/50-apps/tesla/kustomization.yaml`, each listing exactly its own files.
+- [ ] Create `apply/30-databases/kustomization.yaml` and `apply/60-tesla/kustomization.yaml` as **new top-level stage directories**, `git mv`-ing the files out of `apply/50-apps/` so history follows them.
 - [ ] Remove those entries from `apply/50-apps/kustomization.yaml`.
 - [ ] Create `stage-databases.yaml` and `stage-tesla.yaml` with `prune: true`; **rewrite `stage-apps.yaml` to the narrower path but leave `prune: false` on it.** All three: `interval: 10m0s`, `dependsOn` per the graph. **No takeover flag — Task 3 established that adoption is plain SSA.** The old unit must stop listing the moved files in this same commit.
 

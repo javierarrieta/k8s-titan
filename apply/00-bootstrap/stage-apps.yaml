@@ -6,19 +6,25 @@ metadata:
 spec:
   dependsOn:
     - name: certificates
+    - name: databases
   interval: 10m0s
   path: ./apply/50-apps
-  # Temporarily off, ahead of the stage split. See
-  # docs/superpowers/plans/2026-10-19-titan-apps-stage-split.md, Task 2.
+  # STILL OFF, on purpose, and it must stay off until Task 5b of
+  # docs/superpowers/plans/2026-10-19-titan-apps-stage-split.md turns it back on in its own
+  # commit. Two reasons, and the second one is the trap:
   #
-  # This stage's inventory holds 43 objects including databases_postgres_postgresql.cnpg.io_Cluster
-  # and the authentik and coder HelmReleases. With prune enabled, deleting this Kustomization
-  # garbage-collects all of them — which means destroying the production database and
-  # helm-uninstalling authentik and coder, not merely restarting them.
+  #   1. It was turned off ahead of the split so that removing objects from this unit's path
+  #      orphans them instead of deleting them. With prune on, the split would have garbage-
+  #      collected the CNPG Cluster and helm-uninstalled authentik and coder via their finalizers.
   #
-  # The split replaces this object with one Kustomization per app-group. Turning prune off here
-  # makes that replacement revertible: if the new units fail to claim their objects, restoring
-  # this file loses nothing. Do not re-enable prune on this object; the split deletes it.
+  #   2. This is the SAME object as before the split, so its status.inventory still holds all 43
+  #      entries. The moment it stops listing the databases and tesla objects — which moved out to
+  #      apply/30-databases and apply/60-tesla — those objects are stale by inventory.Diff, and
+  #      with prune: true on this commit, it deletes the database. The new stages are safe with
+  #      prune: true because their inventories start empty.
+  #
+  # Before re-enabling it, prove each unit's inventory holds only its own objects. Task 5b says
+  # how. Do not "tidy" this back to true while doing anything else.
   prune: false
   sourceRef:
     kind: GitRepository

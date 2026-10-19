@@ -10,7 +10,7 @@
 # unless someone puts it here.
 #
 # Two layers, both against the artifact that actually ships — the JS is read out of
-# apply/50-apps/tesla/forwarder.yaml, not from a copy that could drift:
+# apply/60-tesla/forwarder.yaml, not from a copy that could drift:
 #   1. the RESP parser, driven directly (framing, partial reads, binary safety)
 #   2. the whole process, spawned for real against a fake Redis and a fake bridge on localhost
 #
@@ -21,7 +21,7 @@ set -euo pipefail
 REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$REPO"
 
-MANIFEST=apply/50-apps/tesla/forwarder.yaml
+MANIFEST=apply/60-tesla/forwarder.yaml
 
 if ! command -v node >/dev/null; then
   echo "tesla-forwarder-tests: SKIPPED - node is not on PATH"

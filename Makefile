@@ -1,5 +1,14 @@
 SHELL := /bin/bash
-KUSTOMIZE_DIRS := $(shell find apply -mindepth 1 -maxdepth 2 -name kustomization.yaml 2>/dev/null | sed 's|/kustomization.yaml$$||' | sort)
+# Every directory under apply/ that declares a kustomization.yaml. No -maxdepth, and that is a
+# fix rather than a tidy-up: the cap was 2. When the apps stage was first split on 2026-10-19 the
+# new units landed at apply/50-apps/databases and apply/50-apps/tesla — depth 3 — and both
+# `crd-check` and `kustomize-check` silently stopped building them, so the CNPG Cluster left the
+# gate while it still reported a pass. `kustomize-listing` walks properly and reported 9
+# kustomizations, so nothing looked wrong. Those units are now top-level stage directories
+# (apply/30-databases, apply/60-tesla) per the layout convention, which happens to put them back
+# at depth 2 — but the cap stays off, because the next nested unit would escape the gate the same
+# silent way. A gate whose scope shrinks silently is worse than no gate.
+KUSTOMIZE_DIRS := $(shell find apply -name kustomization.yaml 2>/dev/null | sed 's|/kustomization.yaml$$||' | sort)
 # Both extensions: .sops.yaml's path_regex matches .yml too, so a .yml secret must
 # not be able to slip between the encryption rule and the validation glob.
 SECRET_FIND := find apply/10-secrets \( -name '*.yaml' -o -name '*.yml' \) ! -name kustomization.yaml
@@ -73,13 +82,22 @@ crd-check:
 	  || { echo "crd-check: python3 is missing - refusing to report clean"; exit 1; }; \
 	python3 -c 'import yaml' >/dev/null 2>&1 \
 	  || { echo "crd-check: PyYAML is missing (pip install pyyaml) - refusing to report clean"; exit 1; }; \
-	{ for d in $(KUSTOMIZE_DIRS); do kubectl kustomize "$$d" || exit 1; done; } \
+	# Each build is followed by an explicit `---`, and that is not cosmetic. `kubectl kustomize` does
+# not terminate its output with a document separator, so concatenating builds merges the LAST
+# object of one directory with the FIRST object of the next into a single phantom mapping. This
+# was measured: the last Secret of apply/10-secrets and the first Certificate of
+# apply/40-certificates parsed as one object carrying `type: Opaque`, `stringData`, `sops` and
+# `kind: Certificate`. The bug predates the 2026-10-19 scope widening — it was invisible while
+# only CNPG kinds were checked, because the phantom's Kind was not in the vendored set — and the
+# new Certificate coverage is what surfaced it. A checker fed a merged stream checks objects that
+# do not exist and misses the real ones.
+	{ for d in $(KUSTOMIZE_DIRS); do kubectl kustomize "$$d" || exit 1; printf -- '---\n'; done; } \
 	  | python3 tools/crd-field-check.py \
 	      vendor/cnpg-crds vendor/flux-crds vendor/cert-manager-crds vendor/traefik-crds
 
 # tesla-forwarder-test: the only hand-written code in the tesla stack lives in a ConfigMap, so nothing
 # would otherwise ever execute it before it reaches a cluster. This extracts the script from
-# apply/50-apps/tesla/forwarder.yaml — the bytes that actually ship, not a copy that can drift — and
+# apply/60-tesla/forwarder.yaml — the bytes that actually ship, not a copy that can drift — and
 # runs it against a fake Redis and a fake bridge on localhost.
 #
 # It skips out loud when node is absent, the way `scan` skips when ggshield is. That is a real cost

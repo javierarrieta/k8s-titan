@@ -1,0 +1,21 @@
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: tesla
+  namespace: flux-system
+spec:
+  dependsOn:
+    # certificates for the reflected TLS, databases because teslamate-db.yaml is a CNPG Database
+    # whose Cluster lives in that unit. This is the first place the split has bought real ordering:
+    # inside one unit Flux applies concurrently and file order means nothing, so before the split
+    # "the Cluster comes first in the list" was the only — and non-existent — guarantee.
+    - name: certificates
+    - name: databases
+  interval: 10m0s
+  path: ./apply/60-tesla
+  # Safe from the first reconcile: a new unit's inventory starts empty, so inventory.Diff finds
+  # nothing stale. See stage-databases.yaml for the same reasoning.
+  prune: true
+  sourceRef:
+    kind: GitRepository
+    name: flux-system

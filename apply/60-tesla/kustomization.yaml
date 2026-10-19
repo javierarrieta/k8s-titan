@@ -1,0 +1,53 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# The Tesla stack, alone, in its own stage directory. Split out of the shared apps unit on
+# 2026-10-19 because this is the hand-written YAML that actually gets edited, and Flux applies a
+# Kustomization atomically: if any object here fails server-side dry-run, nothing in this unit is
+# applied — including, before the split, the Postgres Cluster that shared a unit with it. Highest
+# typo probability, so it gets its own failure boundary. Numbered directory, not a subdirectory of
+# 50-apps, because numbered directories are the stages in this repo.
+#
+# teslamate-db.yaml is listed here even though it lands in namespace `databases`, because stages
+# follow directories, not namespaces. The CNPG `Database` must share a namespace with its Cluster,
+# and the `databases` stage owns that Cluster; this stage depends on it.
+#
+# ORDERING, AND A CORRECTION. The comments below describe a dependency order, and that order is
+# worth reading — it records why each piece needs the one before it. It is NOT what Flux
+# enforces. `ApplyAll` sorts the objects by kind and then applies them concurrently under a
+# worker limit, so file order decides nothing and the real safety comes from Kubernetes retrying
+# a pod whose Database or Secret has not landed yet. An earlier revision of the split plan
+# claimed this list was load-bearing; it is not, and the claim is removed rather than left to
+# mislead. What does give ordering is `dependsOn` between units.
+resources:
+  # TeslaMate's Database and DatabaseRole first, for the same reason authentik's and coder's
+  # precede their apps: a TeslaMate that starts before its role exists crash-loops, and that
+  # reads as an app bug rather than as apply order.
+  - teslamate-db.yaml
+  # The public-key server: Tesla will not finish pairing until it answers, and nothing
+  # else here depends on it.
+  - wellknown.yaml
+  # Redis before fleet-telemetry: the producer connects at startup and exits if it cannot, so
+  # this is the difference between a slow start and a CrashLoopBackOff.
+  - redis.yaml
+  - fleet-telemetry.yaml
+  # The bridge before the forwarder that POSTs to it: the forwarder retries with backoff, so
+  # this only avoids a noisy first minute.
+  - streaming.yaml
+  # The forwarder is the only consumer of the redis channel and the only client of the bridge.
+  # Its script lives in this file as a ConfigMap, and scripts/tesla-forwarder-tests.sh runs
+  # those exact bytes on every `make check`.
+  - forwarder.yaml
+  # TeslaMate itself, after everything it talks to: the database, the streaming bridge its
+  # TESLA_WSS_HOST points at, and the tesla-oauth Secret carrying the application client id.
+  # That last one is why it cannot come up earlier — a missing Secret is a Pending pod, which is
+  # the loud failure; a placeholder client id would have been the silent one.
+  - teslamate.yaml
+  # Grafana reads the same teslamate-secrets password as TeslaMate and the same CNPG database,
+  # and carries the only stateful volume in this group. Its admin password comes from
+  # tesla-grafana-admin because the upstream image ships admin/admin in its own ENV.
+  - grafana.yaml
+  # The Tesla application's OAuth redirect endpoint. `replicas: 0` is its steady state: nothing
+  # runs between pairings, and the operator scales it to 1 for the one authorization that mints
+  # TeslaMate's token pair (runbook §5). It logs the request line and does nothing else — the
+  # code is exchanged on the operator's machine, so the client secret never enters the cluster.
+  - auth-callback.yaml
