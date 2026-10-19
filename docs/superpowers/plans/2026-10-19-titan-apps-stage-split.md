@@ -221,7 +221,7 @@ ignore prune. Nobody here sets them; do not start.
   running, and `make kustomize-listing` will not notice because it reads the tree, not the cluster.
   Task 5's inventory-sum check is what catches that.
 
-### Task 4: Split into three units
+### Task 4: Split into three units — **DONE, merged `5d3a1c6` (PR #84)**
 
 One commit. `databases` and `tesla` leave the shared unit; `auth`/`coder`/`coder-workspaces` stay.
 
@@ -235,16 +235,46 @@ One commit. `databases` and `tesla` leave the shared unit; `auth`/`coder`/`coder
 - [ ] `make dry-run` → will print `SKIPPED`. **Say so in the PR body** and hand the operator `scripts/dry-run-check.sh <context>` to run before merging.
 - [ ] Commit, PR, merge with confirmation.
 
-### Task 5: Verify — and this is now possible without admin
+### Task 5: Verify — and this is now possible without admin — **DONE on `main@5d3a1c6`**
 
-- [ ] `kubectl --context titan -n flux-system get kustomizations` — three units, all `Ready`.
-- [ ] **The database check that matters:** `kubectl --context titan -n databases get cluster postgres -o jsonpath='{.status.conditions}'` — every condition still True, `currentPrimary` still `postgres-1`, `timeline` still 1, `instances` 1/1. Any change here means the Cluster was touched. It must not have been.
-- [ ] Pod `AGE` and restart counts match the Task 1 baseline in every namespace.
-- [ ] The three inventories sum to the original 43, with no object listed twice and none missing. This is the only detector for an orphaned object — `kustomize-listing` reads the tree, not the cluster.
+All four checks passed, and the cascade itself was the first real exercise of the `dependsOn` graph:
+`secrets → infra → certificates → databases → {apps, tesla}`, with `databases` and `tesla` correctly
+reporting `dependency ... is not ready` until their inputs came up.
+
+- [x] All seven stages `Ready` on `main@sha1:5d3a1c6`.
+- [x] **The database check that matters:** `currentPrimary=postgres-1`, and every condition True —
+      `Initialized=True ConsistentSystemID=True Ready=True ContinuousArchiving=True LastBackupSucceeded=True`.
+      `ContinuousArchiving=True` is the load-bearing one: it proves WAL archiving never dropped, so the
+      Cluster did not blink while its owning Kustomization changed identity underneath it.
+- [x] Pod diff pre-split vs post-split is **byte-identical** — `teslamate` 23 restarts, `postgres-1` 1,
+      `coder` 3, `authentik-server` 0. Nothing bounced.
+- [x] Inventories: `apps` 14 + `databases` 2 + `tesla` 27 = **43 total, 43 unique, 0 claimed twice**.
+      Each stage's live inventory also equals what git builds for it, stale = 0 — which is exactly the
+      precondition Task 5b needs.
 
 ### Task 5b: Restore prune on the shared unit — separate commit, only after Task 5 is green
 
-- [ ] Confirm first: `stage-apps` inventory now holds only the `auth`, `coder` and `coder-workspaces` objects, and `databases`/`tesla` each hold their own. If any moved object is still listed on `apps`, **stop** — flipping prune now deletes it.
+Unblocked by Task 5. The precondition is not just "the split reconciled" but **stale = 0**: prune
+deletes exactly `inventory.Diff(old, new)`, so if the live inventory equals the git build, the first
+reconcile with prune on is provably a no-op.
+
+One correction to an earlier draft of this plan, because it would mislead the next person: turning
+prune back on was described as risking objects created out of band during the `prune: false` window.
+It is not. **Prune only deletes entries its own inventory holds that git no longer builds.** It never
+touches objects it never owned. The real exposure of `prune: false` is the inverse — objects removed
+from git linger indefinitely, which is drift, not deletion.
+
+- [x] Confirm first: `apps` inventory 14 == build 14, `databases` 2 == 2, `tesla` 27 == 27, **stale = 0
+      on all three**. A stray-object scan across the five namespaces (81 objects, 17 kinds) found
+      **0 created during the `prune: false` window**; the 38 unclaimed are `kube-root-ca.crt`, the
+      `infra`-owned reflector/reloader, and CNPG operator children — all accounted for.
+
+      **Trap, learned the hard way:** the first version of that scan reported a clean zero while
+      scanning nothing. It passed *Kinds* (`Deployment`, `Cluster`) to `kubectl get`, which takes
+      *resource names* (`deployments`, `clusters.postgresql.cnpg.io`); every call errored, empty
+      stdout was read as an empty list, and the check passed vacuously. Resolve Kind → resource via
+      `kubectl api-resources -o json` and exit non-zero when a call fails. The scan is ad hoc and
+      not committed, so this note is the only place the trap is written down.
 - [ ] Set `prune: true` on `stage-apps.yaml`, with a comment saying why it was off and what must be true before it is ever turned off again.
 - [ ] `make check`, PR, merge with confirmation.
 - [ ] Verify all three units still `Ready` and no object was deleted — the diff of `kubectl get all -n tesla-ns` style counts before and after, plus the CNPG conditions again.
