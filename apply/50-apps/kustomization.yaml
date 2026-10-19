@@ -1,76 +1,44 @@
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
-# This stage is `apps` and this object lives in `databases`: the stage order is what
-# puts the CNPG operator ahead of the Cluster, and a kustomize directory may span
-# namespaces (there is deliberately no top-level `namespace:` field - it rewrites them
-# all). The Cluster carries kustomize.toolkit.fluxcd.io/prune: disabled to survive a
-# git deletion, so a reorganisation that "moves the database to a databases stage"
-# deletes the manifest holding that protection - the annotation has to move in the
-# same commit, or the Cluster becomes prunable on the next bad rebase.
+# The shared unit: authentik, coder, and — when they arrive — the small apps that pass the D1
+# admission test in docs/superpowers/specs/2026-10-19-titan-app-scale-out-design.md.
+#
+# `databases/` and `tesla/` were split out on 2026-10-19 into their own stage directories,
+# `apply/30-databases` and `apply/60-tesla`, each with its own Flux Kustomization; see
+# docs/superpowers/plans/2026-10-19-titan-apps-stage-split.md. What stayed here is here on
+# purpose, not by omission: authentik and coder are `HelmRelease` objects, so a bad `values`
+# block does not fail this unit at all — the CR applies cleanly and the HelmRelease fails on
+# its own, separately. Only a malformed HelmRelease *manifest* propagates, and those files are
+# rarely touched. Giving them their own unit would have bought nothing and cost a migration.
+#
+# A typo in a future small app lands in this unit and freezes coder's *updates*, not coder.
+# That is the accepted residual risk, and it is why the admission test is written down.
+#
+# ORDERING: the notes below describe intent, not mechanism. Flux sorts by kind and applies
+# concurrently, so file order decides nothing; the real safety is Kubernetes retrying a pod
+# whose Database or Secret has not landed yet. Cross-unit ordering is `dependsOn`.
 resources:
-  - databases/postgres.yaml
-  - databases/postgres-backup.yaml
-  # After the Cluster it depends on: a CNPG Database cannot resolve its clusterRef until
-  # the Cluster exists, and file order here is the apply order Flux uses. The Database may
-  # report Reconciling for a moment before the role lands - that is CNPG retrying, and it
-  # must converge. Still not Synced after a minute is a real failure, not a race.
+  # After the Cluster it depends on, which now lives in the `databases` unit: a CNPG Database
+  # cannot resolve its clusterRef until the Cluster exists. The Database may report Reconciling
+  # for a moment before the role lands — that is CNPG retrying, and it must converge. Still not
+  # Synced after a minute is a real failure, not a race.
   - auth/authentik-db.yaml
   - coder/coder-db.yaml
-  # The server, last: it reads coder-secrets (Task 6) and coder-tls (Task 5, reflected), and it
-  # provisions into coder-workspaces under the Role above. Ordering here only decides what Flux
-  # tries first, but a HelmRelease that installs before its Secret exists comes up crash-looping,
-  # which reads as a coder bug rather than a missing file.
-  - coder/coder.yaml
   # coder's Database and DatabaseRole, same shape and same namespace rule as authentik's: a CNPG
   # Database must share a namespace with its Cluster, so these live in `databases` while the app
-  # that owns them lives in `coder`. It was written, committed, and left out of this list - where it
-  # would have built green and been silently never applied, which is the failure mode
+  # that owns them lives in `coder`. It was written, committed, and left out of this list — where
+  # it would have built green and been silently never applied, which is the failure mode
   # `make kustomize-listing` was added to close.
-  # After the Database and DatabaseRole it connects with. The HelmRelease would install and
-  # authentik would crash-loop on a missing role, so ordering here is cheap insurance.
-  # authentik's blueprint for the Tesla apps, before the HelmRelease that mounts it: the chart mounts
-  # this ConfigMap into the worker, and a pod whose mounted ConfigMap does not exist yet sits Pending
-  # rather than converging. It is a ConfigMap and not a Secret because it carries no credential - see
-  # the file's own header for why that distinction is the whole point.
+  # The server: it reads coder-secrets and coder-tls (reflected), and provisions into
+  # coder-workspaces under the Role above. A HelmRelease that installs before its Secret exists
+  # comes up crash-looping, which reads as a coder bug rather than a missing file.
+  - coder/coder.yaml
+  # authentik's blueprint for the Tesla apps, before the HelmRelease that mounts it: the chart
+  # mounts this ConfigMap into the worker, and a pod whose mounted ConfigMap does not exist yet
+  # sits Pending rather than converging. It is a ConfigMap and not a Secret because it carries no
+  # credential — see the file's own header for why that distinction is the whole point.
   - auth/tesla-outpost-blueprint.yaml
   - auth/authentik.yaml
-  # Quota, limit range and the provisioner Role, all in coder-workspaces. They precede coder's
-  # HelmRelease because a workspace built before the quota exists is a workspace the quota never
-  # saw - and the quota is the only thing standing between a third workspace and the Postgres
-  # every other app here depends on.
+  # Quota, limit range and the provisioner Role, all in coder-workspaces. The quota is the only
+  # thing standing between a third workspace and the Postgres every other app here depends on.
   - coder/workspaces.yaml
-  # TeslaMate. The Database and DatabaseRole first, for the same reason authentik's and coder's
-  # precede their apps: a TeslaMate that starts before its role exists crash-loops, and that reads
-  # as an app bug rather than as apply order. The rest of the tesla/ files append after this one,
-  # in dependency order - redis before fleet-telemetry, the telemetry pipeline before the forwarder,
-  # the forwarder before TeslaMate itself.
-  - tesla/teslamate-db.yaml
-  # The public-key server next: Tesla will not finish pairing until it answers, and nothing
-  # else here depends on it, so it is early rather than buried behind the telemetry chain.
-  - tesla/wellknown.yaml
-  # Redis before fleet-telemetry: the producer connects at startup and exits if it cannot, so the
-  # order here is the difference between a slow start and a CrashLoopBackOff.
-  - tesla/redis.yaml
-  - tesla/fleet-telemetry.yaml
-  # The bridge before the forwarder that POSTs to it: the forwarder retries with backoff, so this
-  # order only avoids a noisy first minute.
-  - tesla/streaming.yaml
-  # The forwarder last of the telemetry chain: it is the only consumer of the redis channel and the
-  # only client of the bridge, so starting it before either exists is a restart loop rather than a
-  # race. Its script lives in this file as a ConfigMap, and scripts/tesla-forwarder-tests.sh runs
-  # those exact bytes on every `make check`.
-  - tesla/forwarder.yaml
-  # TeslaMate itself, after everything it talks to: the database (first in this list), the streaming
-  # bridge its TESLA_WSS_HOST points at, and the tesla-oauth Secret carrying the application client
-  # id. That last one is why it cannot start earlier — a missing Secret is a Pending pod, which is
-  # the loud failure; a placeholder client id would have been the silent one.
-  - tesla/teslamate.yaml
-  # Grafana last: it reads the same teslamate-secrets password as TeslaMate and the same CNPG
-  # database, and adds the only stateful volume in this group. Its admin password comes from
-  # tesla-grafana-admin because the upstream image ships admin/admin in its own ENV.
-  - tesla/grafana.yaml
-  # The Tesla application's OAuth redirect endpoint. `replicas: 0` is its steady state: nothing is
-  # running between pairings, and the operator scales it to 1 for the one authorization that mints
-  # TeslaMate's token pair (runbook §5). It logs the request line and does nothing else — the code is
-  # exchanged on the operator's machine, so the client secret never enters the cluster.
-  - tesla/auth-callback.yaml

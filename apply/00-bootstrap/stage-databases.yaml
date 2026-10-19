@@ -1,0 +1,25 @@
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: databases
+  namespace: flux-system
+spec:
+  dependsOn:
+    # Unchanged from the old single apps stage, deliberately: certificates dependsOn infra, and
+    # infra installs the CNPG operator, so this preserves the exact ordering the cluster has
+    # today rather than inventing a new one during a reorganisation.
+    - name: certificates
+  interval: 10m0s
+  path: ./apply/30-databases
+  # Safe from the first reconcile, and the reason is worth keeping: prune deletes what
+  # inventory.Diff(old, new) reports as stale, and a brand-new unit has an empty old inventory, so
+  # nothing can be stale. The shared `apps` unit is the opposite case — it is the same object with
+  # a 43-entry inventory — and it keeps prune: false until Task 5b.
+  #
+  # Belt and braces: the Cluster itself carries kustomize.toolkit.fluxcd.io/prune: disabled, which
+  # survives this file being deleted entirely. That annotation lives in postgres.yaml and must move
+  # with it, or the Cluster becomes prunable on the next bad reorganisation.
+  prune: true
+  sourceRef:
+    kind: GitRepository
+    name: flux-system

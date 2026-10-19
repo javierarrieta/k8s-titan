@@ -4,6 +4,12 @@ resources:
   - namespaces.yaml
   - stage-secrets.yaml
   - stage-infra.yaml
+  # One numbered directory under apply/ per stage, one Flux Kustomization per stage - that is
+  # the repo's layout convention and the split keeps it rather than nesting stages. The numbers
+  # are build order and reading order; what actually orders reconciles is the dependsOn graph
+  # inside these files: infra -> databases -> certificates -> {apps, tesla}.
+  - stage-databases.yaml
   - stage-certificates.yaml
   - stage-apps.yaml
+  - stage-tesla.yaml
   - flux-system

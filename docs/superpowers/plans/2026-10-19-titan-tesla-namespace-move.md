@@ -38,7 +38,7 @@ If this gate cannot be met, **stop and say so.** Do not proceed "to see if it wo
 | Secret that must not move | `teslamate-db-credentials` (ns `databases`) |
 | `k8s-reader` | ClusterRole binding — **no RBAC work needed for a new namespace** |
 | Reflector allow-lists | `titan-wildcard.yaml` → `apps,auth`; `tesla-streaming.yaml` → `apps` |
-| Forwarder bridge URL | hardcoded `http://tesla-streaming.apps.svc.cluster.local/` at `apply/50-apps/tesla/forwarder.yaml:34` |
+| Forwarder bridge URL | hardcoded `http://tesla-streaming.apps.svc.cluster.local/` at `apply/60-tesla/forwarder.yaml:34` |
 | Forward-auth middleware | `apps-teslamate-auth@kubernetescrd` — Traefik resolves `<namespace>-<name>` in the Ingress's own namespace |
 | Reloader | HelmRelease + HelmRepository `stakater`, both ns `apps`; watches `coder` + `monitoring`. **Stays.** |
 | Reflector | ns `apps`; "replicates TLS material across namespaces and nothing else" |
@@ -65,7 +65,7 @@ apply/10-secrets/
 apply/40-certificates/
   titan-wildcard.yaml                     allow-list += tesla
   tesla-streaming.yaml                    allow-list += tesla
-apply/50-apps/tesla/*.yaml                namespace: apps → tesla
+apply/60-tesla/*.yaml                namespace: apps → tesla
 apply/20-infra/reflector/reflector.yaml   namespace: apps → certificates
 ```
 

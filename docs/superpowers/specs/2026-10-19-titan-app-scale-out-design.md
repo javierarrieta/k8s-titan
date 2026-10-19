@@ -172,9 +172,9 @@ Therefore:
 apply/00-bootstrap/
   stage-apps.yaml            → replaced by three stage files
   namespaces.yaml            → + tesla
+apply/30-databases/ → Kustomization `databases`   ns databases
+apply/60-tesla/     → Kustomization `tesla`       ns apps   (ns tesla in D3)
 apply/50-apps/
-  databases/     → Kustomization `databases`   ns databases
-  tesla/         → Kustomization `tesla`       ns tesla      (D3)
   auth/, coder/, coder-workspaces/, <each small app>/
                  → Kustomization `apps`        ns auth / coder / coder-workspaces / apps
 apply/20-infra/
@@ -182,12 +182,15 @@ apply/20-infra/
   reloader/    → stays ns apps, the named exception                (D4)
 ```
 
-Grouping is by **edit frequency and manifest type**, not by namespace — a unit may span namespaces, and the shared `apps` unit deliberately does. The dependency runs one way: `certificates → databases → {tesla, apps}`.
+**One numbered directory = one stage = one Flux `Kustomization`.** That is the repo's layout convention, and the split preserves it by adding `30-databases` and `60-tesla` rather than nesting stages inside `50-apps` — an earlier revision of this section put them *inside* `apply/50-apps`, which builds and reconciles correctly and breaks the convention; the operator caught it in review.
+
+Grouping is by **edit frequency and manifest type**, not by namespace — a stage may span namespaces, and the shared `apps` stage deliberately does. The dependency runs one way: `infra → databases → certificates → {apps, tesla}`.
 
 Ordering across units is the only ordering this cluster can have. Inside a unit, kustomize-controller sorts and applies concurrently (`ApplyAll` → `sort.Sort(SortableUnstructureds(...))`, then an `errgroup` under `SetLimit`), so **file order guarantees nothing** — a point an earlier revision of this document got wrong.
 
-`dependsOn` stays as it is: everything app-shaped depends on `certificates`. Splitting the stage does
-not change the ordering, only the blast radius.
+`dependsOn` is unchanged in spirit: `databases` depends on `infra` transitively through the operator
+it installs, and `apps` and `tesla` depend on both `certificates` and `databases`. Splitting the
+stage does not change what must exist first — it changes what a typo can stop.
 
 ## 7. Verification
 

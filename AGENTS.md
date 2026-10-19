@@ -10,15 +10,24 @@ made and what was deliberately left out.
     apply/10-secrets/       SOPS-encrypted Secrets (decrypted by kustomize-controller)
     apply/20-infra/         cert-manager + OVH DNS-01 webhook + Reflector + the
                             CloudNativePG operator + the read-only agent identity
+    apply/30-databases/     the shared Postgres `Cluster` and its daily `ScheduledBackup`,
+                            in namespace `databases`
     apply/40-certificates/  the titan.arrieta.eu wildcard, in namespace `certificates`
-    apply/50-apps/          workloads — the shared Postgres `Cluster` and its daily
-                            `ScheduledBackup` in namespace `databases`, authentik with
-                            its declarative `Database`/`DatabaseRole` in namespace `auth`, and
-                            TeslaMate with its own `Database`/`DatabaseRole`, Grafana and the
-                            Tesla Fleet Telemetry intake in namespace `apps`
+    apply/50-apps/          authentik with its declarative `Database`/`DatabaseRole` in
+                            namespace `auth`, coder with its own, and any future app that
+                            passes the admission test below
+    apply/60-tesla/         TeslaMate with its own `Database`/`DatabaseRole`, Grafana and the
+                            Tesla Fleet Telemetry intake, in namespace `apps`
 
-Stage order: `flux-system` → `secrets` → `infra` → `certificates` → `apps`, wired by
-`dependsOn` in `apply/00-bootstrap/stage-*.yaml`. Add a stage as its own file there;
+**One numbered directory is one stage is one Flux `Kustomization`.** That is the layout
+convention: a stage is a top-level numbered directory under `apply/`, never a subdirectory of
+another stage. It matters because Flux applies a `Kustomization` atomically — one object failing
+server-side dry-run means nothing in that unit is applied — so the directory boundary is the
+failure boundary, and nesting stages would collapse separate failure domains back into one.
+
+Stage order: `flux-system` → `secrets` → `infra` → `databases` → `certificates` → `apps` →
+`tesla`, wired by `dependsOn` in `apply/00-bootstrap/stage-*.yaml`. The numbers are build and
+reading order; `dependsOn` is what actually orders reconciles. Add a stage as its own file there;
 do not merge stage objects into one file.
 
 Namespaces are declared centrally rather than inside the charts that need them:
