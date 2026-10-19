@@ -303,7 +303,54 @@ handshake the old chain signed and connections will fail in a way that looks lik
 kubectl --context titan -n apps rollout restart deploy/tesla-fleet-telemetry
 ```
 
-Same hazard, same fix, for `tesla-streaming` and anything else mounting `titan-tls`.
+That hazard is about pods that **mount** `titan-tls`. `tesla-streaming` does not — Traefik terminates
+TLS for it — so it has a different certificate problem, below.
+
+### The streaming host must not serve a wildcard
+
+`tesla.titan.arrieta.eu` and `streaming.titan.arrieta.eu` were both served `titan-tls`, and that was
+enough to keep TeslaMate from ever recording a drive.
+
+TeslaMate's stream client is Erlang (`TeslaApi.Stream`, `lib/tesla_api/stream.ex` at v4.3.0). It
+passes only `cacerts` and `insecure` to `WebSockex.start_link` and never sets
+`{customize_hostname_check, [{match_fun, public_key:pkix_verify_hostname_match_fun(https)}]}`, and
+Erlang's **default** hostname matcher does not honour `*.` wildcards — erlang/otp#4321 (ERL-1260),
+and TeslaMate #4601 is the same failure against a wildcard Let's Encrypt cert. The certificate can be
+perfect and still be refused:
+
+```text
+CLIENT ALERT: Fatal - Bad Certificate
+ - {:bad_cert, {:hostname_check_failed, {:requested, ~c"streaming.titan.arrieta.eu"},
+     {:received, [dNSName: ~c"*.titan.arrieta.eu", dNSName: ~c"titan.arrieta.eu"]}}}
+```
+
+Measured 2026-10-18, not theorised: the `Vehicle` process dies on that error, its supervisor restarts
+it immediately, and the restart intensity takes the whole application down — 14 restarts, exit 1,
+about 14 s per cycle, one `Stream connecting ...` every ~90 ms. **The steady state it produces is
+exactly "TeslaMate is not getting any update"**: parked car → quiet; car wakes → crash loop → nothing
+recorded → restart → car reads `:offline` again. The wildcard itself is fine for every other consumer;
+Python and OpenSSL both validate it, and its chain is publicly trusted.
+
+The fix is `apply/40-certificates/tesla-streaming.yaml`: a single-name `Certificate` for
+`streaming.titan.arrieta.eu`, reflected into `apps` as `tesla-streaming-tls`, which the streaming
+Ingress now points at. An exact `dNSName` matches under Erlang's default matcher, so nothing needs
+patching in the pinned image. The rejected alternative was `TESLA_WSS_TLS_ACCEPT_INVALID_CERTS=true`,
+which turns verification off on a connection carrying the vehicle access token.
+
+Two things to check rather than assume after this moves:
+
+```bash
+# 1. the single-name cert is issued and has no wildcard
+kubectl --context titan -n certificates get certificate tesla-streaming -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}{"\n"}'
+# 2. what Traefik actually serves for the host TeslaMate dials
+python3 -c "import ssl,socket;c=ssl.create_default_context();s=c.wrap_socket(socket.socket(),server_hostname='streaming.titan.arrieta.eu');s.connect(('streaming.titan.arrieta.eu',443));print(s.getpeercert()['subjectAltName']);s.close()"
+```
+
+If (2) still prints `*.titan.arrieta.eu`, Traefik is falling back to its default certificate because
+the Reflector copy has not landed in `apps` yet. That is a real window, not a hypothetical:
+`stage-apps` `dependsOn` `certificates` but has no `wait: true`, so the Ingress can be applied seconds
+before ACME finishes. It self-heals in under a minute; if it does not, the missing thing is the Secret
+in `apps`, not the certificate.
 
 ## 7. Migration
 
@@ -377,6 +424,8 @@ of them can be done by the agent.
 | TeslaMate sign-in fails | `tesla-oauth` missing or wrong client id; region mismatch between the app and `TESLA_API_HOST` |
 | signed in, but "vehicle not responding" | the migrated token is undecryptable — sign out and in again (§7) |
 | car is awake but the dashboard stays stale for tens of minutes | the `:asleep`/`:offline` backoff, doubling up to `POLLING_ASLEEP_INTERVAL` (1800 s) — by design, see §3; force a fetch with the wake-up control or a pod restart |
+| pod restarts repeatedly; log shows `Stream connecting ...` then `hostname_check_failed` | the streaming host is serving a **wildcard** again. TeslaMate's Erlang client refuses wildcard SANs and crash-loops when a car comes online — §6, and `apply/40-certificates/tesla-streaming.yaml` |
+| no live data at all and you cannot tell whether anything ever arrived | ask the forwarder, not the logs: it counts instead of logging. `kubectl -n apps get pod -l app=tesla-forwarder -o wide` then curl its pod IP on `:8080` → `{"connected":true,"forwarded":0,"lastPost":"never"}` means the car has never sent a frame, which is §5 not having taken effect, not a broken pipeline |
 | API logs `Account <client_id> must be registered in the current region` | **not** a region mismatch. It means the partner account registration was never done — spec §7 step 3, `POST /api/1/partner_accounts` with `{"domain":"<app domain>"}` (field is `domain`, not `domain_code`) and a partner token whose `audience` is the EU Fleet API base URL. Prove it with `GET /api/1/partner_accounts/public_key?domain=…`, which must return the key served at `/.well-known`. A successful token exchange does **not** prove registration is complete, which is what made this look like a region problem. |
 | no live speed/elevation, but positions appear | that is expected: the bridge reports live power as 0 and there is no elevation enrichment (§10) |
 | `synced: false` forever | car asleep or offline; the config only applies on a sync |
@@ -432,6 +481,19 @@ this file depends on and the command that retires it.
 Retired by the migration of 2026-10-17: **the migrated database is intact**. §7 records the counts
 that proved it, and `private.tokens` holding exactly one row is part of that proof — TeslaMate will
 start with zero token pairs and refuse to start with two.
+
+Retired by measurement on 2026-10-19, and retired **negative**:
+
+| claim | what was actually found |
+|---|---|
+| the decoded Redis payload shape matches what the forwarder and bridge expect | **cannot be tested yet.** The forwarder reports `{"connected":true,"forwarded":0,"rejected":0,"lastPost":"never"}` over two days, `fleet-telemetry` has logged nothing since its own startup on 2026-10-17T16:34:05 with `log_level: info`, and the bridge has never had a websocket attached. Nothing has ever been published, so §4's synthetic publish is the only way to exercise this path until the car is pointed at it. |
+| TeslaMate's own polling survives a car coming online | **it does not.** With a wildcard on `streaming.titan.arrieta.eu` it crash-loops instead — §6. Fixed by the single-name certificate, and *that* fix is unproven until a car is seen online again. |
+
+Still open and now the front of the queue: **the vehicle has never been told to stream.** §5's
+`synced: true` has not been reached, so every claim downstream of it in this file remains an
+assumption with a command attached. Note also that the public-CA question in §5 is about the
+*vehicle's* trust store; that `streaming.titan.arrieta.eu` validates against a public CA from a
+laptop proves nothing about what the car will accept.
 
 ## 11. Deliberately not done
 

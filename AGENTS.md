@@ -90,7 +90,11 @@ the stream is rejected per-pod, silently, with promtail reporting healthy.
   `secretName: titan-tls` from the namespace your Ingress lives in. Nothing else
   receives it — the allow-list is the `secretTemplate` annotations on
   `apply/40-certificates/titan-wildcard.yaml`, so a new consuming namespace means
-  editing that file, never copying the Secret by hand.
+  editing that file, never copying the Secret by hand. **The one deliberate exception is
+  `streaming.titan.arrieta.eu`, which points at `tesla-streaming-tls` from
+  `apply/40-certificates/tesla-streaming.yaml`. That is not duplication to collapse back into the
+  wildcard: TeslaMate's Erlang stream client rejects wildcard SANs and crash-loops every time a car
+  comes online. Read that file's header before changing it.**
 - Live drift is **not** corrected here. The HelmReleases run `driftDetection.mode: enabled`, which is
   notify-only, and Helm's new-vs-old patching lets an out-of-band env var survive every later upgrade
   indefinitely — so `kubectl edit` on a Helm-managed Deployment makes a permanent change that git never
