@@ -203,7 +203,7 @@ Therefore:
 - `teslamate-db-credentials` stays in `databases` and must not move; it is what CNPG's `DatabaseRole`
   reads.
 - The forwarder hardcodes `http://tesla-streaming.apps.svc.cluster.local/` in its ConfigMap
-  (`apply/50-apps/tesla/forwarder.yaml:34`). A namespace move that misses it produces a forwarder
+  (`apply/60-tesla/forwarder.yaml:34`). A namespace move that misses it produces a forwarder
   that connects happily to nothing.
 - The forward-auth `Middleware` must move with the Ingress — Traefik resolves middleware only in the
   Ingress's own namespace. That object has already cost this repo several hours (§9 of the runbook);

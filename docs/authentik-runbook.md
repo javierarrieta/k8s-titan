@@ -46,7 +46,7 @@ credentials. An S3 lifecycle rule is a backstop for noncurrent versions, not ret
 do not let anyone consolidate the two.
 
 Two things that are easy to get wrong and are commented at length in
-`apply/50-apps/databases/`: `schedule` needs **six** cron fields (`"0 0 3 * * *"`),
+`apply/30-databases/`: `schedule` needs **six** cron fields (`"0 0 3 * * *"`),
 because CNPG pins robfig/cron v1.2.0 where the optional field is day-of-week at the end,
 so the familiar five-field form fires hourly; and `retentionPolicy` is a child of
 `spec.backup`, not of `barmanObjectStore`.
@@ -385,7 +385,7 @@ The webhook says native Barman Cloud support is removed in **1.31.0** — not "a
 release". The operator pin is 1.30.1, so this works today, but the migration to the
 Barman Cloud Plugin is a prerequisite for the next operator minor, touching the
 `Cluster`, the `ScheduledBackup`, and this drill's `externalClusters` entry at once. It is
-tracked as forward debt in `apply/50-apps/databases/postgres.yaml`; it is not a drive-by
+tracked as forward debt in `apply/30-databases/postgres.yaml`; it is not a drive-by
 edit and should not be attempted as a side effect of something else.
 
 ### Point-in-time — recorded
