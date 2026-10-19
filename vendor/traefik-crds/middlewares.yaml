@@ -1,0 +1,736 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: Helm
+  name: middlewares.traefik.io
+spec:
+  conversion:
+    strategy: None
+  group: traefik.io
+  names:
+    kind: Middleware
+    listKind: MiddlewareList
+    plural: middlewares
+    singular: middleware
+  scope: Namespaced
+  versions:
+  - name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        properties:
+          apiVersion:
+            type: string
+          kind:
+            type: string
+          metadata:
+            type: object
+          spec:
+            properties:
+              addPrefix:
+                properties:
+                  prefix:
+                    type: string
+                    x-kubernetes-validations:
+                    - message: must start with a '/'
+                      rule: self.startsWith('/')
+                type: object
+              basicAuth:
+                properties:
+                  headerField:
+                    type: string
+                  realm:
+                    type: string
+                  removeHeader:
+                    type: boolean
+                  secret:
+                    type: string
+                type: object
+              buffering:
+                properties:
+                  maxRequestBodyBytes:
+                    format: int64
+                    type: integer
+                  maxResponseBodyBytes:
+                    format: int64
+                    type: integer
+                  memRequestBodyBytes:
+                    format: int64
+                    type: integer
+                  memResponseBodyBytes:
+                    format: int64
+                    type: integer
+                  retryExpression:
+                    type: string
+                type: object
+              chain:
+                properties:
+                  middlewares:
+                    items:
+                      properties:
+                        name:
+                          type: string
+                        namespace:
+                          type: string
+                      required:
+                      - name
+                      type: object
+                    type: array
+                type: object
+              circuitBreaker:
+                properties:
+                  checkPeriod:
+                    anyOf:
+                    - type: integer
+                    - type: string
+                    pattern: "^([0-9]+(ns|us|\xB5s|ms|s|m|h)?)+$"
+                    x-kubernetes-int-or-string: true
+                  expression:
+                    type: string
+                  fallbackDuration:
+                    anyOf:
+                    - type: integer
+                    - type: string
+                    x-kubernetes-int-or-string: true
+                  recoveryDuration:
+                    anyOf:
+                    - type: integer
+                    - type: string
+                    pattern: "^([0-9]+(ns|us|\xB5s|ms|s|m|h)?)+$"
+                    x-kubernetes-int-or-string: true
+                  responseCode:
+                    maximum: 599
+                    minimum: 100
+                    type: integer
+                type: object
+              compress:
+                properties:
+                  defaultEncoding:
+                    type: string
+                  encodings:
+                    items:
+                      type: string
+                    type: array
+                  excludedContentTypes:
+                    items:
+                      type: string
+                    type: array
+                  includedContentTypes:
+                    items:
+                      type: string
+                    type: array
+                  minResponseBodyBytes:
+                    minimum: 0
+                    type: integer
+                type: object
+              contentType:
+                properties:
+                  autoDetect:
+                    type: boolean
+                type: object
+              digestAuth:
+                properties:
+                  headerField:
+                    type: string
+                  realm:
+                    type: string
+                  removeHeader:
+                    type: boolean
+                  secret:
+                    type: string
+                type: object
+              encodedCharacters:
+                properties:
+                  allowEncodedBackSlash:
+                    type: boolean
+                  allowEncodedHash:
+                    type: boolean
+                  allowEncodedNullCharacter:
+                    type: boolean
+                  allowEncodedPercent:
+                    type: boolean
+                  allowEncodedQuestionMark:
+                    type: boolean
+                  allowEncodedSemicolon:
+                    type: boolean
+                  allowEncodedSlash:
+                    type: boolean
+                type: object
+              errors:
+                properties:
+                  query:
+                    type: string
+                  service:
+                    properties:
+                      healthCheck:
+                        properties:
+                          followRedirects:
+                            type: boolean
+                          headers:
+                            additionalProperties:
+                              type: string
+                            type: object
+                          hostname:
+                            type: string
+                          interval:
+                            anyOf:
+                            - type: integer
+                            - type: string
+                            x-kubernetes-int-or-string: true
+                          method:
+                            type: string
+                          mode:
+                            type: string
+                          path:
+                            type: string
+                          port:
+                            type: integer
+                          scheme:
+                            type: string
+                          status:
+                            type: integer
+                          timeout:
+                            anyOf:
+                            - type: integer
+                            - type: string
+                            x-kubernetes-int-or-string: true
+                          unhealthyInterval:
+                            anyOf:
+                            - type: integer
+                            - type: string
+                            x-kubernetes-int-or-string: true
+                        type: object
+                      kind:
+                        enum:
+                        - Service
+                        - TraefikService
+                        type: string
+                      middlewares:
+                        items:
+                          properties:
+                            name:
+                              type: string
+                            namespace:
+                              type: string
+                          required:
+                          - name
+                          type: object
+                        type: array
+                      name:
+                        type: string
+                      namespace:
+                        type: string
+                      nativeLB:
+                        type: boolean
+                      nodePortLB:
+                        type: boolean
+                      passHostHeader:
+                        type: boolean
+                      passiveHealthCheck:
+                        properties:
+                          failureWindow:
+                            anyOf:
+                            - type: integer
+                            - type: string
+                            x-kubernetes-int-or-string: true
+                          maxFailedAttempts:
+                            type: integer
+                        type: object
+                      port:
+                        anyOf:
+                        - type: integer
+                        - type: string
+                        x-kubernetes-int-or-string: true
+                      responseForwarding:
+                        properties:
+                          flushInterval:
+                            type: string
+                        type: object
+                      scheme:
+                        type: string
+                      serversTransport:
+                        type: string
+                      sticky:
+                        properties:
+                          cookie:
+                            properties:
+                              domain:
+                                type: string
+                              httpOnly:
+                                type: boolean
+                              maxAge:
+                                type: integer
+                              name:
+                                type: string
+                              path:
+                                type: string
+                              sameSite:
+                                enum:
+                                - none
+                                - lax
+                                - strict
+                                - None
+                                - Lax
+                                - Strict
+                                type: string
+                              secure:
+                                type: boolean
+                            type: object
+                        type: object
+                      strategy:
+                        enum:
+                        - wrr
+                        - p2c
+                        - hrw
+                        - leasttime
+                        - RoundRobin
+                        type: string
+                      weight:
+                        minimum: 0
+                        type: integer
+                    required:
+                    - name
+                    type: object
+                  status:
+                    items:
+                      pattern: ^([1-5][0-9]{2}[,-]?)+$
+                      type: string
+                    type: array
+                  statusRewrites:
+                    additionalProperties:
+                      type: integer
+                    type: object
+                type: object
+              forwardAuth:
+                properties:
+                  addAuthCookiesToResponse:
+                    items:
+                      type: string
+                    type: array
+                  address:
+                    type: string
+                  authRequestHeaders:
+                    items:
+                      type: string
+                    type: array
+                  authResponseHeaders:
+                    items:
+                      type: string
+                    type: array
+                  authResponseHeadersRegex:
+                    type: string
+                  authSigninURL:
+                    type: string
+                  forwardBody:
+                    type: boolean
+                  headerField:
+                    type: string
+                  maxBodySize:
+                    format: int64
+                    type: integer
+                  maxResponseBodySize:
+                    format: int64
+                    type: integer
+                  preserveLocationHeader:
+                    type: boolean
+                  preserveRequestMethod:
+                    type: boolean
+                  tls:
+                    properties:
+                      caOptional:
+                        type: boolean
+                      caSecret:
+                        type: string
+                      certSecret:
+                        type: string
+                      insecureSkipVerify:
+                        type: boolean
+                    type: object
+                  trustForwardHeader:
+                    type: boolean
+                type: object
+              grpcWeb:
+                properties:
+                  allowOrigins:
+                    items:
+                      type: string
+                    type: array
+                type: object
+              headers:
+                properties:
+                  accessControlAllowCredentials:
+                    type: boolean
+                  accessControlAllowHeaders:
+                    items:
+                      type: string
+                    type: array
+                  accessControlAllowMethods:
+                    items:
+                      type: string
+                    type: array
+                  accessControlAllowOriginList:
+                    items:
+                      type: string
+                    type: array
+                  accessControlAllowOriginListRegex:
+                    items:
+                      type: string
+                    type: array
+                  accessControlExposeHeaders:
+                    items:
+                      type: string
+                    type: array
+                  accessControlMaxAge:
+                    format: int64
+                    type: integer
+                  addVaryHeader:
+                    type: boolean
+                  allowedHosts:
+                    items:
+                      type: string
+                    type: array
+                  browserXssFilter:
+                    type: boolean
+                  contentSecurityPolicy:
+                    type: string
+                  contentSecurityPolicyReportOnly:
+                    type: string
+                  contentTypeNosniff:
+                    type: boolean
+                  customBrowserXSSValue:
+                    type: string
+                  customFrameOptionsValue:
+                    type: string
+                  customRequestHeaders:
+                    additionalProperties:
+                      type: string
+                    type: object
+                  customResponseHeaders:
+                    additionalProperties:
+                      type: string
+                    type: object
+                  featurePolicy:
+                    type: string
+                  forceSTSHeader:
+                    type: boolean
+                  frameDeny:
+                    type: boolean
+                  hostsProxyHeaders:
+                    items:
+                      type: string
+                    type: array
+                  isDevelopment:
+                    type: boolean
+                  permissionsPolicy:
+                    type: string
+                  publicKey:
+                    type: string
+                  referrerPolicy:
+                    type: string
+                  sslForceHost:
+                    type: boolean
+                  sslHost:
+                    type: string
+                  sslProxyHeaders:
+                    additionalProperties:
+                      type: string
+                    type: object
+                  sslRedirect:
+                    type: boolean
+                  sslTemporaryRedirect:
+                    type: boolean
+                  stsIncludeSubdomains:
+                    type: boolean
+                  stsPreload:
+                    type: boolean
+                  stsSeconds:
+                    format: int64
+                    minimum: 0
+                    type: integer
+                type: object
+              inFlightReq:
+                properties:
+                  amount:
+                    format: int64
+                    minimum: 0
+                    type: integer
+                  sourceCriterion:
+                    properties:
+                      ipStrategy:
+                        properties:
+                          depth:
+                            minimum: 0
+                            type: integer
+                          excludedIPs:
+                            items:
+                              type: string
+                            type: array
+                          ipv6Subnet:
+                            type: integer
+                        type: object
+                      requestHeaderName:
+                        type: string
+                      requestHost:
+                        type: boolean
+                    type: object
+                type: object
+              ipAllowList:
+                properties:
+                  ipStrategy:
+                    properties:
+                      depth:
+                        minimum: 0
+                        type: integer
+                      excludedIPs:
+                        items:
+                          type: string
+                        type: array
+                      ipv6Subnet:
+                        type: integer
+                    type: object
+                  rejectStatusCode:
+                    type: integer
+                  sourceRange:
+                    items:
+                      type: string
+                    type: array
+                type: object
+              ipWhiteList:
+                properties:
+                  ipStrategy:
+                    properties:
+                      depth:
+                        minimum: 0
+                        type: integer
+                      excludedIPs:
+                        items:
+                          type: string
+                        type: array
+                      ipv6Subnet:
+                        type: integer
+                    type: object
+                  sourceRange:
+                    items:
+                      type: string
+                    type: array
+                type: object
+              passTLSClientCert:
+                properties:
+                  info:
+                    properties:
+                      issuer:
+                        properties:
+                          commonName:
+                            type: boolean
+                          country:
+                            type: boolean
+                          domainComponent:
+                            type: boolean
+                          locality:
+                            type: boolean
+                          organization:
+                            type: boolean
+                          province:
+                            type: boolean
+                          serialNumber:
+                            type: boolean
+                        type: object
+                      notAfter:
+                        type: boolean
+                      notBefore:
+                        type: boolean
+                      sans:
+                        type: boolean
+                      serialNumber:
+                        type: boolean
+                      subject:
+                        properties:
+                          commonName:
+                            type: boolean
+                          country:
+                            type: boolean
+                          domainComponent:
+                            type: boolean
+                          locality:
+                            type: boolean
+                          organization:
+                            type: boolean
+                          organizationalUnit:
+                            type: boolean
+                          province:
+                            type: boolean
+                          serialNumber:
+                            type: boolean
+                        type: object
+                    type: object
+                  pem:
+                    type: boolean
+                type: object
+              plugin:
+                additionalProperties:
+                  x-kubernetes-preserve-unknown-fields: true
+                type: object
+              rateLimit:
+                properties:
+                  average:
+                    format: int64
+                    minimum: 0
+                    type: integer
+                  burst:
+                    format: int64
+                    minimum: 0
+                    type: integer
+                  period:
+                    anyOf:
+                    - type: integer
+                    - type: string
+                    x-kubernetes-int-or-string: true
+                  redis:
+                    properties:
+                      db:
+                        type: integer
+                      dialTimeout:
+                        anyOf:
+                        - type: integer
+                        - type: string
+                        pattern: "^([0-9]+(ns|us|\xB5s|ms|s|m|h)?)+$"
+                        x-kubernetes-int-or-string: true
+                      endpoints:
+                        items:
+                          type: string
+                        type: array
+                      maxActiveConns:
+                        type: integer
+                      minIdleConns:
+                        type: integer
+                      poolSize:
+                        type: integer
+                      readTimeout:
+                        anyOf:
+                        - type: integer
+                        - type: string
+                        pattern: "^([0-9]+(ns|us|\xB5s|ms|s|m|h)?)+$"
+                        x-kubernetes-int-or-string: true
+                      secret:
+                        type: string
+                      tls:
+                        properties:
+                          caSecret:
+                            type: string
+                          certSecret:
+                            type: string
+                          insecureSkipVerify:
+                            type: boolean
+                        type: object
+                      writeTimeout:
+                        anyOf:
+                        - type: integer
+                        - type: string
+                        pattern: "^([0-9]+(ns|us|\xB5s|ms|s|m|h)?)+$"
+                        x-kubernetes-int-or-string: true
+                    type: object
+                  sourceCriterion:
+                    properties:
+                      ipStrategy:
+                        properties:
+                          depth:
+                            minimum: 0
+                            type: integer
+                          excludedIPs:
+                            items:
+                              type: string
+                            type: array
+                          ipv6Subnet:
+                            type: integer
+                        type: object
+                      requestHeaderName:
+                        type: string
+                      requestHost:
+                        type: boolean
+                    type: object
+                type: object
+              redirectRegex:
+                properties:
+                  permanent:
+                    type: boolean
+                  regex:
+                    type: string
+                  replacement:
+                    type: string
+                type: object
+              redirectScheme:
+                properties:
+                  permanent:
+                    type: boolean
+                  port:
+                    type: string
+                  scheme:
+                    type: string
+                type: object
+              replacePath:
+                properties:
+                  path:
+                    type: string
+                type: object
+              replacePathRegex:
+                properties:
+                  regex:
+                    type: string
+                  replacement:
+                    type: string
+                type: object
+              retry:
+                properties:
+                  attempts:
+                    minimum: 0
+                    type: integer
+                  disableRetryOnNetworkError:
+                    type: boolean
+                  initialInterval:
+                    anyOf:
+                    - type: integer
+                    - type: string
+                    pattern: "^([0-9]+(ns|us|\xB5s|ms|s|m|h)?)+$"
+                    x-kubernetes-int-or-string: true
+                  maxRequestBodyBytes:
+                    format: int64
+                    minimum: -1
+                    type: integer
+                  retryNonIdempotentMethod:
+                    type: boolean
+                  status:
+                    items:
+                      pattern: ^([1-5][0-9]{2}[,-]?)+$
+                      type: string
+                    type: array
+                  timeout:
+                    anyOf:
+                    - type: integer
+                    - type: string
+                    pattern: "^([0-9]+(ns|us|\xB5s|ms|s|m|h)?)+$"
+                    x-kubernetes-int-or-string: true
+                type: object
+              stripPrefix:
+                properties:
+                  forceSlash:
+                    type: boolean
+                  prefixes:
+                    items:
+                      type: string
+                    type: array
+                type: object
+              stripPrefixRegex:
+                properties:
+                  regex:
+                    items:
+                      type: string
+                    type: array
+                type: object
+            type: object
+        required:
+        - metadata
+        - spec
+        type: object
+    served: true
+    storage: true
+status: {}

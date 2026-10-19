@@ -1,0 +1,3 @@
+# Vendored from the live cluster via the read-only identity, 2026-10-19T15:00:05Z.
+# Source context: titan. This is the schema the API server enforces today, not an
+# upstream tag — see the header of scripts/update-crds.sh for why.

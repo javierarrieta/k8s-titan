@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Assert every field in a built manifest is declared in its CRD's schema.
 
-Reads multi-document YAML on stdin (the output of `kubectl kustomize`), CRDs from a
-directory given as argv[1], and reports any object key that the CRD does not declare at
+Reads multi-document YAML on stdin (the output of `kubectl kustomize`), CRDs from one or more
+directories given as argv, and reports any object key that the CRD does not declare at
 that exact position.
 
 Why this exists and jsonschema does not: the CNPG CRDs set no `additionalProperties:
@@ -19,18 +19,28 @@ import sys
 import yaml
 
 
-def load_schemas(directory):
+def load_schemas(directories):
     import glob
     import os
     schemas = {}
-    for path in sorted(glob.glob(os.path.join(directory, "*.yaml"))):
-        with open(path) as fh:
-            for doc in yaml.safe_load_all(fh):
-                if not doc or doc.get("kind") != "CustomResourceDefinition":
-                    continue
-                versions = doc["spec"]["versions"]
-                version = next((v for v in versions if v.get("storage")), versions[-1])
-                schemas[doc["spec"]["names"]["kind"]] = version["schema"]["openAPIV3Schema"]
+    for directory in directories:
+        for path in sorted(glob.glob(os.path.join(directory, "*.yaml"))):
+            with open(path) as fh:
+                for doc in yaml.safe_load_all(fh):
+                    if not doc or doc.get("kind") != "CustomResourceDefinition":
+                        continue
+                    versions = doc["spec"]["versions"]
+                    version = next((v for v in versions if v.get("storage")), versions[-1])
+                    kind = doc["spec"]["names"]["kind"]
+                    # Schemas are keyed by Kind alone, so two groups shipping the same Kind
+                    # would silently shadow each other. Nothing does today; if one ever does,
+                    # failing here is far cheaper than a gate that quietly checks against the
+                    # wrong schema.
+                    if kind in schemas:
+                        raise ValueError(
+                            f"duplicate Kind {kind!r} across vendored CRDs; keying is by Kind "
+                            f"only, so one would silently shadow the other")
+                    schemas[kind] = version["schema"]["openAPIV3Schema"]
     return schemas
 
 
@@ -64,13 +74,17 @@ def walk(node, schema, path, out):
 
 
 def main():
+    dirs = sys.argv[1:]
+    if not dirs:
+        print("crd-check: no CRD directory given - refusing to report clean")
+        return 2
     try:
-        schemas = load_schemas(sys.argv[1])
-    except (OSError, IndexError) as exc:
-        print(f"crd-check: cannot load CRDs from {sys.argv[1] if len(sys.argv) > 1 else '<unset>'}: {exc}")
+        schemas = load_schemas(dirs)
+    except (OSError, ValueError, KeyError, IndexError) as exc:
+        print(f"crd-check: cannot load CRDs from {', '.join(dirs)}: {exc}")
         return 2
     if not schemas:
-        print(f"crd-check: no CRDs found in {sys.argv[1]} - refusing to report clean")
+        print(f"crd-check: no CRDs found in {', '.join(dirs)} - refusing to report clean")
         return 2
 
     checked, failures, kinds = 0, [], set()
