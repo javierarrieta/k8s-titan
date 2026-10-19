@@ -28,7 +28,7 @@ tesla.titan.arrieta.eu/.well-known/appspecific/ ──> nginx (the app's public 
 ```
 
 Everything is in namespace `apps` except the database, which is in `databases`. All manifests are in
-`apply/50-apps/tesla/`.
+`apply/60-tesla/`.
 
 | component | image | port | exposed as |
 |---|---|---|---|
@@ -105,7 +105,7 @@ step, not a convenience.
 The Fleet API metered-bills `vehicle_data` at about **$1.50 per 1,000 calls**, with a Discovery-tier
 cap of **200 device-data calls per vehicle per day**. TeslaMate's documented defaults — driving 2.5 s,
 charging 5 s, online 60 s, asleep 30 s, default 15 s — blow that cap inside a single commute and cost
-roughly **$65/month**. The values in `apply/50-apps/tesla/teslamate.yaml` are:
+roughly **$65/month**. The values in `apply/60-tesla/teslamate.yaml` are:
 
 | env | value | why |
 |---|---|---|
@@ -147,7 +147,7 @@ as a real wakeup forces a ~15-minute full wake. Brief hourly `:online` blips are
 
 ## 4. Telemetry path
 
-`tesla-fleet-telemetry` is configured by `apply/50-apps/tesla/fleet-telemetry.yaml`. Three settings
+`tesla-fleet-telemetry` is configured by `apply/60-tesla/fleet-telemetry.yaml`. Three settings
 there are load-bearing and easy to "clean up" by accident:
 
 - **`transmit_decoded_records: true`.** With it off, fleet-telemetry publishes raw flatbuffers and
@@ -161,7 +161,7 @@ there are load-bearing and easy to "clean up" by accident:
   a route has no `tls` field at all; v2-era examples on the internet are wrong. Passthrough is required
   because fleet-telemetry terminates Tesla's mTLS itself — Traefik must not decrypt this connection.
 
-The forwarder (`apply/50-apps/tesla/forwarder.yaml`) is a dependency-free Node script in a ConfigMap —
+The forwarder (`apply/60-tesla/forwarder.yaml`) is a dependency-free Node script in a ConfigMap —
 there is no image-build pipeline in these repos, so reviewable-in-git beat a custom image. It
 `PSUBSCRIBE`s `tesla_telemetry_V_*` and POSTs each payload to `http://tesla-streaming.apps.svc.cluster.local/`.
 It forwards **bytes, not text**: RESP bulk strings must stay `Buffer`, or a non-UTF-8 payload gets
@@ -187,41 +187,69 @@ not subscribed — check its logs for a `PONG` handshake failure before looking 
 
 ## 5. Pointing the car at it
 
-All of this is the operator's, from their own machine, via `scripts/tesla-push-telemetry-config.sh`:
+**Rewritten 2026-10-19 after the first successful bring-up.** Everything below was executed and is
+proven; `docs/tesla-telemetry-bringup-2026-10-19.md` is the post-mortem and has the evidence, including
+ten ways this went wrong before it went right. Read that file before editing the script.
 
-```bash
-go install github.com/teslamotors/vehicle-command/cmd/tesla-http-proxy@v0.4.1   # once
-./scripts/tesla-push-telemetry-config.sh proxy    # terminal 1, needs the app private key + proxy cert
-./scripts/tesla-push-telemetry-config.sh push     # terminal 2
-./scripts/tesla-push-telemetry-config.sh status   # until "synced": true
+```fish
+./scripts/tesla-push-telemetry-config.sh preflight   # deps, keys, proxy, ca, VINs
+./scripts/tesla-push-telemetry-config.sh tls         # once: throwaway loopback TLS pair
+./scripts/tesla-push-telemetry-config.sh proxy       # terminal 1 — watch it during push
+./scripts/tesla-push-telemetry-config.sh ca          # once per issuer change
+./scripts/tesla-push-telemetry-config.sh vehicles    # confirms the token, lists VINs
+./scripts/tesla-push-telemetry-config.sh push <VIN>
+./scripts/tesla-push-telemetry-config.sh status      # until synced: true
 ```
 
-The token it asks for must be a **Fleet API** access token for the owner, minted by your own
-application — not the old Owner-API bearer this migration replaces. TeslaMate stores its copy
-encrypted in the database; doing the authorization-code flow again (§5a) is less work than
-decrypting it.
+Three things this replaced, each of which cost hours the first time:
 
-`ca` is deliberately absent from the request body. Omitting it is what tells the vehicle to validate
-`telemetry.titan.arrieta.eu` against the publicly trusted CA chain. **Until this has been done once,
-nobody knows whether the vehicle accepts that chain** — it is the spec's open assumption. If the car
-connects and fleet-telemetry rejects the handshake, that is suspect number one.
+- **`go install` of the proxy does not work.** The module carries a `replace` directive, so
+  `@v0.4.1` cannot resolve. Build from a clone; `preflight` prints the commands.
+- **The signing key is not the TLS key.** `-tls-key` and `-key-file` must be different files; the
+  proxy refuses otherwise, and rightly so — `-key-file` is the credential that can drive the car.
+- **The proxy wants an envelope, `{"vins":[...], "config":{...}}`.** A bare config makes it sign a
+  nil map and panic, which surfaces as `curl (92)` or `(52) Empty reply` with no HTTP status. A
+  transport-shaped error from a local proxy means read its stderr, not your network.
+
+The token must be a **Fleet API** access token for the owner, minted by your own application — not
+the old Owner-API bearer this migration replaces. TeslaMate stores its copy encrypted in the
+database; doing the authorization-code flow again (§5a) is less work than decrypting it. Tokens last
+about two hours, so expect to re-mint across a long session. The script never puts it on a command
+line and never prints it.
+
+**`ca` is mandatory.** Tesla answers `{"error":"ca is not a valid PEM"}` without it. The earlier text
+here claimed omitting it made the vehicle fall back to the public CA chain; that was never true and is
+the single most expensive sentence in this file. The consequence is an obligation, not just a fact:
+**the car pins the chain you send it**, so after any change of issuer — not merely a renewal — the
+config must be re-pushed:
+
+```fish
+./scripts/tesla-push-telemetry-config.sh ca && ./scripts/tesla-push-telemetry-config.sh push <VIN>
+```
+
+**Pairing is per vehicle, happens on the phone, and produces no file.** Open
+`https://tesla.com/_ak/tesla.titan.arrieta.eu` (optionally `?vin=<VIN>`) **on the phone** so it deep
+links into the Tesla app; in a desktop browser it just renders a page and nothing reaches the app.
+An unpaired car is reported honestly as `skipped_vehicles.missing_key`, and no amount of re-pushing
+changes that until it is paired. Revocation is on the car's Locks screen.
 
 Nothing below `synced: true` is evidence. Before the car has been told, the cluster logs are quiet
 because the car has not been asked, not because anything is broken.
 
-Before that, run Tesla's own named preflight — it is a script in the upstream fleet-telemetry repo,
-not one in this tree, and it answers the question §5's assumption rests on from outside the cluster:
+After `synced: true`, the proof is a client connection, not a config echo:
 
-```bash
-git clone https://github.com/teslamotors/fleet-telemetry && cd fleet-telemetry
-cat > /tmp/validate_server.json <<'EOF'
-{"hostname":"telemetry.titan.arrieta.eu","port":443,"ca":"<the full chain that issued titan-tls>"}
-EOF
-./tools/check_server_cert.sh /tmp/validate_server.json
+```fish
+kubectl --context k8s-titan -n apps logs deploy/tesla-fleet-telemetry --tail=20
+kubectl --context k8s-titan -n apps exec deploy/tesla-redis -- redis-cli info commandstats
+kubectl --context k8s-titan -n apps exec deploy/tesla-forwarder -- wget -qO- http://127.0.0.1:8080/metrics
 ```
 
-**Not yet run.** Paste its output here when it has been; until then the public-CA question is an
-assumption with a command attached, not a fact.
+`socket_connected` with `user_agent=Hermes/*` is the car. `cmdstat_publish` and `forwarded` rising
+together is the pipeline. Two traps in those numbers: the per-type counts in `socket_disconnected`
+(`V`, `errors`, `total`) are **bytes**, not records — a parked car sends a few hundred of them — and
+`forwarded` lags `publish` during a burst because the forwarder serialises frames through a promise
+chain, so compare them once traffic has settled. The forwarder logs nothing on success; its metrics
+endpoint is the only honest readout.
 
 ## 5a. Signing TeslaMate in — the token pair, and why it is not `TESLA_AUTH_CLIENT_ID` alone
 
@@ -249,7 +277,7 @@ Two consequences, both cheap to hit and expensive to diagnose:
 ### The flow
 
 The redirect endpoint is `https://authorize.titan.arrieta.eu/callback` — a Deployment that logs
-the request line and does nothing else (`apply/50-apps/tesla/auth-callback.yaml`, `replicas: 0`
+the request line and does nothing else (`apply/60-tesla/auth-callback.yaml`, `replicas: 0`
 between uses). It exists because Tesla only returns the code to a URI the application registered,
 and exchanging the code in the cluster would drag `client_secret` into it.
 
@@ -543,11 +571,19 @@ Retired by measurement on 2026-10-19, and retired **negative**:
 | the decoded Redis payload shape matches what the forwarder and bridge expect | **cannot be tested yet.** The forwarder reports `{"connected":true,"forwarded":0,"rejected":0,"lastPost":"never"}` over two days, `fleet-telemetry` has logged nothing since its own startup on 2026-10-17T16:34:05 with `log_level: info`, and the bridge has never had a websocket attached. Nothing has ever been published, so §4's synthetic publish is the only way to exercise this path until the car is pointed at it. |
 | TeslaMate's own polling survives a car coming online | **it did not.** With a wildcard on `streaming.titan.arrieta.eu` it crash-looped instead — §6. Replaced by the single-name certificate, and **the certificate decision is now proven**: Erlang's default matcher returns `false` for the old wildcard and `true` for the live single-name cert, tested directly against both DER files. What is *still* unobserved is a real `Stream connected` from a car — see §6. |
 
-Still open and now the front of the queue: **the vehicle has never been told to stream.** §5's
-`synced: true` has not been reached, so every claim downstream of it in this file remains an
-assumption with a command attached. Note also that the public-CA question in §5 is about the
-*vehicle's* trust store; that `streaming.titan.arrieta.eu` validates against a public CA from a
-laptop proves nothing about what the car will accept.
+Retired by measurement on 2026-10-19, and retired **positive** — see
+`docs/tesla-telemetry-bringup-2026-10-19.md` for the evidence behind each line:
+
+| claim | what was actually found |
+|---|---|
+| the vehicle accepts a publicly trusted CA for `telemetry.titan.arrieta.eu` | **moot as posed.** The vehicle does not choose a chain: Tesla requires a `ca` field and the car pins whatever PEM you send. `ca` omitted is not a fallback to the public store, it is a rejected config (`ca is not a valid PEM`). §5 rewritten. |
+| the vehicle can be told to stream at all | **yes.** `updated_vehicles: 1`, then `socket_connected user_agent=Hermes/1.16.9 (vehicle_device)`. |
+| the decoded Redis payload shape matches what the forwarder and bridge expect | **yes, at small volume.** `cmdstat_publish:calls=4` and `forwarded:4, rejected:0, lastPost:ok`. Not yet exercised at driving volume. |
+| the forwarder's `PATTERN` matches the producer's channel | **yes.** Upstream `vinChannel` is `tesla_telemetry_V_{VIN}` (`datastore/redis/redis.go` at v0.9.5) and `tesla_telemetry_V_*` matches it under PSUBSCRIBE; `pubsub numpat` = 1. |
+
+Still open: **sustained volume.** The one session measured was a parked car emitting 650 bytes, and
+`forwarded` has never been compared against `publish` across a real trip. Everything above is proven
+in kind, not at rate.
 
 One warning attached to that first row of the table above, learned the hard way on 2026-10-19: if you
 switch `telemetry.titan.arrieta.eu` to a single-name certificate, **declare its A record in
