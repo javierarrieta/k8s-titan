@@ -105,11 +105,12 @@ workdir() {
 }
 
 read_token() {
-  if [ -n "${TESLA_ACCESS_TOKEN:-}" ]; then return 0; fi
-  if [ ! -t 0 ]; then
-    TESLA_ACCESS_TOKEN=$(cat)
-  else
-    read -r -s -p "Fleet API access token: " TESLA_ACCESS_TOKEN </dev/tty; echo >&2
+  if [ -z "${TESLA_ACCESS_TOKEN:-}" ]; then
+    if [ ! -t 0 ]; then
+      TESLA_ACCESS_TOKEN=$(cat)
+    else
+      read -r -s -p "Fleet API access token: " TESLA_ACCESS_TOKEN </dev/tty; echo >&2
+    fi
   fi
   [ -n "${TESLA_ACCESS_TOKEN:-}" ] || die "no token."
   # A token with whitespace in it was pasted wrong. It produces a malformed header, which the proxy
@@ -117,15 +118,25 @@ read_token() {
   case "$TESLA_ACCESS_TOKEN" in
     *[[:space:]]*) die "the token contains whitespace — it was pasted wrong. Re-enter it." ;;
   esac
+  # Always (re)write the header file, including when the token came from the environment. Returning
+  # early here is what made every request fail with `curl: option -H: error encountered when reading
+  # a file`: the file simply had not been created.
   workdir
   printf 'Authorization: Bearer %s\n' "$TESLA_ACCESS_TOKEN" > "$TMPDIR_TESLA/auth.h"
   chmod 600 "$TMPDIR_TESLA/auth.h"
+}
+
+# Fail here rather than letting curl emit a confusing file error, so a future refactor that drops
+# read_token from a code path is obvious instead of mysterious.
+require_auth_header() {
+  [ -s "$TMPDIR_TESLA/auth.h" ] || die "internal: no auth header written — read_token was skipped."
 }
 
 # curl with the token header from file. Prints "<http_code>\n<body>"; a code of 000 means transport
 # failure, which for this proxy has exactly one common cause (see the hint).
 api() {
   local method=$1 url=$2 data=${3:-} out code body
+  require_auth_header
   local args=(-sS -k -X "$method" -H "@$TMPDIR_TESLA/auth.h" -w $'\n%{http_code}')
   [ -n "$data" ] && args+=(-H 'Content-Type: application/json' --data "$data")
   if ! out=$(curl "${args[@]}" "$url" 2>&1); then
@@ -321,7 +332,7 @@ cmd_status() {
 
 cmd_preflight() {
   local ok=1
-  for c in curl jq openssl python3 tesla-http-proxy; do
+  for c in curl jq openssl python3; do
     if command -v "$c" >/dev/null 2>&1; then note "ok    $c"; else note "MISS  $c"; ok=0; fi
   done
   # curl needs 7.76+ for --fail-with-body; this script avoids that flag, but the version is still the
@@ -332,10 +343,22 @@ cmd_preflight() {
   done
   [ "$TESLA_TLS_KEY" != "$TESLA_APP_KEY" ] && note "ok    TLS key is separate from the app key" \
     || { note "FAIL  TESLA_TLS_KEY == TESLA_APP_KEY"; ok=0; }
+  # The proxy is fine if it is reachable OR startable. Reporting a missing binary as a failure while a
+  # proxy is already answering is a false alarm — that state is exactly "you are ready to push".
   if curl -k -sS -o /dev/null --max-time 3 "$PROXY_URL/" 2>/dev/null; then
     note "ok    proxy answering at $PROXY_URL"
+    if command -v tesla-http-proxy >/dev/null 2>&1; then
+      note "ok    tesla-http-proxy"
+    else
+      note "note  tesla-http-proxy not on PATH, but something is already answering — nothing to do"
+    fi
   else
-    note "MISS  nothing answering at $PROXY_URL — start it with '$0 proxy'"
+    if command -v tesla-http-proxy >/dev/null 2>&1; then
+      note "note  nothing at $PROXY_URL; start it with '$0 proxy'"
+    else
+      note "MISS  nothing at $PROXY_URL and no tesla-http-proxy to start one"
+      ok=0
+    fi
   fi
   [ -s "$TESLA_CA_FILE" ] && note "ok    $TESLA_CA_FILE" || note "note  no CA chain yet; 'ca' will fetch it"
   [ "$ok" = 1 ] && note "preflight: ready" || note "preflight: problems above"
