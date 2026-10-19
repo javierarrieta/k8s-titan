@@ -70,16 +70,22 @@ apply/20-infra/reflector/reflector.yaml   namespace: apps → certificates
 
 ---
 
-### Task 1: Prove the current state, and record it
+### Task 1: Prove the current state, and record it — **partly DONE 2026-10-19T13:20Z**
 
-- [ ] Confirm which namespace each file under `apply/50-apps/tesla/` actually writes to. **Do not assume the directory equals the namespace** — `teslamate-db.yaml` is expected to target `databases`, not `apps`. Record the real answer and correct this plan if it is wrong.
+- [x] **Answered from the `apps` Kustomization inventory, not assumed:** the Tesla DB objects live in `databases`, not `apps` —
+  ```
+  databases_teslamate_postgresql.cnpg.io_Database
+  databases_teslamate_postgresql.cnpg.io_DatabaseRole
+  ```
+  So `teslamate-db.yaml` does **not** move with the namespace change. The 8 Tesla Deployments, 5 Ingresses, the `IngressRouteTCP` and the `Middleware` are all `apps_`.
+- [x] **`reflector` and `reloader` are owned by the `infra` stage, not `apps`** — they are absent from the `apps` inventory and merely deploy into `apps`. Task 5 is therefore an `infra`-stage edit; nothing in the `apps` stage changes when reflector moves.
 - [ ] Record the current `ENCRYPTION_KEY` fingerprint so a later step can prove the copy is identical:
   ```bash
   sops -d apply/10-secrets/teslamate-secrets.yaml | sha256sum
   ```
   Record the hash. Do not record the key.
 - [ ] Record forwarder counters: `forwarded`, `rejected`, `lastPost` from its `:8080` status endpoint.
-- [ ] Record pod `AGE` for all Tesla workloads.
+- [ ] Record pod `AGE` for all Tesla workloads. Baseline as of 13:20Z: all six non-TeslaMate pods restarts=0 up 44h; `teslamate` restarts=23, up since 07:13:24Z.
 
 ### Task 2: Land the namespace and the second copy of every Secret
 
@@ -138,6 +144,6 @@ Independent of the Tesla move; can be done any time after Task 3, or not at all.
 ## Not proven / accepted
 
 - **The casa-side Loki label change is invisible from here.** No gate in this repo can see it, and it will not fail loudly.
-- **`teslamate-db.yaml`'s real namespace was assumed, not read.** Task 1 exists because that assumption would be expensive.
+- ~~**`teslamate-db.yaml`'s real namespace was assumed, not read.**~~ **Resolved 2026-10-19:** the `apps` inventory shows `databases_teslamate_..._Database`, so it targets `databases` and does not move.
 - **The middleware move is the most likely single point of failure** and its only proof is loading the UI through authentik. This repo has already lost hours to that object's naming.
 - **`reloader` in `apps` is a known wart**, accepted deliberately: the operator does not want a namespace per singleton controller, and `apps` is where it already lives. If it becomes a problem, `reloader-system` following k8s-casa's `kured` precedent is a one-line change.

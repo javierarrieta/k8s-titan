@@ -54,18 +54,35 @@ Within one Kustomization Flux applies in this order but does not wait. Splitting
 
 ## The hazard
 
-`prune: true` means Flux garbage-collects managed objects when the Kustomization is removed. So the obvious edit —
+**Measured at execution (Task 1, 2026-10-19T13:20Z), and it is worse than the shape of the change suggests.** `kubectl -n flux-system get kustomization apps -o jsonpath='{.status.inventory}'` lists **43 objects**, and among them:
+
+```
+databases_postgres_postgresql.cnpg.io_Cluster        ← deleting this destroys the production database
+databases_{authentik,coder,teslamate}_..._Database   + 3 DatabaseRole
+ databases_postgres-daily_postgresql.cnpg.io_ScheduledBackup
+auth_authentik_helm.toolkit.fluxcd.io_HelmRelease    ← finalizer ⇒ helm uninstall
+coder_coder_helm.toolkit.fluxcd.io_HelmRelease       ← same
+apps_teslamate_apps_Deployment  (+7 more tesla Deployments, 5 Ingresses,
+                                  the IngressRouteTCP and the Traefik Middleware)
+coder-workspaces_coder-workspaces__ResourceQuota / LimitRange
+```
+
+So `prune: true` plus deleting the `apps` Kustomization does not "recreate the workloads" — it **deletes the CNPG `Cluster`, which destroys the database**, and it deletes the authentik and coder `HelmRelease` objects, whose finalizers make helm uninstall those releases as well.
+
+The obvious edit —
 
 ```
 rm apply/00-bootstrap/stage-apps.yaml
 +  apply/00-bootstrap/stage-{databases,authentik,coder,tesla}.yaml
 ```
 
-— **deletes authentik, coder, the CNPG Postgres cluster and all of Tesla, then recreates them.** For the Postgres cluster that is a database outage with real data-loss exposure, and it would happen about one reconcile after the merge.
+— is a full-cluster outage with data loss, about one reconcile after the merge.
 
-Flux also refuses to apply an object already owned by another Kustomization: managed objects carry `kustomize.toolkit.fluxcd.io/name` and `…/namespace`, and a second Kustomization touching them fails an ownership annotation check. `spec.force: true` is the documented takeover mechanism.
+**Ownership is tracked on the Kustomization, not on the objects.** Measured: the live `apps/teslamate` Deployment carries only `deployment.kubernetes.io/revision` — there is **no `kustomize.toolkit.fluxcd.io/name` annotation on it**, and none on authentik's or coder's workloads either. Ownership lives in `.status.inventory.entries` on the Kustomization.
 
-**Verify the `force` semantics against the kustomize-controller v1.9.6 docs before executing Task 3.** The plan's safety rests on it and the author did not test it. If `force` does not behave as described, stop and reconsider — do not improvise around a live Postgres cluster.
+That invalidates the `force: true` takeover this plan originally specified. `force` exists to resolve conflicts with a per-object ownership annotation; with no annotation on these objects there may be nothing for it to resolve, and the real conflict is two Kustomizations listing one object in their inventories. **Task 3 opens by establishing, against the kustomize-controller v1.9.6 docs, how a second Kustomization claims an object already in another's inventory.** Do not assume `force` is the answer — the first version of this plan assumed it and was measured wrong.
+
+The mitigation ordering is unchanged and is now clearly the only safe one: make the old unit non-pruning first, prove it, then split.
 
 ## Review Focus
 
@@ -103,22 +120,22 @@ certificates ─→ databases ─→ authentik
 
 ---
 
-### Task 1: Baseline the current state
+### Task 1: Baseline the current state — **DONE 2026-10-19T13:20Z**
 
-- [ ] Record what must not be recreated:
-  ```bash
-  kubectl --context titan -n databases get pods,sts -o wide
-  kubectl --context titan -n auth get pods
-  kubectl --context titan -n coder get pods
-  kubectl --context titan -n apps get pods
+- [x] Pod baseline. Pod `AGE` is the proof of whether anything was recreated later:
   ```
-  Save the output. Pod `AGE` is the proof of whether anything was recreated.
-- [ ] Record the CNPG cluster health and its current primary.
-- [ ] Confirm `apps` owns the objects today:
-  ```bash
-  kubectl --context titan -n databases get cluster -o jsonpath='{.items[*].metadata.annotations.kustomize\.toolkit\.fluxcd\.io/name}{"\n"}'
+  databases  pod/postgres-1   1/1 Running restarts=1  up 5d16h
+  auth       authentik-server 1/1 Running restarts=0  up 22h ; authentik-worker restarts=0 up 21h
+  coder      coder            1/1 Running restarts=3  up 5d16h
+  apps       teslamate        1/1 Running restarts=23 — last crash 07:08:06Z, up since 07:13:24Z
+             tesla-{redis,streaming,forwarder,wellknown,grafana,fleet-telemetry} restarts=0 up 44h
+             reflector restarts=1 up 5d16h ; reloader restarts=0 up 6h58m
   ```
-  Expect `apps`.
+  The last TeslaMate crash was **07:08:06Z, before the streaming-cert fix was reconciled** — the stage was still on `da57ea6` then, and `5b33b89` applied at 07:52. The count has not moved since. Consistent with the fix holding; **not proof**, because the trigger is a car coming online.
+- [x] `apps` inventory captured: 43 entries, the load-bearing ones listed under *The hazard*.
+- [x] **Correction — `databases` has no StatefulSet.** `pod/postgres-1` is owned directly by `Cluster/postgres`; CNPG manages the pods itself here. `get sts` is not a usable health check for this cluster.
+- [x] **Correction — `reflector` and `reloader` are not in the `apps` inventory.** They are owned by the `infra` stage and merely deploy into `apps`. Plan B's reflector move is an `infra`-stage change, not an `apps`-stage change.
+- [ ] CNPG cluster health and primary: **not readable with `k8s-reader`** — `clusters.postgresql.cnpg.io` is Forbidden, as documented. Needs an admin context before Task 4.
 
 ### Task 2: Turn garbage collection off on the old unit
 
@@ -135,7 +152,8 @@ Single commit, single line. This is the safety net and it must be merged and rec
 ### Task 3: Per-group kustomizations and stages
 
 - [ ] Create `apply/50-apps/{databases,auth,coder,tesla}/kustomization.yaml`, each listing exactly the files that today live in that directory, in the current order.
-- [ ] Create the four stage files. Each: `dependsOn` per the graph above, `interval: 10m0s`, `prune: true`, `path: ./apply/50-apps/<dir>`, and `force: true` with a comment explaining it is a takeover from the `apps` Kustomization and will be removed in Task 5.
+- [ ] Establish how a new Kustomization claims an object already listed in the `apps` inventory, **given that the objects carry no ownership annotation**. Check the kustomize-controller v1.9.6 docs; do not assume `force: true`. If the answer is not clean, **stop** — Task 2 has already made the split revertible, so there is no pressure to guess.
+- [ ] Create the four stage files. Each: `dependsOn` per the graph above, `interval: 10m0s`, `prune: true`, `path: ./apply/50-apps/<dir>`, plus whatever the answer above requires.
 - [ ] Leave `stage-apps.yaml` and `apply/50-apps/kustomization.yaml` in place for now.
 - [ ] `make check` — `kustomize-listing` must report **0 unlisted**. Every new file must be listed in its own directory's kustomization.
 - [ ] `make dry-run DRYRUN_CONTEXT=<admin context>`
@@ -154,9 +172,9 @@ Single commit, single line. This is the safety net and it must be merged and rec
 - [ ] Verify the four new Kustomizations are `Ready`, and re-check pod `AGE` in all four namespaces. Nothing may have restarted.
 - [ ] Verify the CNPG cluster still reports its original primary and no failover occurred.
 
-### Task 5: Remove the takeover flag, add health checks
+### Task 5: Drop the takeover mechanism, add health checks
 
-- [ ] Drop `force: true` from all four stage files.
+- [ ] Remove whatever Task 3 used to claim ownership, once every object appears in exactly one new inventory and the old `apps` Kustomization is gone.
 - [ ] Add `healthChecks` naming the workload that must be Ready for that group: the CNPG `Cluster` for `databases`, `authentik-server` for `authentik`, the coder `Deployment` for `coder`, the teslamate `Deployment` for `tesla`.
 - [ ] `make check`, `make dry-run`, commit, PR, merge with confirmation.
 - [ ] Verify all four `Ready` with the health check reported, not just applied.
@@ -169,6 +187,7 @@ Single commit, single line. This is the safety net and it must be merged and rec
 
 ## Not proven / accepted
 
-- **`force: true` takeover is untested here.** It is the documented mechanism and the plan depends on it. Task 3 is where it gets proven; if it fails, the escape is that Task 2 already made the old unit non-pruning, so nothing is destroyed and the split can be reverted by restoring `stage-apps.yaml`.
+- **How a second Kustomization claims an object from another's inventory is NOT established.** The original assumption (per-object ownership annotation + `force`) is **measured false**; Task 3 now opens with the question instead of an answer. The escape is that Task 2 already made the old unit non-pruning, so nothing is destroyed and the split can be reverted by restoring `stage-apps.yaml`.
+- **CNPG cluster health was never observed.** `k8s-reader` is Forbidden on `clusters.postgresql.cnpg.io`, so Task 4 needs an admin context to prove no failover occurred.
 - **`healthChecks` on a split stage has never run in this cluster.** Spec §8 already records this as the real test of D2.
 - **Ordering is now explicit and therefore now someone's problem.** File order used to hide it.
