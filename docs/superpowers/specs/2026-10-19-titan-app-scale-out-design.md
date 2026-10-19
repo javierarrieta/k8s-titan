@@ -84,7 +84,7 @@ the risk.
 | D1 | `apps` gets a written admission test (§3.1) | Nothing today says what `apps` is for, which is exactly why Tesla went there. A stage name is not a policy. |
 | D2 | **one Flux `Kustomization` per app-group directory**, each with `dependsOn: certificates` and its own `healthChecks` | This is the actual blast-radius fix. A bad app reddens only itself. |
 | D3 | Tesla moves to namespace `tesla` | Fails D1 decisively; authentik and coder already have their own namespaces for the same reason. |
-| D4 | `reflector` and `reloader-reloader` move out of `apps` to a `platform` namespace | They are shared infra that happen to sit in `apps`. Once D1 is written they cannot stay: `apps` will mean "small apps". Leaving them is how the next person loses the rule. |
+| D4 | `reflector` moves to `certificates`; **`reloader` stays in `apps`** as the one named exception | Reflector's whole contract is the `secretTemplate` annotations on the `Certificate` objects, which live in `certificates`; its own manifest says it "replicates TLS material across namespaces and nothing else". Reloader is a `HelmRelease` plus `HelmRepository stakater` already in `apps`, watching `coder` and `monitoring` — only its home is `apps`, not its scope. It gets no namespace of its own, so `apps` carries one closed, named exception rather than a hole. |
 | D5 | `ResourceQuota` per app-group namespace; `LimitRange` only with **both** `max` and `default` | Single node: a namespace buys nothing against resource exhaustion, quotas are the only real protection. The `max`-less LimitRange is the recorded live-cluster failure (§1). |
 | D6 | **NetworkPolicy is deferred, not scheduled** (§4) | Committing policies before enforcement exists produces a manifest that reads as protection and does nothing. |
 | D7 | A Loki label-budget check joins the gates before the app count grows | casa's Loki caps `max_label_names_per_series` at 18 and the `labeldrop` list in `apply/20-infra/monitoring/promtail.yaml` is a hard limit, not cleanup. Over the line and the stream is rejected per-pod, silently, with promtail reporting healthy. |
@@ -171,7 +171,7 @@ Therefore:
 ```
 apply/00-bootstrap/
   stage-apps.yaml            → replaced by one stage file per app-group
-  namespaces.yaml            → + tesla, + platform
+  namespaces.yaml            → + tesla
 apply/50-apps/
   authentik/     → Kustomization `authentik`     ns auth
   coder/         → Kustomization `coder`         ns coder
@@ -179,7 +179,8 @@ apply/50-apps/
   tesla/         → Kustomization `tesla`         ns tesla      (D3)
   <each small app>/ → its own Kustomization      ns apps      (D2, §3.2)
 apply/20-infra/
-  reflector/, reloader/                                        → ns platform   (D4)
+  reflector/   → ns certificates                                   (D4)
+  reloader/    → stays ns apps, the named exception                (D4)
 ```
 
 `dependsOn` stays as it is: everything app-shaped depends on `certificates`. Splitting the stage does
@@ -202,6 +203,20 @@ And the acceptance test that actually matters, which is not in this repo's reach
   change, and it does not need the car. `k8s-reader` is Forbidden on `pods/exec` in `apps`, so this
   needs an admin context.
 
+### 7.1 The two plans
+
+Split deliberately, because they are different risk classes. Bundling them would make the safe change
+wait on the dangerous one, and a revert of the second would drag the first with it.
+
+- `docs/superpowers/plans/2026-10-19-titan-apps-stage-split.md` — D2. Touches no Secrets, so it carries
+  none of the `ENCRYPTION_KEY` exposure. **Do this one first, alone.** It carries a hazard not obvious
+  from the shape of the change: `prune: true` is live on the current `apps` Kustomization (verified on
+  the cluster, and `prune` is the correct v1.9 field name, not `gc`), so a naive stage split
+  garbage-collects authentik, coder and the Postgres cluster before recreating them.
+- `docs/superpowers/plans/2026-10-19-titan-tesla-namespace-move.md` — D3 and D4. Contains the one
+  irreversible step in the programme, and is gated on §5 of the runbook producing a working telemetry
+  baseline. Executing it while `forwarded: 0` would make any breakage unattributable.
+
 ## 8. Not proven / accepted
 
 - **No availability gain.** One node. A namespace does not make a workload survive anything; it bounds
@@ -210,9 +225,16 @@ And the acceptance test that actually matters, which is not in this repo's reach
 - **More Kustomizations cost reconcile time and more gate runtime.** `make kustomize-check` and
   `kustomize-listing` walk every directory; thirty small apps is thirty more entries to keep honest.
   That is the intended trade, but it is a trade.
-- **`platform` as a name is a guess.** `certificates` already exists and reflector is arguably cert
-  plumbing; the alternative is folding reflector there and leaving only reloader. Not decided here on
-  purpose — it is a one-line change and arguing it now is cheaper than discovering it mid-migration.
+- **`platform` was this spec's first guess for D4 and is rejected.** It was wrong on evidence, not
+  taste: no cluster in this fleet uses it. Live namespaces are `casa`, `auth`, `certificates`,
+  `monitoring`, `security`, `kured`, `longhorn-system`, `metallb-system`, `traefik-system`,
+  `cattle-system`, `democratic-csi`, `strix-scans`, `apps`, `databases`, `coder`,
+  `coder-workspaces`, `k8s-reader`. The convention is a named namespace per app-group and a named
+  namespace per infrastructure component — casa runs `kured` and `democratic-csi` as single-pod
+  namespaces. A `platform` would have been a fourth convention whose contents mean "things we did not
+  know where to put", which is the category error this change exists to remove.
+- **`reloader` in `apps` is an accepted wart.** If the single exception ever becomes a problem,
+  `reloader-system` following casa's `kured` precedent is a one-line change.
 - **NetworkPolicy enforcement is out of scope and out of this repo.** It lives in
   `nixos-configurations`. Until it lands, D6 stays deferred and this cluster has no network
   segmentation at all. That is a real, currently-accepted exposure, and it should be read as such
