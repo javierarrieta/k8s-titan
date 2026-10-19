@@ -3,3 +3,6 @@ kind: Kustomization
 resources:
   - titan-wildcard.yaml
   - coder-wildcard.yaml
+  # Not redundant with titan-wildcard: TeslaMate's Erlang stream client rejects wildcard SANs.
+  # The header of the file says why in full; do not collapse this into the wildcard.
+  - tesla-streaming.yaml

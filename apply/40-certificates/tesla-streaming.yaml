@@ -1,0 +1,49 @@
+# A single-name certificate for TeslaMate's streaming bridge, deliberately NOT a third dnsName on
+# titan-wildcard. It exists because of one client, not because of DNS.
+#
+# TeslaMate connects to wss://streaming.titan.arrieta.eu using Erlang's *default* hostname matcher.
+# `lib/tesla_api/stream.ex` at v4.3.0 passes only `cacerts` and `insecure` to WebSockex.start_link
+# and never sets `{customize_hostname_check, [{match_fun,
+# public_key:pkix_verify_hostname_match_fun(https)}]}`, and the default matcher does not honour
+# `*.` wildcards — erlang/otp#4321 (ERL-1260); TeslaMate #4601 is the identical failure against a
+# wildcard Let's Encrypt cert. So the cluster wildcard, which is otherwise correct, publicly trusted
+# and validates fine in Python and OpenSSL, is rejected by this one client:
+#
+#   CLIENT ALERT: Fatal - Bad Certificate
+#    - {:bad_cert, {:hostname_check_failed, {:requested, ~c"streaming.titan.arrieta.eu"},
+#         {:received, [dNSName: ~c"*.titan.arrieta.eu", dNSName: ~c"titan.arrieta.eu"]}}}
+#
+# That is not a quiet warning. The Vehicle process dies on it, its supervisor restarts it instantly,
+# and the restart intensity takes the whole application down — measured 2026-10-18: 14 restarts,
+# exit 1, ~14 s per cycle, one `Stream connecting ...` per ~90 ms. TeslaMate therefore loses every
+# car the moment it comes online. Runbook §9 carries the symptom row and §6 the cert check.
+#
+# An exact dNSName matches under the default matcher, so a certificate with no wildcard fixes it
+# without patching the pinned image and without `TESLA_WSS_TLS_ACCEPT_INVALID_CERTS`, which would
+# switch verification off on a connection that carries the vehicle access token.
+#
+# Cost, stated plainly: this is a second ACME order with its own renewal cycle and its own slot
+# against Let's Encrypt's per-registered-domain limit. One name renewing every ~60 days is nowhere
+# near that limit, but it is a real second certificate and it will renew on its own schedule.
+#
+# The allow-list is `apps` alone: the consuming Ingress is the streaming Ingress in `apps` and
+# TeslaMate is the only client. Widening it later is an edit to this file, which is the point.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: tesla-streaming
+  namespace: certificates
+spec:
+  secretName: tesla-streaming-tls
+  issuerRef:
+    kind: ClusterIssuer
+    name: le-prod-titan
+  commonName: streaming.titan.arrieta.eu
+  dnsNames:
+    - streaming.titan.arrieta.eu
+  secretTemplate:
+    annotations:
+      reflector.v1.k8s.emberstack.com/reflection-allowed: "true"
+      reflector.v1.k8s.emberstack.com/reflection-allowed-namespaces: "apps"
+      reflector.v1.k8s.emberstack.com/reflection-auto-enabled: "true"
+      reflector.v1.k8s.emberstack.com/reflection-auto-namespaces: "apps"

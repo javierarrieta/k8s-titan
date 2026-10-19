@@ -115,7 +115,10 @@ spec:
             name: tesla-streaming
             port:
               number: 80
+  # `tesla-streaming-tls` and not `titan-tls`, and that is a client requirement rather than a
+  # preference: TeslaMate's Erlang stream client rejects wildcard SANs, so the cluster wildcard
+  # makes it crash-loop. See apply/40-certificates/tesla-streaming.yaml and runbook §6.
   tls:
   - hosts:
     - streaming.titan.arrieta.eu
-    secretName: titan-tls
+    secretName: tesla-streaming-tls
