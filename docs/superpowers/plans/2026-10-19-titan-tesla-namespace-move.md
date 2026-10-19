@@ -10,6 +10,13 @@
 
 **Spec:** `docs/superpowers/specs/2026-10-19-titan-app-scale-out-design.md` — D1, D3, D4 as revised.
 
+> **Status, 2026-10-19: not executed, and smaller than written.** Plan A landed (`5d3a1c6`, `c7d4dd5`),
+> so the Tesla stack already has its own reconcile unit — `apply/60-tesla/`, its own `Kustomization`,
+> its own failure domain. What is left here is the *namespace* half: `namespace: apps` → `tesla` inside
+> `apply/60-tesla/`, the `Namespace` object, the in-cluster URLs and `dependsOn` rewrites, and the D4
+> reflector move. Anything in this plan that reads like it also has to split a stage is already done —
+> do not redo it.
+
 ## ⛔ Execution gate — do not start this plan until it is met
 
 **`scripts/tesla-push-telemetry-config.sh status` must report `synced: true` and frames must be reaching the forwarder (`forwarded` counting up).**

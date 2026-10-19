@@ -82,12 +82,20 @@ the risk.
 | # | decision | why |
 |---|---|---|
 | D1 | `apps` gets a written admission test (§3.1) | Nothing today says what `apps` is for, which is exactly why Tesla went there. A stage name is not a policy. |
-| D2 | **three Flux `Kustomization`s**, grouped by edit frequency and manifest type — `databases`, `tesla`, and one shared `apps` unit — each with `dependsOn` and `healthChecks` | The actual blast-radius fix. Flux apply is **atomic per Kustomization** (a resource failing server-side dry-run means nothing in that unit is applied), so the unit boundary is the failure boundary. Five units was the first guess; auth and coder are `HelmRelease` objects whose bad `values` never fail the Kustomization, so splitting them buys nothing. |
-| D3 | Tesla moves to namespace `tesla` | Fails D1 decisively; authentik and coder already have their own namespaces for the same reason. |
+| D2 | **three Flux `Kustomization`s**, grouped by edit frequency and manifest type — `databases`, `tesla`, and one shared `apps` unit — each with `dependsOn` and `healthChecks` | The actual blast-radius fix. Flux apply is **atomic per Kustomization** (a resource failing server-side dry-run means nothing in that unit is applied), so the unit boundary is the failure boundary. Five units was the first guess; auth and coder are `HelmRelease` objects whose bad `values` never fail the Kustomization, so splitting them buys nothing. || D3 | Tesla moves to namespace `tesla` | Fails D1 decisively; authentik and coder already have their own namespaces for the same reason. |
 | D4 | `reflector` moves to `certificates`; **`reloader` stays in `apps`** as the one named exception | Reflector's whole contract is the `secretTemplate` annotations on the `Certificate` objects, which live in `certificates`; its own manifest says it "replicates TLS material across namespaces and nothing else". Reloader is a `HelmRelease` plus `HelmRepository stakater` already in `apps`, watching `coder` and `monitoring` — only its home is `apps`, not its scope. It gets no namespace of its own, so `apps` carries one closed, named exception rather than a hole. |
 | D5 | `ResourceQuota` per app-group namespace; `LimitRange` only with **both** `max` and `default` | Single node: a namespace buys nothing against resource exhaustion, quotas are the only real protection. The `max`-less LimitRange is the recorded live-cluster failure (§1). |
 | D6 | **NetworkPolicy is deferred, not scheduled** (§4) | Committing policies before enforcement exists produces a manifest that reads as protection and does nothing. |
 | D7 | A Loki label-budget check joins the gates before the app count grows | casa's Loki caps `max_label_names_per_series` at 18 and the `labeldrop` list in `apply/20-infra/monitoring/promtail.yaml` is a hard limit, not cleanup. Over the line and the stream is rejected per-pod, silently, with promtail reporting healthy. |
+
+**D2 landed as three stages, not five** — `apply/30-databases`, `apply/60-tesla`, `apply/50-apps`,
+merged as `5d3a1c6` with `prune` restored in `c7d4dd5`. Verification, all of it readable through the
+read-only identity: seven stages `Ready`; inventories 14 + 2 + 27 = 43 total and 43 unique, matching
+the pre-split count exactly; every one of the 43 owned objects confirmed present in the API server
+after the first `prune: true` reconcile; pod restart counts byte-identical across both changes; and
+`ContinuousArchiving=True` throughout, which is the proof the database never blinked. `healthChecks`
+from the original D2 wording were **not** added — `dependsOn` alone produced the ordering the split
+needed, and adding a second ordering mechanism to prove the first one worked would have been noise.
 
 ### 3.1 The admission test for `apps`
 
@@ -103,10 +111,49 @@ The last clause is the one that would have caught Tesla.
 
 ### 3.2 Where the small apps go
 
-Each new small app is one directory under `apply/50-apps/` with its own `kustomization.yaml` and its
-own `Kustomization` in `apply/00-bootstrap/`, all pointing at `apps`. They share a namespace and do
-**not** share a reconcile unit. That is the whole point: the namespace is a naming and policy scope,
-the Kustomization is the failure domain, and they are deliberately not the same granularity.
+A new small app is **a subdirectory of `apply/50-apps/` listed in `apply/50-apps/kustomization.yaml`**
+— the shape `auth/` and `coder/` already have. It is not a stage: no numbered directory, no
+`stage-*.yaml`, no `Kustomization` of its own. Its namespace is `apps` and its failure domain is the
+shared `apps` stage.
+
+**The cost is real and is accepted rather than argued away.** Sharing a stage means a typo in one small
+app freezes every other member of that stage, including the authentik and coder `HelmRelease`
+objects. That is the exact failure mode D2 exists to bound, and this choice declines to bound it for
+the cheapest class of workload.
+
+What makes it defensible is what actually fails a Kustomization. A `HelmRelease` with a bad `values`
+block does not — the release goes red, the Kustomization stays green, which is why authentik and coder
+were never in danger from their neighbours. What does fail one is a malformed manifest: a mis-nested
+field, a bad `int` where the schema wants a `Quantity`, a typo'd `apiVersion`. For a one-or-two-pod
+app with no database and no hostname of its own, a freeze that clears on the next commit is a
+proportionate outcome. For Tesla, with 27 hand-written objects and a database behind it, it was not —
+which is why Tesla got `60-tesla`.
+
+**Promote an app to its own numbered stage when** it fails the §3.1 test on any axis (own `Certificate`,
+own Secret set, own database, more than a couple of pods), or when freezing it alongside authentik and
+coder stops being an inconvenience.
+
+**Promotion is a three-commit change, and the order is not optional.** Moving objects out of a stage
+that has `prune: true` makes them stale by `inventory.Diff` the instant the move lands, and Flux
+deletes them — then the new stage recreates them from nothing. For a `Deployment` that is an outage;
+for a `PersistentVolumeClaim` or a CNPG `Cluster` it is data loss. This is the hazard that made Task 2
+turn `prune` off *before* the split, and it applies to every later promotion exactly as it applied
+then:
+
+1. `prune: false` on the source stage, its own commit, verified live.
+2. `git mv` the app to a new numbered directory, add `stage-<name>.yaml`, list it in
+   `00-bootstrap/kustomization.yaml`. Prove the source stage's inventory dropped exactly those
+   objects and the new stage's holds only its own.
+3. `prune: true` back on the source stage, its own commit, with `stale = 0` proved first.
+
+Doing it in one commit while prune is on is how a stage garbage-collects a database.
+
+One hard rule, learned the expensive way: **a subdirectory of a stage never gets its own
+`kustomization.yaml`.** The first draft of this section said small apps would each carry a
+`Kustomization`, which put units at `find` depth 3, past `KUSTOMIZE_DIRS`' `-maxdepth 2`, and they
+left `crd-check`'s scope silently while it still reported a pass. The cap is off now, so the trap no
+longer bites — but a nested `kustomization.yaml` is still a second stage pretending to be a folder,
+and the layout convention says a stage is a top-level numbered directory.
 
 ## 4. NetworkPolicy is not enforced on this cluster
 
@@ -215,14 +262,19 @@ Split deliberately, because they are different risk classes. Bundling them would
 wait on the dangerous one, and a revert of the second would drag the first with it.
 
 - `docs/superpowers/plans/2026-10-19-titan-apps-stage-split.md` — D2. Touches no Secrets, so it carries
-  none of the `ENCRYPTION_KEY` exposure. **Do this one first, alone.** It carries a hazard not obvious
-  from the shape of the change: `prune: true` was live on the current `apps` Kustomization (verified on
-  the cluster, and `prune` is the correct v1.9 field name, not `gc`), and its inventory contains the
-  CNPG `Cluster` — so a naive stage split garbage-collects the production database. Prune was turned
-  off first, in its own merged commit (`1a81071`), which is what makes the split revertible.
-- `docs/superpowers/plans/2026-10-19-titan-tesla-namespace-move.md` — D3 and D4. Contains the one
-  irreversible step in the programme, and is gated on §5 of the runbook producing a working telemetry
-  baseline. Executing it while `forwarded: 0` would make any breakage unattributable.
+  none of the `ENCRYPTION_KEY` exposure. **Done: merged `5d3a1c6` (split) and `c7d4dd5` (prune restored),
+  2026-10-19.** It carried a hazard not obvious from the shape of the change: `prune: true` was live on
+  the current `apps` Kustomization (verified on the cluster, and `prune` is the correct v1.9 field name,
+  not `gc`), and its inventory contained the CNPG `Cluster` — so a naive stage split garbage-collects
+  the production database. Prune was turned off first, in its own merged commit (`1a81071`), which is
+  what made the split revertible; it went back on only after each stage's live inventory was proved
+  equal to what git builds for it, so the first prune reconcile was a provable no-op.
+- `docs/superpowers/plans/2026-10-19-titan-tesla-namespace-move.md` — D3 and D4. **Not executed.** It is
+  now smaller than when it was written: the reconcile-unit work it assumed has already been done by
+  Plan A, so what remains is editing `namespace:` inside `apply/60-tesla/` (plus the `Namespace` object,
+  the `dependsOn`/URL rewrites and the D4 reflector move). It still contains the one irreversible step
+  in the programme, and is still gated on §5 of the runbook producing a working telemetry baseline.
+  Executing it while `forwarded: 0` would make any breakage unattributable.
 
 **No admin context exists on the agent box or in CI, by operator decision.** `make dry-run` therefore
 always skips, and the offline gates plus the unit boundary are the whole mitigation. The residual risk

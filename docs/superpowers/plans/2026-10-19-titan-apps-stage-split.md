@@ -225,15 +225,15 @@ ignore prune. Nobody here sets them; do not start.
 
 One commit. `databases` and `tesla` leave the shared unit; `auth`/`coder`/`coder-workspaces` stay.
 
-- [ ] Create `apply/30-databases/kustomization.yaml` and `apply/60-tesla/kustomization.yaml` as **new top-level stage directories**, `git mv`-ing the files out of `apply/50-apps/` so history follows them.
-- [ ] Remove those entries from `apply/50-apps/kustomization.yaml`.
-- [ ] Create `stage-databases.yaml` and `stage-tesla.yaml` with `prune: true`; **rewrite `stage-apps.yaml` to the narrower path but leave `prune: false` on it.** All three: `interval: 10m0s`, `dependsOn` per the graph. **No takeover flag — Task 3 established that adoption is plain SSA.** The old unit must stop listing the moved files in this same commit.
+- [x] Create `apply/30-databases/kustomization.yaml` and `apply/60-tesla/kustomization.yaml` as **new top-level stage directories**, `git mv`-ing the files out of `apply/50-apps/` so history follows them.
+- [x] Remove those entries from `apply/50-apps/kustomization.yaml`.
+- [x] Create `stage-databases.yaml` and `stage-tesla.yaml` with `prune: true`; **rewrite `stage-apps.yaml` to the narrower path but leave `prune: false` on it.** All three: `interval: 10m0s`, `dependsOn` per the graph. **No takeover flag — Task 3 established that adoption is plain SSA.** The old unit must stop listing the moved files in this same commit.
 
 **Why the rewritten `apps` unit must keep `prune: false` in this commit.** It is the *same object* as before, so its `status.inventory` still holds all 43 entries. The moment it stops listing the `databases/` and `tesla/` files, those 32 objects become stale by `inventory.Diff`. With `prune: true` on that commit, **it deletes the CNPG Cluster and the whole Tesla stack** — the exact hazard Task 2 exists to prevent, reintroduced by the split itself. The new units are safe with `prune: true` from the start because their inventories begin empty, so `Diff(empty, new)` yields nothing stale.
 
-- [ ] `make check` — `kustomize-listing` must report **0 unlisted**.
-- [ ] `make dry-run` → will print `SKIPPED`. **Say so in the PR body** and hand the operator `scripts/dry-run-check.sh <context>` to run before merging.
-- [ ] Commit, PR, merge with confirmation.
+- [x] `make check` — `kustomize-listing` must report **0 unlisted**.
+- [x] `make dry-run` → will print `SKIPPED`. **Say so in the PR body** and hand the operator `scripts/dry-run-check.sh <context>` to run before merging.
+- [x] Commit, PR, merge with confirmation.
 
 ### Task 5: Verify — and this is now possible without admin — **DONE on `main@5d3a1c6`**
 
@@ -252,7 +252,7 @@ reporting `dependency ... is not ready` until their inputs came up.
       Each stage's live inventory also equals what git builds for it, stale = 0 — which is exactly the
       precondition Task 5b needs.
 
-### Task 5b: Restore prune on the shared unit — separate commit, only after Task 5 is green
+### Task 5b: Restore prune on the shared unit — **DONE, merged `c7d4dd5` (PR #85)**
 
 Unblocked by Task 5. The precondition is not just "the split reconciled" but **stale = 0**: prune
 deletes exactly `inventory.Diff(old, new)`, so if the live inventory equals the git build, the first
@@ -275,15 +275,19 @@ from git linger indefinitely, which is drift, not deletion.
       stdout was read as an empty list, and the check passed vacuously. Resolve Kind → resource via
       `kubectl api-resources -o json` and exit non-zero when a call fails. The scan is ad hoc and
       not committed, so this note is the only place the trap is written down.
-- [ ] Set `prune: true` on `stage-apps.yaml`, with a comment saying why it was off and what must be true before it is ever turned off again.
-- [ ] `make check`, PR, merge with confirmation.
-- [ ] Verify all three units still `Ready` and no object was deleted — the diff of `kubectl get all -n tesla-ns` style counts before and after, plus the CNPG conditions again.
+- [x] Set `prune: true` on `stage-apps.yaml`, with a comment saying why it was off and what must be true before it is ever turned off again.
+- [x] `make check`, PR, merge with confirmation.
+- [x] Verify all three units still `Ready` and no object was deleted — the diff of `kubectl get all -n tesla-ns` style counts before and after, plus the CNPG conditions again.
 
-### Task 6: Documentation
+### Task 6: Documentation — **DONE**
 
-- [ ] `AGENTS.md`: stage graph; the D1 admission test; that adding an app means a directory **and** a stage file.
-- [ ] Record in the spec that D2 landed as three units, not five, and why.
-- [ ] Note that Plan B (Tesla namespace move) now only edits namespaces inside the `tesla` unit — the reconcile-unit work is already done.
+The AGENTS.md layout block went in with the split itself (PR #84), because that is the commit that
+changed the layout; leaving it for later would have meant main briefly documented a tree it no longer
+held.
+
+- [x] `AGENTS.md`: stage graph; the D1 admission test; that adding an app means a directory **and** a stage file.
+- [x] Record in the spec that D2 landed as three units, not five, and why.
+- [x] Note that Plan B (Tesla namespace move) now only edits namespaces inside the `tesla` unit — the reconcile-unit work is already done.
 
 ## Not proven / accepted
 
