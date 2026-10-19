@@ -30,6 +30,17 @@ Stage order: `flux-system` → `secrets` → `infra` → `databases` → `certif
 reading order; `dependsOn` is what actually orders reconciles. Add a stage as its own file there;
 do not merge stage objects into one file.
 
+**Adding a small app means one new subdirectory under `apply/50-apps/` and one line in
+`apply/50-apps/kustomization.yaml`** — the same shape `auth/` and `coder/` already have. It is not a
+new stage, so it gets no numbered directory and no `stage-*.yaml`. Whether a workload belongs in the
+shared `apps` stage at all is decided by the admission test in
+`docs/superpowers/specs/2026-10-19-titan-app-scale-out-design.md` §3.1 — a stage name is not a policy,
+and that test exists because Tesla landed in `apps` before anyone wrote one. A workload that earns
+its own stage gets a numbered directory under `apply/`, a `stage-<name>.yaml` in `00-bootstrap`, and
+that file listed in `00-bootstrap/kustomization.yaml`. Either way the manifest must be listed
+somewhere: a manifest in a directory no `kustomization.yaml` names is a manifest Flux never applies,
+and `make kustomize-listing` is what catches it.
+
 Namespaces are declared centrally rather than inside the charts that need them:
 `apply/00-bootstrap/namespaces.yaml` holds `apps`, `auth`, `cert-manager`,
 `certificates`, `cnpg-system` and `databases`. `k8s-reader` is the one exception — its
