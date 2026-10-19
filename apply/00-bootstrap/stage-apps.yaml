@@ -8,7 +8,18 @@ spec:
     - name: certificates
   interval: 10m0s
   path: ./apply/50-apps
-  prune: true
+  # Temporarily off, ahead of the stage split. See
+  # docs/superpowers/plans/2026-10-19-titan-apps-stage-split.md, Task 2.
+  #
+  # This stage's inventory holds 43 objects including databases_postgres_postgresql.cnpg.io_Cluster
+  # and the authentik and coder HelmReleases. With prune enabled, deleting this Kustomization
+  # garbage-collects all of them — which means destroying the production database and
+  # helm-uninstalling authentik and coder, not merely restarting them.
+  #
+  # The split replaces this object with one Kustomization per app-group. Turning prune off here
+  # makes that replacement revertible: if the new units fail to claim their objects, restoring
+  # this file loses nothing. Do not re-enable prune on this object; the split deletes it.
+  prune: false
   sourceRef:
     kind: GitRepository
     name: flux-system
