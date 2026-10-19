@@ -4,7 +4,7 @@ KUSTOMIZE_DIRS := $(shell find apply -mindepth 1 -maxdepth 2 -name kustomization
 # not be able to slip between the encryption rule and the validation glob.
 SECRET_FIND := find apply/10-secrets \( -name '*.yaml' -o -name '*.yml' \) ! -name kustomization.yaml
 
-.PHONY: check check-ci kustomize-check kustomize-listing dry-run py-deps validate update-keys scan leak-check secrets-placement secrets-list secrets-present release-secrets db-url-check oidc-check crd-check tesla-forwarder-test update-cnpg-crds
+.PHONY: check check-ci kustomize-check kustomize-listing dry-run py-deps validate update-keys scan leak-check secrets-placement secrets-list secrets-present release-secrets db-url-check oidc-check crd-check tesla-forwarder-test update-cnpg-crds update-crds
 
 # leak-check runs FIRST: make has no -k, so it stops at the first failing prerequisite.
 # validate needs the age key, so an operator who forgot SOPS_AGE_KEY_FILE would never
@@ -56,13 +56,26 @@ check-ci:
 # confidently wrong answers, so refresh with `make update-cnpg-crds CNPG=vX.Y.Z` whenever
 # the operator pin in apply/20-infra/cnpg/operator.yaml moves. Provenance is recorded in
 # vendor/cnpg-crds/VERSION.
+#
+# Scope was widened beyond CNPG on 2026-10-19 (flux, cert-manager, traefik) because there is
+# no admin context on this box or in CI, so `make dry-run` always skips and this is the only
+# validation available against CRs. Those three are vendored from the live cluster through
+# the read-only identity (`make update-crds`) rather than from upstream tags - Traefik ships
+# its CRDs only inside a release tarball, and the schema the cluster enforces is the one that
+# will reject our manifest. The files are committed, so CI never needs cluster access.
+#
+# What it does NOT catch: values. This checks that a key is declared at its position, not
+# that its value is legal - wrong enums, bad quantities and core-type CEL rules are still
+# only visible to the API server. Immutable-field changes likewise. That gap is why the apps
+# stage split exists; see docs/superpowers/plans/2026-10-19-titan-apps-stage-split.md.
 crd-check:
 	@command -v python3 >/dev/null 2>&1 \
 	  || { echo "crd-check: python3 is missing - refusing to report clean"; exit 1; }; \
 	python3 -c 'import yaml' >/dev/null 2>&1 \
 	  || { echo "crd-check: PyYAML is missing (pip install pyyaml) - refusing to report clean"; exit 1; }; \
 	{ for d in $(KUSTOMIZE_DIRS); do kubectl kustomize "$$d" || exit 1; done; } \
-	  | python3 tools/crd-field-check.py vendor/cnpg-crds
+	  | python3 tools/crd-field-check.py \
+	      vendor/cnpg-crds vendor/flux-crds vendor/cert-manager-crds vendor/traefik-crds
 
 # tesla-forwarder-test: the only hand-written code in the tesla stack lives in a ConfigMap, so nothing
 # would otherwise ever execute it before it reaches a cluster. This extracts the script from
@@ -75,6 +88,13 @@ crd-check:
 # might be skipped somewhere — is how a RESP parser that stringifies flatbuffers gets merged.
 tesla-forwarder-test:
 	@scripts/tesla-forwarder-tests.sh
+
+# Re-vendor the non-CNPG CRD groups from a live cluster through the read-only identity.
+# Laptop-only by design: it needs cluster access, which CI does not have and which this repo
+# must never need. The output is committed, so crd-check itself stays offline. See the
+# header of the script for why these come from the cluster rather than from upstream tags.
+update-crds:
+	@scripts/update-crds.sh $(CRD_CONTEXT)
 
 # Re-vendor the CRDs against a specific operator tag. The names match the plural resource
 # names, which is exactly how upstream spells the file names.

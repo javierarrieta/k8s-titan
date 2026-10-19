@@ -98,17 +98,45 @@ certificates ─→ databases ─→ tesla
 
 ---
 
-### Task 0: Extend `crd-check` beyond CNPG — independent, do first
+### Task 0: Extend `crd-check` beyond CNPG — **DONE**
 
-With no admin context, the offline schema gate is the only validation this repo can run against CRs. It currently covers only `vendor/cnpg-crds/`. `k8s-reader` **can read CRDs**, so the rest can be vendored the same way.
+Vendored `Kustomization`, `HelmRelease`, `Certificate`, `Middleware` and `IngressRouteTCP`.
+The gate went from 4 CRDs to 9, and from ~8 objects to **25**.
 
-- [ ] Vendor the Flux `Kustomization`/`HelmRelease`, Traefik (`Middleware`, `IngressRouteTCP`, …) and cert-manager (`Certificate`, `Issuer`) CRDs into `vendor/`, following the `vendor/cnpg-crds/` pattern.
-- [ ] Extend `crd-check` to validate every built object against all vendored CRDs, not just CNPG's.
-- [ ] Add a `make update-crds` generalising `make update-cnpg-crds`.
-- [ ] Prove it works: introduce a deliberate mis-nested field in a throwaway branch and confirm `crd-check` fails. A gate that has never been seen to fail is not evidence.
-- [ ] `make check`, commit, PR, merge with confirmation.
+Two things worth recording, both of which the repo's own gates caught rather than me:
 
-This closes the largest offline-catchable slice of what `make dry-run` would have caught. It does **not** close immutable-field changes or core-type CEL rules — those stay unmitigated, and that is the residual risk the split exists to bound.
+**`GROUPS` is a bash builtin.** The first version of `scripts/update-crds.sh` used it as an
+array name, the assignment was silently refused, and the script vendored a CRD named `1000`
+(the caller's GID). No error, no warning. The script now says so in a comment.
+
+**`make leak-check` fired twice on this change, and was right both times.** cert-manager's
+`Certificate` schema spells certificate policy OIDs — four-part dotted decimals, not
+addresses — inside its descriptions, and the IPv4 pattern reads them as concrete public
+addresses. The tempting fix was an exclusion, which would have weakened the gate. The correct
+fix was to drop descriptions from the vendored schemas: `crd-field-check` walks
+`properties`/`items`/`additionalProperties` only and never reads prose. That removed the false
+positive, shrank the vendored set from 239 KB to 84 KB, and left the leak gate untouched. The
+gate then fired again on this script, because the OIDs were quoted here as literals.
+
+**Provenance differs from CNPG, deliberately.** These three groups are vendored from the live
+cluster through the read-only identity (`make update-crds`), not from upstream tags: Traefik
+ships its CRDs only inside a release tarball, and the schema the cluster enforces is the one
+that will reject our manifest. The files are committed, so CI never needs cluster access.
+
+**Proven to fail, not just to pass.** Mis-nesting a real field — moving a `Kustomization`'s
+`interval` under `sourceRef` — is caught and reported as `spec.sourceRef.interval`, the same
+class as the CNPG `retentionPolicy` outage that created this gate. Unknown keys in `Middleware`
+and `HelmRelease` are caught too.
+
+**What it still cannot do:** validate values. Wrong enums, bad quantities and core-type CEL
+rules remain invisible offline, and immutable-field changes with them. That gap is why the split
+exists, and the Makefile comment now says so rather than implying the gate is complete.
+
+- [x] Vendor the Flux, cert-manager and Traefik CRDs.
+- [x] Extend `crd-check` to validate against all vendored groups.
+- [x] `make update-crds`, generalising `make update-cnpg-crds`.
+- [x] Prove the gate fails on a deliberate mis-nested field.
+- [x] `make check` green, commit, PR, merge with confirmation.
 
 ### Task 1: Baseline — **DONE 2026-10-19T13:20Z**
 
