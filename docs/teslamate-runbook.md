@@ -337,7 +337,7 @@ Ingress now points at. An exact `dNSName` matches under Erlang's default matcher
 patching in the pinned image. The rejected alternative was `TESLA_WSS_TLS_ACCEPT_INVALID_CERTS=true`,
 which turns verification off on a connection carrying the vehicle access token.
 
-Two things to check rather than assume after this moves:
+Check, don't discover:
 
 ```bash
 # 1. the single-name cert is issued and has no wildcard
@@ -346,11 +346,64 @@ kubectl --context titan -n certificates get certificate tesla-streaming -o jsonp
 python3 -c "import ssl,socket;c=ssl.create_default_context();s=c.wrap_socket(socket.socket(),server_hostname='streaming.titan.arrieta.eu');s.connect(('streaming.titan.arrieta.eu',443));print(s.getpeercert()['subjectAltName']);s.close()"
 ```
 
-If (2) still prints `*.titan.arrieta.eu`, Traefik is falling back to its default certificate because
-the Reflector copy has not landed in `apps` yet. That is a real window, not a hypothetical:
-`stage-apps` `dependsOn` `certificates` but has no `wait: true`, so the Ingress can be applied seconds
-before ACME finishes. It self-heals in under a minute; if it does not, the missing thing is the Secret
-in `apps`, not the certificate.
+If (2) prints `*.titan.arrieta.eu`, Traefik is falling back to its default certificate because the
+Reflector copy has not landed in `apps` yet. That is a real window, not a hypothetical: `stage-apps`
+`dependsOn` `certificates` but has no `wait: true`, so the Ingress can be applied seconds before ACME
+finishes. It self-heals in under a minute; if it does not, the missing thing is the Secret in `apps`,
+not the certificate.
+
+### Verified on 2026-10-19, after it landed
+
+Traefik serves the right thing, and the wildcard is untouched for everything else:
+
+```text
+streaming.titan.arrieta.eu     SAN=(DNS: streaming.titan.arrieta.eu)                    to 2027-01-17
+randomnothere.titan.arrieta.eu SAN=(DNS: *.titan.arrieta.eu, DNS: titan.arrieta.eu)     to 2027-01-01
+```
+
+The claim was then tested **directly** instead of inferred. Both certificates were pulled as DER from
+the live endpoint and run through Erlang's own verifier with `dns_id = "streaming.titan.arrieta.eu"`
+— `public_key:pkix_verify_hostname/2,3`, OTP 28 from `nix-shell -p erlang`:
+
+| certificate | default match fun — what `TeslaApi.Stream` uses | `https` match fun — the opt-in it never sets |
+|---|---|---|
+| old `*.titan.arrieta.eu` | **`false`** | `true` |
+| new `streaming.titan.arrieta.eu` | **`true`** | `true` |
+
+That reproduces the failure and proves the fix at the mechanism level, on the real certificates: the
+default matcher genuinely rejects the wildcard and genuinely accepts the single name. It also rules
+out any trust-store explanation, because the `https` match fun accepts the wildcard — exactly what
+the upstream advice predicts.
+
+Tested on OTP 28; the image runs OTP 29. The `false` on 28 reproduces the production symptom, so the
+two agree on the case that matters, and an exact SAN match is the trivial first clause of the match
+fun.
+
+**Still not observed: a real `Stream connected` from a car.** Nothing came online in the window after
+this landed, so zero restarts is consistent with the fix and is not evidence for it. The certificate
+decision is proven; the end-to-end path is not.
+
+### The DNS trap, because it will happen again
+
+**Issuing this certificate took the host out of DNS.** The DNS-01 challenge creates the in-zone node
+`streaming.titan`, and a wildcard cannot match a name that already exists (RFC 4592 closest
+encloser), so `streaming.titan.arrieta.eu` started answering NODATA while every other `*.titan` name
+kept resolving. The `Certificate` went `Ready` and looked completely healthy throughout, which is why
+nothing in this cluster reported it.
+
+The proof, and the shape of the check: `streaming.titan.arrieta.eu` returns NOERROR/no-data for every
+record type — no-data, not NXDOMAIN, which is what says the name *exists* — while
+`randomnothere.titan.arrieta.eu` still returns the wildcard A. The tell is the leftover
+`_acme-challenge.streaming.titan` TXT.
+
+Fixed by declaring an explicit A record in `public-dns-tf` (`64123d4`), the same durable half of the
+fix that repo already documents on its `coder.titan` entry. The stale challenge TXT is still in the
+zone and is now harmless — **the record is what makes it harmless, so never delete the record because
+the TXT came back.**
+
+**Any future single-name `Certificate` under `titan.arrieta.eu` needs its A record declared in
+`public-dns-tf` in the same change.** One repo going green while the other goes dark is exactly what
+happened here, and no gate in either repo could see it.
 
 ## 7. Migration
 
@@ -425,6 +478,7 @@ of them can be done by the agent.
 | signed in, but "vehicle not responding" | the migrated token is undecryptable — sign out and in again (§7) |
 | car is awake but the dashboard stays stale for tens of minutes | the `:asleep`/`:offline` backoff, doubling up to `POLLING_ASLEEP_INTERVAL` (1800 s) — by design, see §3; force a fetch with the wake-up control or a pod restart |
 | pod restarts repeatedly; log shows `Stream connecting ...` then `hostname_check_failed` | the streaming host is serving a **wildcard** again. TeslaMate's Erlang client refuses wildcard SANs and crash-loops when a car comes online — §6, and `apply/40-certificates/tesla-streaming.yaml` |
+| `streaming.titan.arrieta.eu` does not resolve, yet the `Certificate` says `Ready` | the DNS-01 challenge node is shadowing the `*.titan` wildcard (RFC 4592 closest encloser). Ask with a name that should not exist: if `randomnothere.titan.arrieta.eu` resolves and `streaming` answers NODATA, that is it. Fix is an explicit A record in `public-dns-tf`, not anything in this repo — §6 |
 | no live data at all and you cannot tell whether anything ever arrived | ask the forwarder, not the logs: it counts instead of logging. `kubectl -n apps get pod -l app=tesla-forwarder -o wide` then curl its pod IP on `:8080` → `{"connected":true,"forwarded":0,"lastPost":"never"}` means the car has never sent a frame, which is §5 not having taken effect, not a broken pipeline |
 | API logs `Account <client_id> must be registered in the current region` | **not** a region mismatch. It means the partner account registration was never done — spec §7 step 3, `POST /api/1/partner_accounts` with `{"domain":"<app domain>"}` (field is `domain`, not `domain_code`) and a partner token whose `audience` is the EU Fleet API base URL. Prove it with `GET /api/1/partner_accounts/public_key?domain=…`, which must return the key served at `/.well-known`. A successful token exchange does **not** prove registration is complete, which is what made this look like a region problem. |
 | no live speed/elevation, but positions appear | that is expected: the bridge reports live power as 0 and there is no elevation enrichment (§10) |
@@ -487,13 +541,19 @@ Retired by measurement on 2026-10-19, and retired **negative**:
 | claim | what was actually found |
 |---|---|
 | the decoded Redis payload shape matches what the forwarder and bridge expect | **cannot be tested yet.** The forwarder reports `{"connected":true,"forwarded":0,"rejected":0,"lastPost":"never"}` over two days, `fleet-telemetry` has logged nothing since its own startup on 2026-10-17T16:34:05 with `log_level: info`, and the bridge has never had a websocket attached. Nothing has ever been published, so §4's synthetic publish is the only way to exercise this path until the car is pointed at it. |
-| TeslaMate's own polling survives a car coming online | **it does not.** With a wildcard on `streaming.titan.arrieta.eu` it crash-loops instead — §6. Fixed by the single-name certificate, and *that* fix is unproven until a car is seen online again. |
+| TeslaMate's own polling survives a car coming online | **it did not.** With a wildcard on `streaming.titan.arrieta.eu` it crash-looped instead — §6. Replaced by the single-name certificate, and **the certificate decision is now proven**: Erlang's default matcher returns `false` for the old wildcard and `true` for the live single-name cert, tested directly against both DER files. What is *still* unobserved is a real `Stream connected` from a car — see §6. |
 
 Still open and now the front of the queue: **the vehicle has never been told to stream.** §5's
 `synced: true` has not been reached, so every claim downstream of it in this file remains an
 assumption with a command attached. Note also that the public-CA question in §5 is about the
 *vehicle's* trust store; that `streaming.titan.arrieta.eu` validates against a public CA from a
 laptop proves nothing about what the car will accept.
+
+One warning attached to that first row of the table above, learned the hard way on 2026-10-19: if you
+switch `telemetry.titan.arrieta.eu` to a single-name certificate, **declare its A record in
+`public-dns-tf` in the same change.** The DNS-01 challenge node shadows the `*.titan` wildcard and
+silently takes the host out of DNS while the `Certificate` reports `Ready`. §6 has the mechanism and
+the check.
 
 ## 11. Deliberately not done
 
