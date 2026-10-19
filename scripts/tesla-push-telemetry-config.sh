@@ -60,7 +60,8 @@ usage: tesla-push-telemetry-config.sh COMMAND
   proxy       run the signing proxy (terminal 1; keep it open)
   vehicles    list the VINs the current token can see
   push [VIN]  send fleet_telemetry_config for VIN (or $TESLA_VINS, or every VIN it can see)
-  status      ask Tesla what the car currently has, and whether it synced
+  status [VIN] ask Tesla what the car currently has, and whether it synced (VIN in the path, as
+              Tesla requires; falls back to $TESLA_VINS, then every VIN the token can see)
   ca          fetch the CA chain the telemetry endpoint actually presents
 
 Environment:
@@ -299,7 +300,7 @@ cmd_push() {
   out=$(api POST "$PROXY_URL/api/1/vehicles/fleet_telemetry_config" "@$TMPDIR_TESLA/body.json") || return 1
   code=${out%%$'\n'*}; body=${out#*$'\n'}
   note "HTTP $code"
-  printf '%s\n' "$body" | jq .
+  show_json "$body" || true
   # Tesla reports per-VIN outcome here. missing_key means that car was never paired — expected for a
   # vehicle you have not paired yet, and not something a re-push can fix.
   printf '%s\n' "$body" | jq -e '.response.updated_vehicles > 0' >/dev/null \
@@ -311,23 +312,51 @@ cmd_push() {
   note "quiet is not evidence of anything — the car has not been told yet."
 }
 
+# Tesla normally answers with JSON, but a proxy or intermediary can answer with HTML or nothing at
+# all. Handing that to jq produces "Cannot index number with string" and sends you looking in the
+# wrong place, so show the raw body when it is not JSON.
+show_json() {
+  if printf '%s' "$1" | jq . >/dev/null 2>&1; then printf '%s\n' "$1" | jq .
+  else note "(not JSON)"; printf '%s\n' "$1"; return 1; fi
+}
+
 cmd_status() {
   read_token
   need jq
-  local out code body
-  # Read path goes straight to Tesla: this GET is not signed, so it does not need the proxy.
-  out=$(api GET "$FLEET_API/api/1/vehicles/fleet_telemetry_config") || return 1
-  code=${out%%$'\n'*}; body=${out#*$'\n'}
-  [ "$code" = 200 ] || { note "HTTP $code"; printf '%s\n' "$body" | jq .; return 1; }
-  printf '%s\n' "$body" | jq '{synced: .response.synced, hostname: .response.config.hostname,
-    port: .response.config.port, fields: (.response.config.fields | keys),
-    ca_present: (.response.config.ca | length > 0)}'
-  printf '%s\n' "$body" | jq -e '.response.synced' >/dev/null || {
-    note
-    note "Not synced yet. Nothing downstream of this is evidence: no cluster log line means anything"
-    note "until synced is true, because the car has not been asked to stream."
-    return 1
-  }
+  local vins=( "$@" )
+  if [ ${#vins[@]} -eq 0 ] && [ -n "${TESLA_VINS:-}" ]; then
+    # shellcheck disable=SC2206
+    vins=( $TESLA_VINS )
+  fi
+  if [ ${#vins[@]} -eq 0 ]; then
+    note "no VIN given; discovering from the API."
+    local v
+    while IFS= read -r v; do [ -n "$v" ] && vins+=("$v"); done < <(cmd_vehicles)
+  fi
+  [ ${#vins[@]} -gt 0 ] || die "no VINs. Pass one as an argument or set TESLA_VINS."
+
+  # The read endpoint takes the VIN in the PATH: /api/1/vehicles/{vin}/fleet_telemetry_config. The
+  # VIN-less form is only the POST target; GETting it returns {"error":"not_found"}, which looks
+  # exactly like "the car has no config" and is not that at all.
+  local vin out code body rc=0
+  for vin in "${vins[@]}"; do
+    note "=== $vin ==="
+    out=$(api GET "$FLEET_API/api/1/vehicles/$vin/fleet_telemetry_config") || { rc=1; continue; }
+    code=${out%%$'\n'*}; body=${out#*$'\n'}
+    if [ "$code" != 200 ]; then
+      note "HTTP $code"; show_json "$body"; rc=1; continue
+    fi
+    printf '%s' "$body" | jq -e . >/dev/null 2>&1 || { note "HTTP $code but not JSON:"; show_json "$body"; rc=1; continue; }
+    printf '%s\n' "$body" | jq '{synced: .response.synced, hostname: .response.config.hostname,
+      port: .response.config.port, fields: (.response.config.fields | keys),
+      ca_present: (.response.config.ca | length > 0)}'
+    printf '%s\n' "$body" | jq -e '.response.synced' >/dev/null || {
+      note "Not synced yet for $vin. Nothing downstream of this is evidence: no cluster log line"
+      note "means anything until synced is true, because the car has not picked the config up."
+      rc=1
+    }
+  done
+  return $rc
 }
 
 cmd_preflight() {
@@ -367,7 +396,7 @@ cmd_preflight() {
 
 case "${1:-}" in
   push)      shift; cmd_push "$@" ;;
-  status)    cmd_status ;;
+  status)    shift; cmd_status "$@" ;;
   proxy)     cmd_proxy ;;
   tls)       cmd_tls ;;
   ca)        workdir; cmd_ca ;;
