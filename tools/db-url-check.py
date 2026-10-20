@@ -7,9 +7,11 @@ other at apply time, so the same password is committed twice - and rotating one 
 the other produces an authentication failure that reads like a database problem.
 
 Driven by references found in the tree, not by a filename pattern, so it cannot pass vacuously
-because something was renamed. For every HelmRelease env var named *PG_CONNECTION_URL it
-resolves the referenced Secret and key, parses the URL, and compares against the DatabaseRole
-whose role name equals the URL's user.
+because something was renamed. Two shapes are walked, because this cluster has both: a HelmRelease
+env named *PG_CONNECTION_URL (coder), and a Deployment's DATABASE_URL — whether it arrives as an
+explicit `valueFrom.secretKeyRef` or through `envFrom` on the Secret that carries it (open-webui).
+A finder that walks only one shape reports zero references for the other and passes vacuously, which
+is the one failure mode a reference-driven gate must never have.
 
 Fixtures may be plaintext; real secrets are sops-encrypted. A file that looks encrypted but
 does not decrypt is reported, never silently skipped - a gate that skips is a gate that lies.
@@ -25,19 +27,50 @@ from sopsload import load_docs, secret_key  # noqa: E402
 
 
 def pg_url_refs(docs):
-    """(helmrelease-name, namespace, secret-name, key) for every *PG_CONNECTION_URL env ref."""
+    """(workload-name, namespace, secret-name, key) for every Postgres URL env ref.
+
+    Two shapes, because this cluster has both. Coder takes one knob, CODER_PG_CONNECTION_URL, in a
+    HelmRelease's values; open-webui takes DATABASE_URL on a Deployment, and reads it through
+    `envFrom` rather than naming the key. The envFrom walk is what makes the second one visible:
+    a Secret is only a reference if something reads it, so the walk starts from the workload and
+    asks the Secret whether it carries a URL, never the other way round.
+    """
     refs = []
+    secrets_by_ns = {}
     for d in docs:
-        if d.get("kind") != "HelmRelease":
-            continue
+        if d.get("kind") == "Secret":
+            md = d.get("metadata") or {}
+            secrets_by_ns.setdefault(md.get("namespace"), {})[md.get("name")] = d
+
+    for d in docs:
+        kind = d.get("kind")
         md = d.get("metadata") or {}
-        values = ((d.get("spec") or {}).get("values") or {})
-        for env in ((values.get("coder") or {}).get("env") or []):
-            if not re.search(r"PG_CONNECTION_URL$", env.get("name", "")):
-                continue
-            ref = (env.get("valueFrom") or {}).get("secretKeyRef")
-            if ref:
-                refs.append((md.get("name"), md.get("namespace"), ref.get("name"), ref.get("key")))
+        if kind == "HelmRelease":
+            values = ((d.get("spec") or {}).get("values") or {})
+            for env in ((values.get("coder") or {}).get("env") or []):
+                if not re.search(r"PG_CONNECTION_URL$", env.get("name", "")):
+                    continue
+                ref = (env.get("valueFrom") or {}).get("secretKeyRef")
+                if ref:
+                    refs.append((md.get("name"), md.get("namespace"), ref.get("name"), ref.get("key")))
+        elif kind == "Deployment":
+            for c in (((d.get("spec") or {}).get("template") or {}).get("spec") or {}).get("containers", []):
+                for env in c.get("env") or []:
+                    if not re.search(r"(PG_CONNECTION_URL|DATABASE_URL)$", env.get("name", "")):
+                        continue
+                    ref = (env.get("valueFrom") or {}).get("secretKeyRef")
+                    if ref:
+                        refs.append((md.get("name"), md.get("namespace"), ref.get("name"), ref.get("key")))
+                for ef in c.get("envFrom") or []:
+                    name = (ef.get("secretRef") or {}).get("name")
+                    if not name:
+                        continue
+                    sec = secrets_by_ns.get(md.get("namespace"), {}).get(name)
+                    if sec is None:
+                        continue
+                    for key in ("DATABASE_URL", "PG_CONNECTION_URL"):
+                        if key in (sec.get("stringData") or {}) or key in (sec.get("data") or {}):
+                            refs.append((md.get("name"), md.get("namespace"), name, key))
     return refs
 
 
@@ -59,10 +92,10 @@ def main():
     docs = load_docs(args.root)
     refs, roles_map, checked, bad = pg_url_refs(docs), roles(docs), 0, 0
 
-    for hr_name, hr_ns, sec_name, key in refs:
-        url, _ = secret_key(docs, sec_name, hr_ns or "coder", key)
+    for wl_name, ns, sec_name, key in refs:
+        url, _ = secret_key(docs, sec_name, ns or "default", key)
         if url is None:
-            print(f"FAIL: HelmRelease {hr_ns}/{hr_name} reads {sec_name}/{key}, "
+            print(f"FAIL: {wl_name} reads {sec_name}/{key}, "
                   f"which is not present under {args.root}")
             bad += 1
             continue
