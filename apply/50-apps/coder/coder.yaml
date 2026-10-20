@@ -24,8 +24,8 @@ spec:
 #     way in.
 #
 # The chart can render its own Ingress (coder.ingress, off by default). Deliberately not used: it
-# would not carry the wildcard rule and the coder-tls reference in a shape this repo controls, and
-# an Ingress you cannot read in git is an Ingress you cannot review.
+# would not carry the coder-tls reference in a shape this repo controls, and an Ingress you cannot
+# read in git is an Ingress you cannot review.
 apiVersion: helm.toolkit.fluxcd.io/v2
 kind: HelmRelease
 metadata:
@@ -63,22 +63,22 @@ spec:
       env:
         - name: CODER_ACCESS_URL
           value: "https://coder.titan.arrieta.eu"
-        # No scheme — and this one is not a style choice, coder refuses to start without it.
-        # codersdk/deployment.go:2307-2326 documents it as "*.example.com" and carries the comment
-        # "Do not use a serpent.URL here. We are intentionally omitting the scheme part of the url",
-        # because it is validated by appurl.CompileHostnamePattern rather than parsed as a URL. With a
-        # scheme the pod dies at boot, before it ever touches the database:
+        # CODER_WILDCARD_ACCESS_URL is deliberately absent (C5 retired 2026-10-20). Workspace apps
+        # get no hostname of their own: nothing in this repo or ../coder-templates declares a
+        # coder_app with host = "*", so the wildcard bought a wildcard certificate at every renewal
+        # in exchange for names nobody serves. Re-adding it is three edits, not one: this variable,
+        # the wildcard SAN on apply/40-certificates/coder-wildcard.yaml, and a wildcard host rule on
+        # the Ingress below. Any one of the three alone produces a hostname that routes and then
+        # fails TLS, which is the half-state this note exists to prevent.
+        #
+        # The contract, kept here because it is not guessable: the value carries NO SCHEME and coder
+        # refuses to start without that. codersdk/deployment.go:2307-2326 documents it as
+        # "*.example.com" and validates it with appurl.CompileHostnamePattern rather than parsing it
+        # as a URL, so with a scheme the pod dies at boot, before it ever touches the database:
         #   parsing env: 1 error occurred:
         #     * parse "Wildcard Access URL": hostname pattern must not contain a scheme
-        # CODER_ACCESS_URL just above is the opposite case — a serpent.URL that does want the scheme —
-        # which is exactly why both were read from source instead of written from the shape of the
-        # other. Same name, same prefix, different contract.
-        #
-        # The whole reason C5 exists: workspace apps get one hostname each instead of a path, so a
-        # preview port is a real origin rather than something that emits an absolute redirect and
-        # lands on the wrong host.
-        - name: CODER_WILDCARD_ACCESS_URL
-          value: "*.coder.titan.arrieta.eu"
+        # CODER_ACCESS_URL just above is the opposite case, a serpent.URL that does want the scheme.
+        # Same name, same prefix, different contract - which is why both were read from source.
         - name: CODER_PG_CONNECTION_URL
           valueFrom:
             secretKeyRef:
@@ -162,8 +162,8 @@ spec:
         # Role and one nobody reads. See apply/50-apps/coder/workspaces.yaml.
         workspaceNamespaces: []
 ---
-# Two rules, one host each. The wildcard rule is what makes C5 real: workspace apps get a hostname
-# each instead of a path.
+# One rule, one host. C5's per-workspace hostnames were retired 2026-10-20; the header of
+# apply/40-certificates/coder-wildcard.yaml records what re-adding them takes.
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
@@ -187,21 +187,14 @@ spec:
                 name: coder
                 port:
                   number: 80
-    - host: "*.coder.titan.arrieta.eu"
-      http:
-        paths:
-          - path: /
-            pathType: Prefix
-            backend:
-              service:
-                name: coder
-                port:
-                  number: 80
   tls:
     # coder-tls is produced in namespace `certificates` by the coder-wildcard Certificate and
     # reflected into `coder` by Reflector - the allow-list is the secretTemplate annotations on
     # apply/40-certificates/coder-wildcard.yaml, and it names coder and nothing else.
+    #
+    # One host, because the Secret carries one name and the Ingress routes one name. The wildcard
+    # rule went with the SAN deliberately: a leaf hostname that routes to a certificate which cannot
+    # serve it is the half-state, and it fails as a TLS error on a name that DNS happily resolves.
     - hosts:
         - coder.titan.arrieta.eu
-        - "*.coder.titan.arrieta.eu"
       secretName: coder-tls
