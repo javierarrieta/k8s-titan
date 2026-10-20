@@ -8,13 +8,18 @@ symptom → cause → fix → guardrail because that is the shape the lessons ha
 Read this before touching `scripts/tesla-push-telemetry-config.sh` or believing anything in
 `docs/teslamate-runbook.md` §5 written before this date.
 
+**Vehicle identifiers are redacted in this file, and must stay that way.** A VIN is a personally
+linkable identifier, one of the vehicles here belongs to a second person, and this repository is
+public. Use `<VIN-A>` / `<VIN-B>` in docs and commit messages; the real values live in the app's
+vehicle list, not in git.
+
 ## What is now proven, with the evidence
 
 | claim | evidence |
 |---|---|
 | the virtual key pairs | `tesla.com/_ak/tesla.titan.arrieta.eu` opened **on the phone**, approved in the Tesla app |
-| Tesla accepts the config | `{"response":{"updated_vehicles":1}}` for `5YJ3F7EBXKF523805` |
-| an unpaired car is refused, not silently dropped | `{"skipped_vehicles":{"missing_key":["LRWYHCEK6PC004910"]}}` |
+| Tesla accepts the config | `{"response":{"updated_vehicles":1}}` for `<VIN-A>` (the operator's car) |
+| an unpaired car is refused, not silently dropped | `{"skipped_vehicles":{"missing_key":["<VIN-B>"]}}` (a second owner's car) |
 | the car connects through the Ingress | `socket_connected user_agent=Hermes/1.16.9 (vehicle_device) network_interface=wifi` |
 | the intake publishes to Redis | `cmdstat_publish:calls=4`, no `redis_err` |
 | the forwarder delivers to the bridge | `{"connected":true,"forwarded":4,"rejected":0,"lastPost":"ok"}` |
