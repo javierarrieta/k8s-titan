@@ -1,0 +1,91 @@
+# authentik blueprint: Open WebUI's OIDC application and provider, for open-webui.titan.arrieta.eu.
+#
+# WHY A BLUEPRINT
+# authentik ships no CRDs, so this is the only declarative path: a rebuilt authentik gets open-webui's
+# client back from git instead of from someone's memory. Same argument as blueprints-coder.yaml and
+# blueprints-grafana.yaml, and docs/authentik-runbook.md §5 is the record of what a blueprint that is
+# never mounted looks like (nothing — it is indistinguishable from one never written).
+#
+# HOW THIS FILE BECOMES A SECRET
+# Nothing here is applied directly. scripts/setup-open-webui-secrets.sh substitutes the two `${...}`
+# placeholders and writes the result, sops-encrypted, to
+# apply/10-secrets/authentik-open-webui-blueprint.yaml. `make open-webui-oidc-check` proves the
+# rendered artifact, this template, open-webui's own copy of the client, and the host it is for all
+# still agree.
+#
+# WHAT THIS MUST NOT DO
+# The OIDC provider is deliberately NOT added to the embedded outpost's `providers` list in
+# apply/50-apps/auth/tesla-outpost-blueprint.yaml. That list is proxy-only, validate_providers
+# dispatches on provider type (outposts/api/outposts.py:69-88), and that blueprint OWNS the list —
+# it sets it rather than appending. A second reason not to touch it: open-webui is not a Tesla app.
+#
+# THE ENDPOINTS ARE NOT COMPOSED, THEY ARE READ
+# From the live discovery document, as blueprints-grafana.yaml records: authorize/token/userinfo are
+# GLOBAL paths with no slug; issuer and jwks are per-provider. Building `.../o/<slug>/authorize/`
+# returns 404 — measured, not assumed.
+version: 1
+metadata:
+  name: titan-open-webui
+entries:
+  - model: authentik_providers_oauth2.oauth2provider
+    id: open-webui-provider
+    identifiers:
+      name: open-webui
+    state: present
+    attrs:
+      name: open-webui
+      client_type: confidential
+      client_id: "${OPEN_WEBUI_OIDC_CLIENT_ID}"
+      client_secret: "${OPEN_WEBUI_OIDC_CLIENT_SECRET}"
+      # BOTH candidate callback paths, each strict. Open WebUI computes its own redirect URI with
+      # request.url_for('oauth_login_callback', provider='oidc') (utils/oauth.py:1919 at v0.12.3),
+      # and main.py:2932-2933 binds TWO routes to that one handler name:
+      #   /oauth/{provider}/login/callback   (current)
+      #   /oauth/{provider}/callback         (legacy, registered first — decorator order applies
+      #                                      bottom-up, so Starlette's url_for finds this one)
+      # Which one the app actually sends is not decidable from source, so both are registered and the
+      # first real login narrows this list to the one on the wire. Note the segment is `oidc` — the
+      # registry key at config.py:2812 — and NOT `authentik`, which is only OAUTH_PROVIDER_NAME, the
+      # display label. A prefix match would be a redirect bypass, hence strict on both.
+      redirect_uris:
+        - url: https://open-webui.titan.arrieta.eu/oauth/oidc/callback
+          matching_mode: strict
+        - url: https://open-webui.titan.arrieta.eu/oauth/oidc/login/callback
+          matching_mode: strict
+      grant_types:
+        - authorization_code
+        - refresh_token
+      # 'profile' is load-bearing, not decoration: the `groups` claim that open-webui's role mapping
+      # reads exists only because the default profile scope mapping emits it. Drop it and, with
+      # ENABLE_OAUTH_ROLE_MANAGEMENT=true on the app side, every non-admin login is a 403 — a denial,
+      # not a downgrade (utils/oauth.py:1645-1670).
+      property_mappings:
+        - !Find [authentik_providers_oauth2.scopemapping, [managed, goauthentik.io/providers/oauth2/scope-openid]]
+        - !Find [authentik_providers_oauth2.scopemapping, [managed, goauthentik.io/providers/oauth2/scope-email]]
+        - !Find [authentik_providers_oauth2.scopemapping, [managed, goauthentik.io/providers/oauth2/scope-profile]]
+        - !Find [authentik_providers_oauth2.scopemapping, [managed, goauthentik.io/providers/oauth2/scope-offline_access]]
+      # implicit consent: an app this cluster owns and configures does not need a click that adds no
+      # security. Same reasoning as coder's and Grafana's providers.
+      authorization_flow: !Find [authentik_flows.flow, [slug, default-provider-authorization-implicit-consent]]
+      invalidation_flow: !Find [authentik_flows.flow, [slug, default-invalidation-flow]]
+      signing_key: !Find [authentik_crypto.certificatekeypair, [managed, goauthentik.io/crypto/jwt-managed]]
+      # per_provider makes the issuer https://auth.titan.arrieta.eu/application/o/open-webui/, which
+      # is what open-webui's OPENID_PROVIDER_URL names. If the slug moves and that URL does not, the
+      # two disagree and the failure looks like a bad token.
+      issuer_mode: per_provider
+      # hashed_user_id: stable across renames and it does not leak the username into every token.
+      # open-webui reads it as the `sub` claim (OAUTH_SUB_CLAIM=sub), which is its identity key.
+      sub_mode: hashed_user_id
+
+  - model: authentik_core.application
+    identifiers:
+      slug: open-webui
+    state: present
+    attrs:
+      name: Open WebUI
+      slug: open-webui
+      provider: !KeyOf open-webui-provider
+      meta_launch_url: https://open-webui.titan.arrieta.eu/
+      # The Application is not decoration. A provider with no owning Application is invisible to the
+      # consumer that needs it — the recorded 404-for-every-host lesson in tesla-outpost-blueprint.yaml
+      # — and it is also what makes open-webui appear in the authentik user dashboard.
