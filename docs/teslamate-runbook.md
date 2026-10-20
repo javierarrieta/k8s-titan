@@ -313,6 +313,61 @@ plays no further part and stays at `replicas: 0`.
 `vehicle_device_data` scope granted. **If refresh fails with `invalid_client`**, `TESLA_AUTH_CLIENT_ID`
 in `tesla-oauth` is not the client id that minted the pair.
 
+## 5b. Pairing a vehicle — including one owned by a different account
+
+Written 2026-10-19, when the first car paired in one attempt and the second refused with *"only the
+vehicle owner can grant"*. Both outcomes are correct behaviour; neither is documented by Tesla where
+you would look for it.
+
+Three rules, all learned by being surprised:
+
+1. **Pairing is per vehicle.** Pairing one car says nothing about any other. Each needs its own
+   approval, and an unpaired car reports `skipped_vehicles.missing_key` on push — which no amount of
+   re-pushing fixes.
+2. **The deep link must be opened on the phone.**
+   `https://tesla.com/_ak/tesla.titan.arrieta.eu` in a desktop browser renders a page that asks you to
+   install the Tesla app and never reaches the app. Send the link to the phone, or add
+   `?vin=<VIN>` to pin the vehicle.
+3. **Only the vehicle's owner can grant the key**, and the owner's account must already have
+   authorized the application with `vehicle_device_data` (or `vehicle_cmds` / `vehicle_location`).
+   A shared driver who can *see* the vehicle in the app still cannot pair it — `GET /api/1/vehicles`
+   listing the VIN is not the same as being allowed to add keys to it.
+
+Your own account satisfies rule 3 for free: TeslaMate's sign-in created the grant. A second person's
+car does not, so their account has to authorize the app once:
+
+```fish
+kubectl --context k8s-titan -n apps scale deploy/tesla-auth-callback --replicas=1
+set -x TESLA_CLIENT_ID <client id>
+./scripts/tesla-auth.sh url          # the OWNER of the vehicle opens this and approves
+kubectl --context k8s-titan -n apps scale deploy/tesla-auth-callback --replicas=0
+```
+
+**Stop there — do not run `exchange`.** The pairing page checks that an authorization exists, and
+approval creates it; exchanging would mint a second token pair that is needed for nothing and is a
+credential with no owner. This is the fallback only if pairing still reports the app unauthorized
+after the owner has approved.
+
+Then the owner opens the deep link on their own phone, and the push goes out from your token, which
+can already reach the VIN:
+
+```fish
+./scripts/tesla-push-telemetry-config.sh push <VIN>
+./scripts/tesla-push-telemetry-config.sh status <VIN>
+```
+
+**The invariant that makes "do not exchange" more than tidiness:** TeslaMate's `private.tokens` holds
+exactly one row, and TeslaMate refuses to start with two (§5a, §7). A second token pair is not merely
+unnecessary here, it is actively corrosive to something the migration proved.
+
+Before any of this, confirm the public key is being served — a 404 there produces a misleading
+"application has not registered" that looks like an account problem:
+
+```fish
+curl -sS -o /dev/null -w '%{http_code} %{size_download}\n' \
+  https://tesla.titan.arrieta.eu/.well-known/appspecific/com.tesla.3p.public-key.pem
+```
+
 ## 6. Certificates
 
 `titan-tls` reaches fleet-telemetry as a **Reflector copy**. When the wildcard renews, the copy in
@@ -493,7 +548,9 @@ of them can be done by the agent.
 4. Wait for Flux, then prove the key is actually served — pairing fails with a misleading "application
    has not registered" when this 404s:
    `curl -s https://tesla.titan.arrieta.eu/.well-known/appspecific/com.tesla.3p.public-key.pem`
-5. Register the EU partner account, pair the virtual key at `https://tesla.com/_ak/tesla.titan.arrieta.eu`.
+5. Register the EU partner account, then pair each vehicle — **on the phone, by that vehicle's owner**,
+   per §5b. Pairing one vehicle does not cover any other, and a shared account cannot pair a car it
+   does not own.
 6. Add a payment method and a billing limit — the discount means the expected bill is $0, and the
    limit is what stops a misconfigured poll interval from becoming a surprise.
 7. Sign in to TeslaMate, then §5.
