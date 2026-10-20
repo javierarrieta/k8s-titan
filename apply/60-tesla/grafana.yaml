@@ -139,12 +139,22 @@ metadata:
   # Why this is safe to gate, and what would make it not:
   #   - The proxy provider is forward_domain over titan.arrieta.eu, so no provider change is needed for
   #     a new hostname and the existing session cookie already covers it.
-  #   - TeslaMate embeds Grafana dashboards in an iframe. That works because tesla., tesla-boards. and
-  #     auth. share the registrable domain, so the cookie is same-site and the authentik round trip can
-  #     complete inside the frame — see the forward_domain rationale in
-  #     apply/50-apps/auth/tesla-outpost-blueprint.yaml.
+  #   - TeslaMate does NOT embed Grafana. Its Dashboards menu is a dropdown of ordinary links opened
+  #     with target="_blank" (teslamate-4.3.0 elixir/teslamate_web/templates/layout/root.html.heex:99),
+  #     and `grep -i iframe` over lib/ and assets/ returns nothing. An earlier version of this comment
+  #     claimed the dashboards were framed and reasoned about same-site cookies on that basis; that was
+  #     inherited from a stale note in apply/50-apps/auth/tesla-outpost-blueprint.yaml instead of
+  #     checked against the app, and it is deleted here rather than left as folklore. There is no frame,
+  #     so authentik's `X-Frame-Options: DENY` and any SameSite question are irrelevant to this host.
   #   - The car's telemetry path is a different router entirely (IngressRouteTCP on HostSNI) and
   #     /.well-known is a separate Ingress with no middleware, so neither can be locked out by this.
+  #
+  # Gating this host costs one extra login per browser, not a broken embed: forward-auth decides whether
+  # the host may be reached at all, and Grafana still requires its own session afterwards, because a
+  # proxy provider never tells the upstream who you are. Delegating Grafana's own login to authentik
+  # would mean registering it as an OIDC application — deliberately not done here, since nothing today
+  # needs per-user Grafana roles and the rollout has its own lock-out risk (keep GF_AUTH_BASIC_ENABLED
+  # true through it if that changes).
   #
   # Rollback is one line: delete this annotation and re-apply. Grafana's own login still gates it, so a
   # revert returns to a working-but-public state rather than to something broken.

@@ -54,11 +54,14 @@ data:
     #
     # WHAT THE PROVIDER SETTINGS ARE FOR
     # mode: forward_domain — one provider covering titan.arrieta.eu, so TeslaMate and Grafana share
-    #   one session cookie. The alternative, forward_single per host, would make Grafana authenticate
-    #   independently, and TeslaMate embeds Grafana in an iframe: a second authentication would have to
-    #   complete *inside the frame*. Same-site cookies make that survivable (tesla., grafana. and auth.
-    #   all share the registrable domain arrieta.eu) but one cookie removes the question instead of
-    #   answering it. Field and choices read from authentik/providers/proxy/models.py:87-95.
+    #   one session cookie and one login covers every host under the domain. The alternative,
+    #   forward_single per host, would make each host authenticate independently for no gain here.
+    #   An earlier note justified this by TeslaMate framing Grafana in an iframe and a second
+    #   authentication having to "complete inside the frame". That was never true: TeslaMate 4.3's
+    #   Dashboards menu links out with target="_blank" and the app contains no iframe at all. The
+    #   setting is still correct — one cookie is simply less friction — but it is not load-bearing for
+    #   any embed, because there is none. Field and choices read from
+    #   authentik/providers/proxy/models.py:87-95.
     # cookie_domain — so that one cookie is accepted by every host under it. models.py:141.
     # skip_path_regex — THE PUBLIC KEY MUST STAY PUBLIC. Tesla's servers fetch
     #   https://tesla.titan.arrieta.eu/.well-known/appspecific/com.tesla.3p.public-key.pem during
