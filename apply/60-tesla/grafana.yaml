@@ -131,15 +131,25 @@ kind: Ingress
 metadata:
   name: tesla-grafana
   namespace: apps
-  # NOT forward-authenticated, unlike the teslamate Ingress, which carries
-  # apps-teslamate-auth@kubernetescrd. The authentik outpost spec lists this host as gated; the
-  # manifest never added the middleware, so Grafana is reachable by anyone who knows the hostname and
-  # is protected only by Grafana's own login. Left as-is deliberately here — adding auth is a behaviour
-  # change with lock-out risk (including TeslaMate's embedded frame) and belongs in its own change,
-  # not folded into a rename. Tracked in docs/teslamate-runbook.md §9.
+  # Forward-auth to the embedded authentik outpost — the same middleware the teslamate Ingress uses.
+  # This was missing when the host was grafana.titan.arrieta.eu: the outpost spec lists this host as
+  # gated and the manifest never said so, leaving Grafana reachable by anyone who learned the hostname
+  # with only Grafana's own login in front.
   #
-  # The authentik proxy provider is forward_domain over titan.arrieta.eu, so when auth is added the
-  # new hostname needs no provider change — one cookie already covers every host under the domain.
+  # Why this is safe to gate, and what would make it not:
+  #   - The proxy provider is forward_domain over titan.arrieta.eu, so no provider change is needed for
+  #     a new hostname and the existing session cookie already covers it.
+  #   - TeslaMate embeds Grafana dashboards in an iframe. That works because tesla., tesla-boards. and
+  #     auth. share the registrable domain, so the cookie is same-site and the authentik round trip can
+  #     complete inside the frame — see the forward_domain rationale in
+  #     apply/50-apps/auth/tesla-outpost-blueprint.yaml.
+  #   - The car's telemetry path is a different router entirely (IngressRouteTCP on HostSNI) and
+  #     /.well-known is a separate Ingress with no middleware, so neither can be locked out by this.
+  #
+  # Rollback is one line: delete this annotation and re-apply. Grafana's own login still gates it, so a
+  # revert returns to a working-but-public state rather than to something broken.
+  annotations:
+    traefik.ingress.kubernetes.io/router.middlewares: apps-teslamate-auth@kubernetescrd
 spec:
   ingressClassName: traefik
   rules:
