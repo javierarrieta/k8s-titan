@@ -34,6 +34,12 @@ resources:
   # for the same reason as coder's blueprint, and it is rendered by scripts/setup-google-blueprint.sh
   # from authentik/blueprints-google.yaml.
   - authentik-google-blueprint.yaml
+  # Grafana's OIDC client, written to two files that have to agree: authentik's copy (the rendered
+  # blueprint, namespace auth) and Grafana's own copy (namespace apps). One credential in two places
+  # is one rotation away from a silent split, which is exactly what make grafana-oidc-check exists to
+  # catch — the same shape of problem make oidc-check covers for coder.
+  - authentik-grafana-blueprint.yaml
+  - tesla-grafana-oidc.yaml
   # TeslaMate. Two files rather than one because the same password has to reach two namespaces: the
   # app reads DATABASE_PASS from `apps`, and CNPG's DatabaseRole needs a `kubernetes.io/basic-auth`
   # Secret in `databases` carrying the identical value. That split is what the script's own

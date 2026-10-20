@@ -18,7 +18,7 @@ SECRET_FIND := find apply/10-secrets \( -name '*.yaml' -o -name '*.yml' \) ! -na
 # leak-check runs FIRST: make has no -k, so it stops at the first failing prerequisite.
 # validate needs the age key, so an operator who forgot SOPS_AGE_KEY_FILE would never
 # reach a leak gate placed behind it.
-check: py-deps leak-check kustomize-check kustomize-listing validate secrets-placement release-secrets db-url-check oidc-check crd-check tesla-forwarder-test
+check: py-deps leak-check kustomize-check kustomize-listing validate secrets-placement release-secrets db-url-check oidc-check grafana-oidc-check crd-check tesla-forwarder-test
 	@echo "check: all offline gates passed"
 
 # The subset provable from the tree alone - no age key, no cluster, no network.
@@ -501,3 +501,11 @@ db-url-check:
 # a local gate, not a CI one.
 oidc-check:
 	@python3 tools/oidc-check.py apply
+
+# grafana-oidc-check: the same class of problem, one credential further along. Grafana's OIDC client
+# lives in four places — the reviewed template, the rendered blueprint authentik applies, Grafana's own
+# Secret, and the redirect URI authentik will match the callback against. A hostname rename that moves
+# GF_SERVER_ROOT_URL without moving the redirect URI is the specific mistake this catches, and this
+# repo renamed that host once. Reads Secrets, so a local gate, not a CI one.
+grafana-oidc-check:
+	@python3 tools/grafana-oidc-check.py apply

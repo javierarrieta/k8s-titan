@@ -64,6 +64,10 @@ spec:
             name: teslamate-secrets
         - secretRef:
             name: tesla-grafana-admin
+        # Grafana's copy of the OIDC client. The keys are already the config key names Grafana reads,
+        # so envFrom needs no aliasing and there is no typo'd mapping between Secret and Deployment.
+        - secretRef:
+            name: tesla-grafana-oidc
         env:
         # GF_SERVER_ROOT_URL is what Grafana puts in the links it generates itself, so it has to be the
         # hostname users actually reach — not the Service name, and not the old cluster's host.
@@ -82,6 +86,77 @@ spec:
           value: "false"
         - name: TZ
           value: UTC
+        # --- single sign-on: Grafana delegates identity to authentik over OIDC ------------------
+        # Why this sits beside the forward-auth annotation on the Ingress below instead of replacing
+        # it: they answer different questions. The proxy provider decides whether the host may be
+        # reached at all and never tells Grafana who you are, so before this change every visit asked
+        # for a second password — a shared admin account out of tesla-grafana-admin. OIDC supplies
+        # the identity and the role; the edge gate stays so a Grafana-side misconfiguration cannot
+        # make the host public again. authentik's half of the client pair is
+        # apply/10-secrets/authentik-grafana-blueprint.yaml, and `make grafana-oidc-check` proves the
+        # two copies, the mount, and the redirect host all agree.
+        #
+        # The endpoints come from authentik's live discovery document, not from documentation:
+        #   GET /application/o/coder/.well-known/openid-configuration
+        # authorize, token and userinfo are GLOBAL paths with no slug in them; only issuer and jwks
+        # carry the slug. Composing `.../o/tesla-boards/authorize/` looks obvious and returns 404 —
+        # measured against this instance, not assumed.
+        - name: GF_AUTH_GENERIC_OAUTH_ENABLED
+          value: "true"
+        - name: GF_AUTH_GENERIC_OAUTH_NAME
+          value: authentik
+        - name: GF_AUTH_GENERIC_OAUTH_AUTH_URL
+          value: https://auth.titan.arrieta.eu/application/o/authorize/
+        - name: GF_AUTH_GENERIC_OAUTH_TOKEN_URL
+          value: https://auth.titan.arrieta.eu/application/o/token/
+        - name: GF_AUTH_GENERIC_OAUTH_API_URL
+          value: https://auth.titan.arrieta.eu/application/o/userinfo/
+        # Signature validation. Without it Grafana trusts an unverified id_token, which is a real
+        # weakening rather than a formality even behind the edge gate. It is not free: with
+        # validate_id_token true and a wrong or missing jwk_set_url, authentication fails outright.
+        - name: GF_AUTH_GENERIC_OAUTH_VALIDATE_ID_TOKEN
+          value: "true"
+        - name: GF_AUTH_GENERIC_OAUTH_JWK_SET_URL
+          value: https://auth.titan.arrieta.eu/application/o/tesla-boards/jwks/
+        # profile is load-bearing, not decoration: the `groups` claim exists only because authentik's
+        # default profile scope mapping emits it (blueprints/system/providers-oauth2.yaml:45). Drop
+        # it and the role expression below evaluates against a missing claim and everyone silently
+        # lands as Viewer — a permissions bug that presents as working.
+        - name: GF_AUTH_GENERIC_OAUTH_SCOPES
+          value: openid email profile offline_access
+        - name: GF_AUTH_GENERIC_OAUTH_EMAIL_ATTRIBUTE_PATH
+          value: email
+        - name: GF_AUTH_GENERIC_OAUTH_LOGIN_ATTRIBUTE_PATH
+          value: preferred_username
+        - name: GF_AUTH_GENERIC_OAUTH_NAME_ATTRIBUTE_PATH
+          value: name
+        # authentik Admins -> Grafana Org Admin, everyone else Viewer. The group is authentik's own
+        # default (blueprints/system/bootstrap.yaml:11, `group_name: authentik Admins`), so
+        # membership stays managed where it already is instead of becoming a fourth copy of a list.
+        # GrafanaAdmin (server admin) is deliberately not granted; if a setting ever needs it, that is
+        # allow_assign_grafana_admin, and it should be its own decision.
+        #
+        # Anyone authentik lets through the edge gate gets a Grafana account here, as Viewer: the
+        # proxy provider has no access_group, so "can log into authentik" is the current bar. That is
+        # a deliberate standing choice, not an oversight of this change.
+        - name: GF_AUTH_GENERIC_OAUTH_ROLE_ATTRIBUTE_PATH
+          value: contains(groups[*], 'authentik Admins') && 'Admin' || 'Viewer'
+        - name: GF_AUTH_GENERIC_OAUTH_ALLOW_SIGN_UP
+          value: "true"
+        # Skips Grafana's own login page for an unauthenticated browser. Safe specifically because the
+        # edge gate means authentik already holds a session by the time Grafana is reached, so this is
+        # a silent redirect rather than a second prompt. If the forward-auth annotation is ever
+        # removed, revisit this: it would then be the thing deciding who gets in.
+        - name: GF_AUTH_GENERIC_OAUTH_AUTO_LOGIN
+          value: "true"
+        - name: GF_AUTH_GENERIC_OAUTH_USE_REFRESH_TOKEN
+          value: "true"
+        # THE ESCAPE HATCH — keep this true. If the OIDC config is ever wrong (rotated secret, wrong
+        # JWKS, a scope dropped) and basic auth is off, the only way back into Grafana is editing the
+        # admin Secret and restarting the Pod. The local admin from tesla-grafana-admin is also the
+        # only account that can fix Grafana when the identity provider is the thing that is broken.
+        - name: GF_AUTH_BASIC_ENABLED
+          value: "true"
         # Grafana's own health endpoint; it answers as soon as the web server is up, which is what
         # readiness means here. The sqlite DB opening happens lazily and would only slow startup.
         livenessProbe:
@@ -149,12 +224,12 @@ metadata:
   #   - The car's telemetry path is a different router entirely (IngressRouteTCP on HostSNI) and
   #     /.well-known is a separate Ingress with no middleware, so neither can be locked out by this.
   #
-  # Gating this host costs one extra login per browser, not a broken embed: forward-auth decides whether
-  # the host may be reached at all, and Grafana still requires its own session afterwards, because a
-  # proxy provider never tells the upstream who you are. Delegating Grafana's own login to authentik
-  # would mean registering it as an OIDC application — deliberately not done here, since nothing today
-  # needs per-user Grafana roles and the rollout has its own lock-out risk (keep GF_AUTH_BASIC_ENABLED
-  # true through it if that changes).
+  # Gating this host and logging into Grafana are still two separate things, and that is deliberate:
+  # forward-auth decides whether the host may be reached at all, and never tells the upstream who you
+  # are. Grafana gets the identity from OIDC (see GF_AUTH_GENERIC_OAUTH_* on the Deployment above),
+  # not from this annotation, so the edge gate survives Grafana config drift instead of replacing it.
+  # If this annotation is ever removed, revisit GF_AUTH_GENERIC_OAUTH_AUTO_LOGIN — that combination is
+  # what decides who may in.
   #
   # Rollback is one line: delete this annotation and re-apply. Grafana's own login still gates it, so a
   # revert returns to a working-but-public state rather than to something broken.
