@@ -612,12 +612,14 @@ reason in §6.
 
 Two things that were true at the time of the rename and are worth knowing before you touch this host:
 
-- **Grafana is not behind authentik.** The `tesla-grafana` Ingress carries no
-  `router.middlewares` annotation, while `teslamate` carries `apps-teslamate-auth@kubernetescrd`. The
-  outpost spec's table says this host is gated; the manifest never did it. Verify with
-  `kubectl -n apps get ingress tesla-grafana -o jsonpath='{.metadata.annotations}'` — an empty result
-  means unauthenticated. Adding the middleware is a behaviour change with lock-out risk (including
-  TeslaMate's embedded dashboard frame) and should be its own change.
+- **Grafana was not behind authentik** until 2026-10-19. The `tesla-grafana` Ingress carried no
+  `router.middlewares` annotation while `teslamate` carried `apps-teslamate-auth@kubernetescrd`, so the
+  host was reachable by anyone who knew it, gated only by Grafana's own login — even though the outpost
+  spec listed it as gated. Verify with
+  `kubectl -n apps get ingress tesla-grafana -o jsonpath='{.metadata.annotations}'`; an empty result on
+  a cluster predating the fix means unauthenticated. The middleware is now applied, and the iframe
+  question (TeslaMate embedding Grafana) is answered by the shared registrable domain: one cookie
+  covers `tesla.`, `tesla-boards.` and `auth.`, so the authentik round trip completes inside the frame.
 - **Stale absolute links live in stored state, not in git.** `grafana.v.arrieta.eu` appears nowhere in
   this repository and nowhere in TeslaMate 4.3.0's source, and TeslaMate has no `GRAFANA_URL` in the
   Deployment or in `teslamate-secrets`. Any link still pointing at an old hostname is in Grafana's
