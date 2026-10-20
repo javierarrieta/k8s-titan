@@ -610,16 +610,26 @@ would be ambiguous). Three places move together — `GF_SERVER_ROOT_URL`, the In
 `hosts` entry — plus **an A record in `public-dns-tf` in the same change**, for the wildcard-shadowing
 reason in §6.
 
-Two things that were true at the time of the rename and are worth knowing before you touch this host:
+Three things that were true at the time of the rename and are worth knowing before you touch this host:
 
 - **Grafana was not behind authentik** until 2026-10-19. The `tesla-grafana` Ingress carried no
   `router.middlewares` annotation while `teslamate` carried `apps-teslamate-auth@kubernetescrd`, so the
   host was reachable by anyone who knew it, gated only by Grafana's own login — even though the outpost
   spec listed it as gated. Verify with
   `kubectl -n apps get ingress tesla-grafana -o jsonpath='{.metadata.annotations}'`; an empty result on
-  a cluster predating the fix means unauthenticated. The middleware is now applied, and the iframe
-  question (TeslaMate embedding Grafana) is answered by the shared registrable domain: one cookie
-  covers `tesla.`, `tesla-boards.` and `auth.`, so the authentik round trip completes inside the frame.
+  a cluster predating the fix means unauthenticated. Gating the host costs one extra login per browser:
+  forward-auth decides whether the host is reachable at all, and Grafana still asks for its own session
+  afterwards, because a proxy provider never tells the upstream who you are. There is **no iframe
+  anywhere in TeslaMate 4.3** — its Dashboards menu links out with `target="_blank"` — so authentik's
+  `X-Frame-Options: DENY` and any SameSite question do not apply to this host. An earlier version of
+  this bullet claimed the opposite, inherited from a stale comment in the outpost blueprint rather than
+  checked against the app; see the Ingress comment in `apply/60-tesla/grafana.yaml`.
+- **The Grafana URL TeslaMate links to is a database row, not a manifest.** It is `grafana_url` in
+  `GlobalSettings` (`teslamate/lib/teslamate/settings/global_settings.ex:13`, column added by the 2019
+  migration `20191117143038_add_grafana_url.exs`), edited in the UI under **Settings → Dashboards**. A
+  migrated database carries the old cluster's value across and no `kubectl` change will move it. Note
+  the self-pollution too: if the field is empty, opening a dashboard from the geofence form writes
+  whatever origin you arrived from back into it (`geofence_live/form.ex:170`).
 - **Stale absolute links live in stored state, not in git.** `grafana.v.arrieta.eu` appears nowhere in
   this repository and nowhere in TeslaMate 4.3.0's source, and TeslaMate has no `GRAFANA_URL` in the
   Deployment or in `teslamate-secrets`. Any link still pointing at an old hostname is in Grafana's
