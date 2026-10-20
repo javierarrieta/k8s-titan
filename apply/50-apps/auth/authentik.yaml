@@ -50,6 +50,9 @@ spec:
     # if this mount is removed while the Secret still exists - the state where the blueprint is
     # perfectly valid, perfectly applied to the cluster, and perfectly invisible to authentik.
     blueprints:
+      # Mounting is not applying. authentik's worker discovers these on its own schedule and can skip a
+      # newly added file entirely — see docs/authentik-runbook.md §5 for the probe and for
+      # `ak apply_blueprint`, which is the deterministic path.
       secrets:
         - authentik-coder-blueprint
         # Google social login. Mounted the same way, discovered by the same worker loop, and subject

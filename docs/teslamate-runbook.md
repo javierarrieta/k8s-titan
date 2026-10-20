@@ -634,7 +634,10 @@ Four things that were true at the time of the rename and are worth knowing befor
   client declared in `authentik/blueprints-grafana.yaml`, rendered by `scripts/setup-grafana-oidc.sh`
   into `authentik-grafana-blueprint` (what authentik applies) and `tesla-grafana-oidc` (what Grafana
   reads); `make grafana-oidc-check` proves those two, the HelmRelease mount, and the redirect host all
-  agree. Two things about it are easy to get wrong and hard to notice:
+  agree. Merging is not the same as authentik knowing about the client: the worker discovers blueprints
+  hourly and can skip a newly mounted one entirely — check with the discovery document probe and, if it
+  is missing, apply it directly (`docs/authentik-runbook.md` §5, which is where that is written down and
+  why it is not visible in any log). Two things about it are easy to get wrong and hard to notice:
   - **The `profile` scope is load-bearing.** The `groups` claim comes only from authentik's default
     profile scope mapping (`blueprints/system/providers-oauth2.yaml:45`), so dropping it makes
     `role_attribute_path` evaluate against a missing claim and every login silently becomes Viewer.
