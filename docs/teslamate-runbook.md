@@ -610,16 +610,16 @@ would be ambiguous). Three places move together — `GF_SERVER_ROOT_URL`, the In
 `hosts` entry — plus **an A record in `public-dns-tf` in the same change**, for the wildcard-shadowing
 reason in §6.
 
-Three things that were true at the time of the rename and are worth knowing before you touch this host:
+Four things that were true at the time of the rename and are worth knowing before you touch this host:
 
 - **Grafana was not behind authentik** until 2026-10-19. The `tesla-grafana` Ingress carried no
   `router.middlewares` annotation while `teslamate` carried `apps-teslamate-auth@kubernetescrd`, so the
   host was reachable by anyone who knew it, gated only by Grafana's own login — even though the outpost
   spec listed it as gated. Verify with
   `kubectl -n apps get ingress tesla-grafana -o jsonpath='{.metadata.annotations}'`; an empty result on
-  a cluster predating the fix means unauthenticated. Gating the host costs one extra login per browser:
-  forward-auth decides whether the host is reachable at all, and Grafana still asks for its own session
-  afterwards, because a proxy provider never tells the upstream who you are. There is **no iframe
+  a cluster predating the fix means unauthenticated. Forward-auth only decides whether the host is
+  reachable at all; it never tells the upstream who you are, which is why Grafana used to ask for a
+  second, shared password on top of it. There is **no iframe
   anywhere in TeslaMate 4.3** — its Dashboards menu links out with `target="_blank"` — so authentik's
   `X-Frame-Options: DENY` and any SameSite question do not apply to this host. An earlier version of
   this bullet claimed the opposite, inherited from a stale comment in the outpost blueprint rather than
@@ -630,6 +630,23 @@ Three things that were true at the time of the rename and are worth knowing befo
   migrated database carries the old cluster's value across and no `kubectl` change will move it. Note
   the self-pollution too: if the field is empty, opening a dashboard from the geofence form writes
   whatever origin you arrived from back into it (`geofence_live/form.ex:170`).
+- **Grafana's login is authentik's login since 2026-10-20.** Grafana delegates identity to an OIDC
+  client declared in `authentik/blueprints-grafana.yaml`, rendered by `scripts/setup-grafana-oidc.sh`
+  into `authentik-grafana-blueprint` (what authentik applies) and `tesla-grafana-oidc` (what Grafana
+  reads); `make grafana-oidc-check` proves those two, the HelmRelease mount, and the redirect host all
+  agree. Two things about it are easy to get wrong and hard to notice:
+  - **The `profile` scope is load-bearing.** The `groups` claim comes only from authentik's default
+    profile scope mapping (`blueprints/system/providers-oauth2.yaml:45`), so dropping it makes
+    `role_attribute_path` evaluate against a missing claim and every login silently becomes Viewer.
+    Members of authentik's own default `authentik Admins` group get Org Admin; everyone else Viewer.
+  - **The endpoint paths are asymmetric.** `authorize`, `token` and `userinfo` are global
+    (`/application/o/authorize/`), while issuer and JWKS carry the slug
+    (`/application/o/<slug>/jwks/`). Composing `.../o/tesla-boards/authorize/` looks obvious and 404s.
+    Read them from `/.well-known/openid-configuration` rather than from prose — including this prose.
+
+  `GF_AUTH_BASIC_ENABLED` stays `true` on purpose: it is the only way in when the OIDC config is the
+  thing that is broken. Rollback is one line — `GF_AUTH_GENERIC_OAUTH_ENABLED: "false"` — and it lands
+  on the local admin login, not on a public host, because forward-auth is still in front.
 - **Stale absolute links live in stored state, not in git.** `grafana.v.arrieta.eu` appears nowhere in
   this repository and nowhere in TeslaMate 4.3.0's source, and TeslaMate has no `GRAFANA_URL` in the
   Deployment or in `teslamate-secrets`. Any link still pointing at an old hostname is in Grafana's

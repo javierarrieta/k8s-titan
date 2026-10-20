@@ -1,0 +1,91 @@
+# authentik blueprint: Grafana's OIDC application and provider, for tesla-boards.titan.arrieta.eu.
+#
+# WHY OIDC AT ALL, WHEN THE PROXY PROVIDER ALREADY GATES THIS HOST
+# Two different questions. The proxy provider (apply/50-apps/auth/tesla-outpost-blueprint.yaml)
+# answers "may this host be reached at all". It never tells Grafana who you are, so Grafana still
+# demanded its own password — two logins, and the second one was a shared admin account in a Secret.
+# OIDC answers "who is this, and what may they see inside Grafana", which is what removes the second
+# login and makes the role come from authentik instead of from a shared credential.
+#
+# Both stay in place on purpose. The edge gate survives Grafana config drift — if someone re-enables
+# GF_AUTH_ANONYMOUS_ENABLED, the host is still not public. The cost is one extra redirect pair.
+#
+# HOW THIS FILE BECOMES A SECRET
+# Nothing here is applied directly. scripts/setup-grafana-oidc.sh substitutes the two `${...}`
+# placeholders and writes the result, sops-encrypted, to
+# apply/10-secrets/authentik-grafana-blueprint.yaml. `make grafana-oidc-check` proves the rendered
+# Secret still agrees with this file, with Grafana's own copy of the client, and with the host
+# Grafana is configured to serve — which is the check that would have caught the hostname rename
+# leaving the redirect URI behind.
+#
+# WHAT THIS MUST NOT DO
+# The OIDC provider is deliberately NOT added to the embedded outpost's `providers` list. That list
+# belongs to a proxy outpost and validate_providers dispatches on provider type
+# (outposts/api/outposts.py:69-88); a proxy outpost given an OAuth2 provider is a type error, not a
+# second way to authenticate. The outpost blueprint owns that list and keeps it proxy-only.
+#
+# The endpoints below are read from the live discovery document, not from documentation:
+#   GET https://auth.titan.arrieta.eu/application/o/coder/.well-known/openid-configuration
+#     issuer                 https://auth.titan.arrieta.eu/application/o/coder/
+#     authorization_endpoint https://auth.titan.arrieta.eu/application/o/authorize/
+#     token_endpoint         https://auth.titan.arrieta.eu/application/o/token/
+#     userinfo_endpoint      https://auth.titan.arrieta.eu/application/o/userinfo/
+#     jwks_uri               https://auth.titan.arrieta.eu/application/o/coder/jwks/
+# Note the asymmetry: authorize/token/userinfo are GLOBAL paths with no slug in them, while issuer
+# and jwks are per-provider. Composing `.../o/<slug>/authorize/` looks obvious and returns 404 —
+# measured, not assumed.
+version: 1
+metadata:
+  name: titan-grafana
+entries:
+  - model: authentik_providers_oauth2.oauth2provider
+    id: tesla-boards-provider
+    identifiers:
+      name: tesla-boards
+    state: present
+    attrs:
+      name: tesla-boards
+      client_type: confidential
+      client_id: "${GRAFANA_OIDC_CLIENT_ID}"
+      client_secret: "${GRAFANA_OIDC_CLIENT_SECRET}"
+      # Grafana's own documented callback path for generic_oauth, on the host Grafana is served from.
+      # strict, not a prefix: a prefix match on a redirect URI is a redirect bypass.
+      redirect_uris:
+        - url: https://tesla-boards.titan.arrieta.eu/login/generic_oauth
+          matching_mode: strict
+      grant_types:
+        - authorization_code
+        - refresh_token
+      # 'profile' is not decoration. Grafana's role mapping reads a `groups` claim, and that claim
+      # only exists because the default profile scope mapping emits it
+      # (blueprints/system/providers-oauth2.yaml:45, "groups": [group.name for group in
+      # request.user.ak_groups.all()]). Drop this scope and every OIDC login silently becomes Viewer,
+      # because contains(groups[*], ...) evaluates against nothing.
+      property_mappings:
+        - !Find [authentik_providers_oauth2.scopemapping, [managed, goauthentik.io/providers/oauth2/scope-openid]]
+        - !Find [authentik_providers_oauth2.scopemapping, [managed, goauthentik.io/providers/oauth2/scope-email]]
+        - !Find [authentik_providers_oauth2.scopemapping, [managed, goauthentik.io/providers/oauth2/scope-profile]]
+        - !Find [authentik_providers_oauth2.scopemapping, [managed, goauthentik.io/providers/oauth2/scope-offline_access]]
+      # implicit-consent: same reasoning as coder's and the proxy provider's — a consent screen for an
+      # app this cluster owns and configures adds a click and no security.
+      authorization_flow: !Find [authentik_flows.flow, [slug, default-provider-authorization-implicit-consent]]
+      invalidation_flow: !Find [authentik_flows.flow, [slug, default-invalidation-flow]]
+      signing_key: !Find [authentik_crypto.certificatekeypair, [managed, goauthentik.io/crypto/jwt-managed]]
+      # per_provider makes the issuer .../application/o/tesla-boards/, which is what pins the token to
+      # this client. Grafana verifies the audience against it when validate_id_token is on.
+      issuer_mode: per_provider
+      sub_mode: hashed_user_id
+
+  - model: authentik_core.application
+    identifiers:
+      slug: tesla-boards
+    state: present
+    attrs:
+      name: Grafana (Tesla)
+      slug: tesla-boards
+      provider: !KeyOf tesla-boards-provider
+      meta_launch_url: https://tesla-boards.titan.arrieta.eu/
+      # The proxy provider's application (`tesla`) stays as it is: it is what makes forward-auth work,
+      # and ProxyProvider.objects.filter(application__isnull=False) is the only thing the embedded
+      # outpost reads. Two applications, two providers, two jobs — collapsing them would break one of
+      # the two.
