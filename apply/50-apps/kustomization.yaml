@@ -46,3 +46,8 @@ resources:
   # Listed before the Deployment that connects as this role, which is intent rather than mechanism:
   # Flux sorts by kind and applies concurrently, and the pod retries until the role exists.
   - open-webui/open-webui-db.yaml
+  # The app itself: PVC + Deployment + Service + Ingress in namespace `open-webui`. It reads
+  # open-webui-secrets (envFrom) and titan-tls (reflected into its own namespace), and connects as the
+  # role above. A pod that starts before its Secret exists sits crash-looping, which reads like an app
+  # bug rather than a missing file — the ordering note at the top of this file applies.
+  - open-webui/open-webui.yaml

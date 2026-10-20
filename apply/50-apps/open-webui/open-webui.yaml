@@ -1,0 +1,201 @@
+# Open WebUI on titan: fresh instance, data in the shared CNPG cluster, sign-in through authentik.
+# Design and evidence: docs/superpowers/specs/2026-10-20-titan-open-webui-design.md.
+#
+# WHAT IS IN POSTGRES AND WHAT IS ON THE PVC, because it decides what a backup covers.
+# Postgres (open_webui, in the cluster that ships base backups and WAL to S3) holds users, roles,
+# chats, prompts, knowledge metadata, API keys, the model connection and the encrypted OAuth session
+# tokens. The PVC holds DATA_DIR/uploads and DATA_DIR/vector_db (config.py:180,512 at v0.12.3 —
+# chroma is the default vector store in the standard image). The vector index is derived and
+# rebuildable; uploads are neither in a backup nor rebuildable. That is a named exposure, not a
+# surprise: spec §5.3 and §9.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: open-webui-data
+  namespace: open-webui
+spec:
+  accessModes:
+  - ReadWriteOnce
+  # local-path-retain, not the default local-path: Retain is the only deletion mitigation this cluster
+  # has for a PVC (see apply/20-infra/storage-retain.yaml). It is a deletion mitigation and NOT a
+  # backup — a Retain PV that survives `kubectl delete pvc` does not survive the disk.
+  storageClassName: local-path-retain
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: open-webui
+  namespace: open-webui
+  # Meaningless without the namespace also being in reloader.namespaces in
+  # apply/20-infra/reloader/reloader.yaml — watchGlobally is false, so Reloader does not look here
+  # at all. Both halves are in this branch for exactly that reason.
+  annotations:
+    reloader.stakater.com/auto: "true"
+spec:
+  replicas: 1
+  # RWO PVC: a RollingUpdate schedules pod 2 while pod 1 still holds the volume and the new pod sits
+  # Pending on a volume conflict forever. Recreate also avoids two pods running Alembic at once.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: open-webui
+  template:
+    metadata:
+      labels:
+        app: open-webui
+    spec:
+      # No pod/container securityContext, deliberately, and do not "harden" it without testing it:
+      # the image is built with ARG UID=0 and runs as root, so runAsNonRoot is a lie the kubelet
+      # rejects at start and dropping capabilities is unverified against an app that installs
+      # Python packages at runtime for optional features. Casa runs the same image unconfined.
+      containers:
+      - name: open-webui
+        image: ghcr.io/open-webui/open-webui:v0.12.3
+        ports:
+        - name: http
+          containerPort: 8080
+        envFrom:
+        # DATABASE_URL, WEBUI_SECRET_KEY, OAUTH_CLIENT_ID, OAUTH_CLIENT_SECRET. The keys are the
+        # names open-webui reads, so envFrom needs no aliasing and there is no typo'd mapping
+        # between Secret and Deployment.
+        - secretRef:
+            name: open-webui-secrets
+        env:
+        - name: DATA_DIR
+          value: /app/backend/data
+        - name: WEBUI_URL
+          value: https://open-webui.titan.arrieta.eu
+        # --- single sign-on: authentik decides who you are; there is no local password form -------
+        # OAUTH_PROVIDER_NAME is a DISPLAY label only. The env-configured OIDC provider is registered
+        # under the key `oidc` (config.py:2812 at v0.12.3), which is why the callback path and the
+        # redirect URIs in the blueprint say /oauth/oidc/... and not /oauth/authentik/....
+        - name: OAUTH_PROVIDER_NAME
+          value: authentik
+        - name: OPENID_PROVIDER_URL
+          value: https://auth.titan.arrieta.eu/application/o/open-webui/.well-known/openid-configuration
+        - name: ENABLE_OAUTH_SIGNUP
+          value: "true"
+        - name: ENABLE_LOGIN_FORM
+          value: "false"
+        - name: OAUTH_MERGE_ACCOUNTS_BY_EMAIL
+          value: "true"
+        # `profile` is what puts `groups` in the token. Drop it and, with role management on below,
+        # every non-admin login is a 403 rather than a fallback role (utils/oauth.py:1645-1670).
+        - name: OAUTH_SCOPES
+          value: openid email profile
+        - name: OAUTH_SUB_CLAIM
+          value: sub
+        - name: OAUTH_TOKEN_ENDPOINT_AUTH_METHOD
+          value: client_secret_basic
+        - name: OPENID_END_SESSION_ENDPOINT
+          value: https://auth.titan.arrieta.eu/application/o/open-webui/end-session/
+        - name: ENABLE_OAUTH_ID_TOKEN_COOKIE
+          value: "true"
+        - name: OAUTH_UPDATE_PICTURE_ON_LOGIN
+          value: "true"
+        - name: OAUTH_UPDATE_NAME_ON_LOGIN
+          value: "true"
+        - name: ENABLE_WEBUI_LOG
+          value: "true"
+        # --- roles come from authentik groups, the way this cluster already does for Grafana -----
+        # (apply/60-tesla/grafana.yaml:143 maps the same `authentik Admins` group.) Without role
+        # management the default role is `pending` (config.py:1748,2660), i.e. the second person
+        # through the door can log in and do nothing until an admin approves them in open-webui's UI.
+        #
+        # OAUTH_ALLOWED_ROLES must NOT be left at its default `user,admin`: with the claim set to
+        # authentik group names, that default matches nothing and 403s every non-admin. `*` means any
+        # authentik-authenticated user gets `user`; `authentik Admins` gets `admin`.
+        - name: ENABLE_OAUTH_ROLE_MANAGEMENT
+          value: "true"
+        - name: OAUTH_ROLES_CLAIM
+          value: groups
+        - name: OAUTH_ADMIN_ROLES
+          value: authentik Admins
+        - name: OAUTH_ALLOWED_ROLES
+          value: "*"
+        # The first user to sign in becomes admin regardless of all of the above
+        # (utils/oauth.py:1598-1607). Do that on purpose and record it in the runbook.
+        # --- probes ---------------------------------------------------------------------------
+        # startupProbe rather than a big initialDelay: startup runs Alembic migrations against
+        # Postgres and initialises chroma, which is slow on a cold start and unbounded on a slow one.
+        # 30 x 10s = five minutes before liveness is even asked about.
+        startupProbe:
+          httpGet:
+            path: /health
+            port: http
+          periodSeconds: 10
+          failureThreshold: 30
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: http
+          periodSeconds: 30
+        # /ready gates on app.state.startup_complete; /health/db pings Postgres. Readiness on /ready
+        # keeps a slow migration from pulling the endpoint out of the Service while it is still fine.
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: http
+          periodSeconds: 10
+        resources:
+          requests:
+            cpu: 100m
+            memory: 500Mi
+          limits:
+            cpu: "1"
+            memory: 2Gi
+        volumeMounts:
+        - name: data
+          mountPath: /app/backend/data
+      volumes:
+      - name: data
+        persistentVolumeClaim:
+          claimName: open-webui-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: open-webui
+  namespace: open-webui
+spec:
+  type: ClusterIP
+  selector:
+    app: open-webui
+  ports:
+  - name: http
+    port: 80
+    targetPort: http
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: open-webui
+  namespace: open-webui
+  # No forward-auth middleware on this host: open-webui decides who may in, through authentik OIDC
+  # (spec D3). Adding a proxy provider here would mean editing the Tesla-owned outpost blueprint that
+  # OWNS that provider list, and putting a middleware in the path of open-webui's streaming traffic.
+  # The host is reachable from the public internet either way, exactly like coder. and auth.
+spec:
+  ingressClassName: traefik
+  rules:
+  - host: open-webui.titan.arrieta.eu
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: open-webui
+            port:
+              number: 80
+  tls:
+  - hosts:
+    - open-webui.titan.arrieta.eu
+    # Reflected from `certificates` by the wildcard. Reaching THIS namespace required adding
+    # `open-webui` to both reflector annotations on apply/40-certificates/titan-wildcard.yaml; with
+    # only one of the two edited, the Certificate stays Ready and the Secret never appears.
+    secretName: titan-tls
