@@ -89,3 +89,8 @@ spec:
         # docs/titan-logs-loki.md records how to tell "the edit did not land" from "the edit landed
         # and the pod never restarted".
         - monitoring
+        # open-webui carries `reloader.stakater.com/auto: "true"` and reads its whole config
+        # through envFrom, so a rotated WEBUI_SECRET_KEY or OIDC client would otherwise sit
+        # unread in a running pod — the same inert-annotation defect the monitoring entry above
+        # records for promtail. `watchGlobally: false` means this list is the whole scope.
+        - open-webui
