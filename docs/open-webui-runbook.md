@@ -93,21 +93,46 @@ instead of waiting up to an hour — that annotation is why PR #42's fix looked 
 ```sh
 kubectl -n databases get database open-webui,databaserole open-webui -o wide
 kubectl -n open-webui get pod,deploy,pvc
-kubectl -n open-webui get secret titan-tls          # Reflector's job, not yours
 curl -sI https://open-webui.titan.arrieta.eu       # 200, not a TLS error
 ```
+
+`kubectl -n open-webui get secret titan-tls` is **not** on that list on purpose: the read-only
+`k8s-reader` identity cannot read Secrets anywhere (AGENTS.md, and re-measured on the first deploy —
+`Forbidden` listing `secrets` in `open-webui`). The `curl` above is the read-only substitute: if
+Reflector had not reflected the wildcard, Traefik would be serving a TLS error instead of a 200. Read
+the Secret itself with an admin context if you need to confirm its notBefore.
 
 Then the four things only a human can check: admin login lands, a non-admin login lands, a
 non-member is refused, and `kubectl -n open-webui delete pod` leaves the session and the stored
 OAuth token intact — that last one is the proof §2 is real rather than theoretical.
 
+### First deploy — recorded 2026-10-20
+
+PR #96 merged as `9f886dd`. Observed with the read-only identity, not inferred:
+
+- All seven Flux stages reached `main@sha1:9f886dd` Ready, including `secrets` — which is the proof
+  the three new sops files are encrypted to `titan-k8s`. Wrong recipients fail that stage and freeze
+  everything downstream of it.
+- `Database open-webui`: `applied: true`. CNPG `Cluster postgres`: `Ready=True`,
+  `ContinuousArchiving=True`, `LastBackupSucceeded=True`.
+- PVC `open-webui-data` Bound on `local-path-retain`; Deployment 1/1 Available; pod Running, 0
+  restarts.
+- `curl -sI https://open-webui.titan.arrieta.eu` → `HTTP/2 200`, so `titan-tls` was reflected.
+- Log showed Alembic running the migrations through `242a2047eae0, Update chat table` with no
+  `error`, `traceback`, `permission denied` or `InvalidToken`.
+
+Not covered by any of that: the four human checks above, and forcing the blueprint. A green deploy
+proves the app starts and answers, not that a person can sign in — the OIDC client was mounted and
+not yet applied at that point (§5).
+
 ## 7. Not proven / not done
 
 - `uploads/` is unbacked (§1). No plan yet; the PV's `Retain` is a deletion mitigation, not a backup.
-- The non-superuser `DatabaseRole` is an argument from absence (chroma, not pgvector). It is proven
-  only by a successful migration run on the live cluster. If a migration ever needs elevation, the
-  pod fails at Alembic and the fix is a deliberate `superuser: true` with its own note — not a
-  silent widening.
+- ~~The non-superuser `DatabaseRole` is an argument from absence~~ — **closed 2026-10-20**: the
+  migrations ran against `open_webui` on the live cluster with no elevation (§6). If a future
+  migration needs more, the pod fails at Alembic and the fix is a deliberate `superuser: true` with
+  its own note — not a silent widening. That reasoning still stands for versions after v0.12.3:
+  the default vector store is what makes the role sufficient, and a default that changes reopens it.
 - Inference is not wired: no llama.cpp endpoint is configured. It is reachable from the LAN; that has
   not been proven from inside a pod, so nobody should promise it works until something answers.
 - The `local-path-retain` PVC has never been restored on this cluster.
