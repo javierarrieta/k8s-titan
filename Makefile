@@ -13,12 +13,12 @@ KUSTOMIZE_DIRS := $(shell find apply -name kustomization.yaml 2>/dev/null | sed 
 # not be able to slip between the encryption rule and the validation glob.
 SECRET_FIND := find apply/10-secrets \( -name '*.yaml' -o -name '*.yml' \) ! -name kustomization.yaml
 
-.PHONY: check check-ci kustomize-check kustomize-listing dry-run py-deps validate update-keys scan leak-check secrets-placement secrets-list secrets-present release-secrets db-url-check oidc-check crd-check tesla-forwarder-test update-cnpg-crds update-crds
+.PHONY: check check-ci kustomize-check kustomize-listing dry-run py-deps validate update-keys scan leak-check secrets-placement secrets-list secrets-present release-secrets db-url-check oidc-check grafana-oidc-check open-webui-oidc-check crd-check tesla-forwarder-test update-cnpg-crds update-crds
 
 # leak-check runs FIRST: make has no -k, so it stops at the first failing prerequisite.
 # validate needs the age key, so an operator who forgot SOPS_AGE_KEY_FILE would never
 # reach a leak gate placed behind it.
-check: py-deps leak-check kustomize-check kustomize-listing validate secrets-placement release-secrets db-url-check oidc-check grafana-oidc-check crd-check tesla-forwarder-test
+check: py-deps leak-check kustomize-check kustomize-listing validate secrets-placement release-secrets db-url-check oidc-check grafana-oidc-check open-webui-oidc-check crd-check tesla-forwarder-test
 	@echo "check: all offline gates passed"
 
 # The subset provable from the tree alone - no age key, no cluster, no network.
@@ -509,3 +509,12 @@ oidc-check:
 # repo renamed that host once. Reads Secrets, so a local gate, not a CI one.
 grafana-oidc-check:
 	@python3 tools/grafana-oidc-check.py apply
+
+# open-webui-oidc-check: the same class again, with two traps the coder and Grafana gates cannot
+# express. open-webui's client lives in the reviewed template, the rendered blueprint, and the app's
+# own Secret, and the HelmRelease must mount it — mounting is not applying, and docs/authentik-runbook.md
+# §5 is what that costs. It also rejects the two app defaults that turn a working login into a silent
+# 403: OAUTH_ROLES_CLAIM not being `groups`, and OAUTH_ALLOWED_ROLES left at `user,admin`, which matches
+# no authentik group name. Reads Secrets, so a local gate, not a CI one.
+open-webui-oidc-check:
+	@python3 tools/open-webui-oidc-check.py --root apply

@@ -69,3 +69,13 @@ resources:
   # It is a Secret so that when an auth header or tenant ID is ever added it lands here
   # rather than forcing the endpoint out of 20-infra. See docs/titan-logs-loki.md.
   - promtail-secrets.yaml
+  # open-webui. Three files, four values, all minted by scripts/setup-open-webui-secrets.sh in one
+  # process so the duplicated halves cannot be authored apart: the DB password appears in CNPG's
+  # basic-auth Secret (namespace databases) and inside open-webui's DATABASE_URL (namespace
+  # open-webui), and the OIDC client appears in authentik's blueprint (namespace auth) and in
+  # open-webui's own env. make db-url-check and make open-webui-oidc-check are what prove the pairs
+  # agree; an unlisted file here would build green and be silently never applied, which is the lie
+  # `make secrets-placement` exists to catch.
+  - authentik-open-webui-blueprint.yaml
+  - open-webui-db-credentials.yaml
+  - open-webui-secrets.yaml

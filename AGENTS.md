@@ -14,8 +14,9 @@ made and what was deliberately left out.
                             in namespace `databases`
     apply/40-certificates/  the titan.arrieta.eu wildcard, in namespace `certificates`
     apply/50-apps/          authentik with its declarative `Database`/`DatabaseRole` in
-                            namespace `auth`, coder with its own, and any future app that
-                            passes the admission test below
+                            namespace `auth`, coder with its own, open-webui with its own in
+                            namespace `open-webui`, and any future app that passes the admission
+                            test below
     apply/60-tesla/         TeslaMate with its own `Database`/`DatabaseRole`, Grafana and the
                             Tesla Fleet Telemetry intake, in namespace `apps`
 
@@ -173,6 +174,14 @@ whether the HelmRelease actually mounts that blueprint all have to agree, becaus
 blueprint is indistinguishable from one never written. Both read sops-encrypted values, so both are
 in `check` and not `check-ci` — the same rule that keeps `validate` out. `db-url-check` is
 reference-driven, so a tree with no references reports zero instead of passing vacuously.
+
+`open-webui-oidc-check` is the same shape one app further on, with one extra failure mode: open-webui's
+role mapping reads a `groups` claim, and with role management enabled a missing or unmatched claim is a
+403 rather than a fallback role — so a dropped `profile` scope or `OAUTH_ALLOWED_ROLES` left at its
+default locks every non-admin out of a login page that still looks healthy. `db-url-check` is
+reference-driven across both `HelmRelease` and `Deployment` env — including a `DATABASE_URL` that
+arrives through `envFrom` rather than a named `secretKeyRef` — so a tree with no references reports
+zero instead of passing vacuously.
 
 `make kustomize-listing` is in both, and it is not stylistic: `apply/50-apps/coder/coder-db.yaml` was
 committed, built green, reviewed green, and named by no kustomization, so Flux would never have

@@ -1,0 +1,41 @@
+# open-webui's database and role, authored beside the app that owns them and living in `databases`,
+# because a CNPG Database must share a namespace with its Cluster. Read auth/authentik-db.yaml and
+# coder/coder-db.yaml first; everything they record about DatabaseRole applies here verbatim.
+#
+# THE NAMING, BECAUSE IT WILL BE ASKED
+# Kubernetes object names carry the hyphen (`open-webui`) like every other object in this repo. The
+# Postgres identifiers inside them are `open_webui` with an underscore: a hyphenated identifier is a
+# QUOTED identifier in Postgres, so every place that interpolates it — psql, pg_dump, a WHERE clause
+# in a restore drill — becomes a quoting bug waiting to be found during an incident.
+apiVersion: postgresql.cnpg.io/v1
+kind: Database
+metadata:
+  name: open-webui
+  namespace: databases
+spec:
+  name: open_webui
+  owner: open_webui
+  cluster:
+    name: postgres
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: DatabaseRole
+metadata:
+  name: open-webui
+  namespace: databases
+spec:
+  name: open_webui
+  cluster:
+    name: postgres
+  # Required and silent when missing: CNPG creates the role NOLOGIN by default, so without this the
+  # Database reports Ready and every connection fails with a message pointing somewhere else.
+  # Observed live with the authentik role before it was understood.
+  login: true
+  # NOT superuser, unlike teslamate-db-credentials. TeslaMate needs elevation for `earthdistance`
+  # and its file lists the migrations that force it. open-webui's default vector store is chroma on
+  # the filesystem (config.py:509,512 at v0.12.3), not pgvector, so nothing here should need an
+  # extension. That is an argument from absence, so the first startup is the proof: if a migration
+  # needs more, the pod fails loudly at Alembic and the fix is a deliberate `superuser: true` with
+  # its own note — not a silent widening. Spec §5.1 and §9.
+  passwordSecret:
+    name: open-webui-db-credentials
