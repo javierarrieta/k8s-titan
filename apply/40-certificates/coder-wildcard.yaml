@@ -1,12 +1,34 @@
-# A second wildcard, deliberately not a third dnsName on titan-wildcard (spec C4). Adding it
-# there would mean editing the reflector allow-list that AGENTS.md treats as the controlled
-# mechanism, and every coder renewal would reissue the whole cluster wildcard.
+# A leaf for coder's own hostname, kept as a separate Certificate rather than folded into
+# titan-wildcard (spec C4, and C4 still holds for the leaf). Folding it in would mean editing the
+# reflector allow-list that AGENTS.md treats as the controlled mechanism, and every coder renewal
+# would reissue the whole cluster wildcard.
 #
-# DNS needs nothing: ../public-dns-tf declares `*.titan` as an A record, and OVH's wildcard
-# answers at any depth, so `x.coder.titan.arrieta.eu` already resolves - re-checked live before
-# this file was written, and it answered. What DNS gives us and X.509 does not is label depth: a
-# certificate wildcard matches exactly one label, which is why the existing `*.titan.arrieta.eu`
-# cannot serve workspace hosts and a second certificate has to exist.
+# IT IS NO LONGER A WILDCARD, AND THE NAME STILL SAYS ONE. `metadata.name` stayed `coder-wildcard`
+# on purpose: renaming a Certificate is a new object, which triggers a fresh issuance and a fresh
+# reflection into `coder` for a cosmetic gain, and every consumer references the Secret by
+# `coder-tls`, not by this name. Rename it in a change that is already reissuing the cert.
+#
+# WHY THE WILDCARD SAN WAS DROPPED (2026-10-20). `*.coder.titan.arrieta.eu` covered no hostname
+# that anything serves: no `coder_app` with `host = "*"` exists in this repo or in
+# ../coder-templates, so the SAN bought a wildcard issuance at every renewal in exchange for
+# names nobody uses. The X.509 rule that made it necessary is unchanged and still worth knowing:
+# a certificate wildcard matches exactly one label (RFC 6125 6.4.3), so `*.titan.arrieta.eu` will
+# never serve `x.coder.titan.arrieta.eu`, while the DNS wildcard does answer at any depth. That
+# asymmetry is why a second Certificate existed at all, and it is the thing to re-read if C5's
+# per-workspace hostnames are ever wanted again - the SAN comes back then, not before.
+#
+# The DNS records in ../public-dns-tf (`coder.titan` and `*.coder.titan`) stay regardless of what
+# this file asks a CA to sign. They are not here for certificates: stale `_acme-challenge.coder.titan`
+# TXT nodes create a `coder.titan` node that shadows `*.titan`, so without the explicit A the name
+# answers NODATA. See the comment on those records.
+#
+# C5 IS GONE IN FULL, NOT IN HALF. The Ingress wildcard rule and `CODER_WILDCARD_ACCESS_URL` were
+# removed in the same change as this SAN, on purpose: the three halves (SAN, host rule, env var)
+# fail differently when only some are present, and the interesting failure is a leaf hostname that
+# DNS resolves, Traefik routes, and then cannot serve a certificate for. With all three absent the
+# failure moves to where it belongs - a `coder_app` with `host = "*"` fails at plan time, loudly,
+# because coder has no wildcard access URL to expand it into. That is a coder runtime change (a Helm
+# upgrade and a restart), which is what made it worth stating rather than assuming.
 #
 # The allow-list is `coder` alone. coder's Ingress lives in `coder` and nothing else consumes this
 # Secret, so the narrowest possible list is also the correct one - widening it later is an edit to
@@ -24,7 +46,6 @@ spec:
   commonName: coder.titan.arrieta.eu
   dnsNames:
     - coder.titan.arrieta.eu
-    - "*.coder.titan.arrieta.eu"
   secretTemplate:
     annotations:
       reflector.v1.k8s.emberstack.com/reflection-allowed: "true"
