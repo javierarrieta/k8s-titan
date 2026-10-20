@@ -129,6 +129,13 @@ file to keep; it does not.
 **Guardrail.** §5 rewritten. Pairing is per vehicle and can be done at any time later; the optional
 `?vin=` parameter pins which car. Revocation is on the car's Locks screen, not in the app.
 
+**And pairing can only be done by the vehicle's owner.** Discovered later the same day on the second
+car: a shared account that can see the vehicle and whose token lists the VIN is refused with *"only
+the vehicle owner can grant"*. The owner's account must also have authorized the application first
+(Tesla's step 1). §5b is the procedure, including why the owner's authorization should be approved
+but **not exchanged** — TeslaMate holds exactly one token pair and a second one is a credential with
+no purpose here.
+
 ### 8. `socket_disconnected` counts bytes, not records
 
 **Symptom.** `{"V":"650","errors":"84","total":"734"}` looked like 650 vehicle records, while the
