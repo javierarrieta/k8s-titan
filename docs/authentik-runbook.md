@@ -546,6 +546,44 @@ kubectl -n auth exec deploy/authentik-worker -- ak apply_blueprint \
   /blueprints/mounted/secret-authentik-coder-blueprint/coder.yaml
 ```
 
+**Every `exec` in this section needs an admin context.** The read-only `k8s-reader` identity is
+`Forbidden` on `pods/exec`, `pods/portforward` and `get secret` — measured with
+`kubectl auth can-i`, not inferred — so it cannot read a mounted blueprint, cannot run
+`ak apply_blueprint`, and cannot reach authentik's blueprint status at all. It can read pod logs, and
+that is where the diagnosis starts, not where it ends.
+
+### A brand-new blueprint can be missed by the very pass that should have caught it
+
+The lag above is at least visible in the logs. This one is not, and it cost an hour of live breakage
+on 2026-10-20 when `authentik-grafana-blueprint` was added.
+
+What happened: Flux applied the Secret, Stakater Reloader restarted the worker for it, and the
+worker's startup `blueprints_discovery` ran ten seconds after the container started and **did not
+create the instance**. The file was demonstrably on disk — `wc -c` inside the worker showed
+`grafana.yaml` at 5637 bytes, same kubelet `..data` symlink layout as the accepted `tesla.yaml` —
+the pod spec carried the volume, and `apply_blueprint` finished with `exc: null`. Nothing anywhere
+reported a failure. The blueprint list simply had no `titan-grafana` in it.
+
+A second worker restart picked it up immediately. What is *proven* is the sequence: mounted file,
+discovery pass that skipped it, restart that ingested it. What is *inferred* is the mechanism — a race
+between the startup pass and kubelet finishing the secret volume's atomic swap. The ten-second gap
+fits and nothing else found so far explains it, but it was not caught in the act.
+
+So, when a blueprint you just added is absent rather than failed:
+
+1. `exec` in and check the file is really there and non-empty — `wc -c /blueprints/mounted/*/*.yaml`
+   compares all of them at once, which also shows whether the Secret-mounted ones are laid out the way
+   the ConfigMap one is.
+2. Present and non-empty → apply it directly with `ak apply_blueprint` above rather than gambling on
+   the next hourly pass. **Read the redaction note below first**; a validation failure prints the
+   client secret.
+3. Absent or zero bytes → the problem is the Secret or the mount, not the blueprint.
+
+The asymmetry that makes this worth writing down: a blueprint that *fails* validation leaves a
+BlueprintInstance with an error in the UI, and a blueprint that was *never seen* leaves nothing at all.
+"It is not in the list" is therefore a different diagnosis from "it is in the list and red", and the
+existing `grep -i "changed file"` check does not distinguish them — both produce no such line.
+
 ### How to tell the provider actually exists — mind the trailing slash
 
 ```fish
@@ -563,6 +601,31 @@ here: coder was already `1/1 Running` and serving traffic while the slashed URL 
 did not exist. A probe that reports a working thing as missing is worse than no probe, because it
 redirects attention to the wrong component — and coder *refuses to start* until OIDC discovery
 succeeds, so "coder is Running" was itself the answer, available without any endpoint at all.
+
+### A second probe, for when the client itself is the question
+
+The discovery document answers "is the provider live" but not "does authentik recognise this client".
+Those differ when the provider exists but the client id Grafana or coder holds is not the one authentik
+stored — a half-applied rotation, or two copies of a credential that drifted. Ask authentik directly,
+with the client id from the consumer's Secret:
+
+```fish
+curl -s -o /dev/null -w '%{http_code}\n' \
+  "https://auth.titan.arrieta.eu/application/o/authorize/?client_id=<id>&response_type=code&redirect_uri=<registered%20uri>&scope=openid"
+```
+
+The page text discriminates, and it is worth reading the body rather than the status code — both
+outcomes can return `400`:
+
+| body text | meaning |
+|---|---|
+| `Client ID Error — the client identifier (client_id) is missing or invalid` | authentik has no such client. The blueprint has not landed, or the id is wrong. |
+| `Redirect URI Error` | the client **is** known; it got past client validation and rejected the redirect. Different bug. |
+| `302` into a flow | fully accepted. |
+
+Run it against a known-good client too (coder's) as a control. Without that baseline the probe looks
+like it returns nothing useful, because a well-formed request for a *known* client and a malformed one
+both redirect or both 400 depending on what you omit.
 
 ### Redact before pasting any of it
 
