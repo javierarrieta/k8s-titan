@@ -42,3 +42,7 @@ resources:
   # Quota, limit range and the provisioner Role, all in coder-workspaces. The quota is the only
   # thing standing between a third workspace and the Postgres every other app here depends on.
   - coder/workspaces.yaml
+  # open-webui's Database and DatabaseRole, in `databases` for the same reason as the two above.
+  # Listed before the Deployment that connects as this role, which is intent rather than mechanism:
+  # Flux sorts by kind and applies concurrently, and the pod retries until the role exists.
+  - open-webui/open-webui-db.yaml
