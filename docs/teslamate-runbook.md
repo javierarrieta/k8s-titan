@@ -23,7 +23,7 @@ vehicle ──TLS, SNI passthrough :443──> fleet-telemetry :8443     telemet
                                   └──wss /streaming/──> TeslaMate            tesla.titan.arrieta.eu
 TeslaMate ──Fleet API (eu) + tuned polling──────────────────────────────> Tesla
           └─> CNPG Database/DatabaseRole `teslamate`  (migrated data)
-Grafana ──────────────────────────────────────────────────────────> grafana.titan.arrieta.eu
+Grafana ──────────────────────────────────────────────────────────> tesla-boards.titan.arrieta.eu
 tesla.titan.arrieta.eu/.well-known/appspecific/ ──> nginx (the app's public key; Tesla fetches it forever)
 ```
 
@@ -33,7 +33,7 @@ Everything is in namespace `apps` except the database, which is in `databases`. 
 | component | image | port | exposed as |
 |---|---|---|---|
 | `teslamate` | `teslamate/teslamate:4.3.0` | 4000 | `tesla.titan.arrieta.eu` |
-| `tesla-grafana` | `teslamate/grafana:4.3.0` | 3000 | `grafana.titan.arrieta.eu` |
+| `tesla-grafana` | `teslamate/grafana:4.3.0` | 3000 | `tesla-boards.titan.arrieta.eu` |
 | `tesla-fleet-telemetry` | `tesla/fleet-telemetry:v0.9.5` | 8443 telemetry, 8080 status | `telemetry.titan.arrieta.eu` (TLS passthrough) |
 | `tesla-redis` | `library/redis:8.8.3-alpine` | 6379 | cluster-internal |
 | `tesla-forwarder` | `library/node:22-alpine` + ConfigMap script | 8080 | cluster-internal |
@@ -602,6 +602,27 @@ providers is `ProxyProvider.objects.filter(application__isnull=False)`
 (`authentik/providers/proxy/api.py:184-188`), and the embedded outpost **suppresses its own empty-provider
 warning** (`src/outpost/proxy/mod.rs:129`), so the failure is silent in both processes. This cost hours;
 the fix is the `authentik_core.application` entry in `apply/50-apps/auth/tesla-outpost-blueprint.yaml`.
+
+### Grafana hostname and the missing auth
+
+Renamed to `tesla-boards.titan.arrieta.eu` on 2026-10-19 (a second Grafana is planned and `grafana.`
+would be ambiguous). Three places move together — `GF_SERVER_ROOT_URL`, the Ingress `host`, the `tls`
+`hosts` entry — plus **an A record in `public-dns-tf` in the same change**, for the wildcard-shadowing
+reason in §6.
+
+Two things that were true at the time of the rename and are worth knowing before you touch this host:
+
+- **Grafana is not behind authentik.** The `tesla-grafana` Ingress carries no
+  `router.middlewares` annotation, while `teslamate` carries `apps-teslamate-auth@kubernetescrd`. The
+  outpost spec's table says this host is gated; the manifest never did it. Verify with
+  `kubectl -n apps get ingress tesla-grafana -o jsonpath='{.metadata.annotations}'` — an empty result
+  means unauthenticated. Adding the middleware is a behaviour change with lock-out risk (including
+  TeslaMate's embedded dashboard frame) and should be its own change.
+- **Stale absolute links live in stored state, not in git.** `grafana.v.arrieta.eu` appears nowhere in
+  this repository and nowhere in TeslaMate 4.3.0's source, and TeslaMate has no `GRAFANA_URL` in the
+  Deployment or in `teslamate-secrets`. Any link still pointing at an old hostname is in Grafana's
+  sqlite on the PVC (dashboard or panel links) or in the TeslaMate database — editing manifests will
+  not move it.
 
 ## 10. Not yet proven, and what would prove it
 

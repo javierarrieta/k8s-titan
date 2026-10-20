@@ -65,8 +65,19 @@ spec:
         - secretRef:
             name: tesla-grafana-admin
         env:
+        # GF_SERVER_ROOT_URL is what Grafana puts in the links it generates itself, so it has to be the
+        # hostname users actually reach — not the Service name, and not the old cluster's host.
+        #
+        # Renamed 2026-10-19 from grafana.titan.arrieta.eu to tesla-boards.titan.arrieta.eu, because a
+        # second Grafana is coming and `grafana.` would otherwise be ambiguous. Three places move
+        # together: this value, the Ingress host, and the tls hosts list below.
+        #
+        # THE PART THAT IS NOT IN THIS REPO: tesla-boards needs an A record in public-dns-tf in the SAME
+        # change. The DNS-01 challenge node shadows the *.titan wildcard and silently takes a host out of
+        # DNS while the Certificate still reports Ready — runbook §6. A wildcard certificate that cannot
+        # be renewed because the challenge host vanished is a worse failure than a rename that 404s.
         - name: GF_SERVER_ROOT_URL
-          value: https://grafana.titan.arrieta.eu/
+          value: https://tesla-boards.titan.arrieta.eu/
         - name: GF_SERVER_SERVE_FROM_SUB_PATH
           value: "false"
         - name: TZ
@@ -120,10 +131,19 @@ kind: Ingress
 metadata:
   name: tesla-grafana
   namespace: apps
+  # NOT forward-authenticated, unlike the teslamate Ingress, which carries
+  # apps-teslamate-auth@kubernetescrd. The authentik outpost spec lists this host as gated; the
+  # manifest never added the middleware, so Grafana is reachable by anyone who knows the hostname and
+  # is protected only by Grafana's own login. Left as-is deliberately here — adding auth is a behaviour
+  # change with lock-out risk (including TeslaMate's embedded frame) and belongs in its own change,
+  # not folded into a rename. Tracked in docs/teslamate-runbook.md §9.
+  #
+  # The authentik proxy provider is forward_domain over titan.arrieta.eu, so when auth is added the
+  # new hostname needs no provider change — one cookie already covers every host under the domain.
 spec:
   ingressClassName: traefik
   rules:
-  - host: grafana.titan.arrieta.eu
+  - host: tesla-boards.titan.arrieta.eu
     http:
       paths:
       - path: /
@@ -135,5 +155,5 @@ spec:
               number: 80
   tls:
   - hosts:
-    - grafana.titan.arrieta.eu
+    - tesla-boards.titan.arrieta.eu
     secretName: titan-tls
