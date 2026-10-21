@@ -18,6 +18,8 @@ kind: Kustomization
 # concurrently, so file order decides nothing; the real safety is Kubernetes retrying a pod
 # whose Database or Secret has not landed yet. Cross-unit ordering is `dependsOn`.
 resources:
+  # CNPG role + exporter, exposed only through the WireGuard-filtered NodePort.
+  - postgres-exporter.yaml
   # After the Cluster it depends on, which now lives in the `databases` unit: a CNPG Database
   # cannot resolve its clusterRef until the Cluster exists. The Database may report Reconciling
   # for a moment before the role lands — that is CNPG retrying, and it must converge. Still not

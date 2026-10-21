@@ -7,7 +7,7 @@
 #
 #   1. 9628 filters every query on a `release` label. No `release` label exists
 #      on these metrics in this setup, so every one of its panels would have
-#      rendered empty. These queries filter on service="postgres-exporter".
+#      rendered empty. These queries filter on the selected exporter instance.
 #
 #   2. 9628 uses `singlestat` and `graph` panels. Both were removed in modern
 #      Grafana, so the JSON would not have loaded. Rebuilt with `stat`,
@@ -21,12 +21,10 @@
 #      does not collect postmaster start time). Both omitted rather than
 #      substituted with something that measures a different thing.
 #
-# WHY THE service= FILTER IS NOT OPTIONAL. A second exporter,
-# vectorchord-exporter, is scraped under the same job="postgres-exporter" label
-# and shares four database names with the real instance -- immich, postgres,
-# template0 and template1 all exist on both. Filtering on job alone would
-# silently merge the two servers and double-count those four databases. This is
-# verified, not assumed: both are live and up.
+# Both postgres-18 and vectorchord-exporter belong on this board: each exposes
+# PostgreSQL database metrics and a pg_up series. Select by the `instance` label,
+# which distinguishes the servers even though their `service` labels differ.
+# Every expression, including reductions, is scoped to the selected instance.
 #
 # PG17+ NOTE. Dashboard 9628 queries pg_stat_bgwriter_buffers_backend_total,
 # pg_stat_bgwriter_buffers_backend_fsync_total, pg_stat_bgwriter_buffers_
@@ -52,7 +50,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: grafana-postgres-dashboard
-  namespace: observability
+  namespace: casa
   labels:
     app: grafana
     grafana_dashboard: "true"
@@ -101,7 +99,7 @@ data:
             "30d"
           ]
         },
-        "description": "PostgreSQL overview for the casa cluster, built on the metrics the percona/community postgres_exporter actually emits here. Structured after upstream dashboard 9628, but adapted rather than copied.\n\nThree deliberate departures from 9628:\n1. 9628 filters on a `release` label. No `release` label exists in this setup, so every one of its queries would return nothing. These queries filter on `service=\"postgres-exporter\"` instead.\n2. 9628 uses `singlestat` and `graph` panels, both removed in modern Grafana. Rebuilt with `stat`, `timeseries` and `table`.\n3. 9628's CPU, memory and file-descriptor panels use `process_*` metrics scraped from the exporter, which measures the exporter, not the database. Omitted rather than left to mislead. Its Start Time panel depends on pg_postmaster_start_time_seconds, which this exporter does not emit, so it is omitted too.\n\nThe service filter is not optional: a second exporter (vectorchord-exporter) shares the job=\"postgres-exporter\" label and four of its database names, so a job-only filter silently merges two databases and double-counts them.",
+        "description": "PostgreSQL overview for the casa cluster, built on the metrics the percona/community postgres_exporter actually emits here. Structured after upstream dashboard 9628, but adapted rather than copied.\n\nThree deliberate departures from 9628:\n1. 9628 filters on a `release` label. No `release` label exists in this setup, so every one of its queries would return nothing. These queries filter on `instance=~\"$instance\"` instead.\n2. 9628 uses `singlestat` and `graph` panels, both removed in modern Grafana. Rebuilt with `stat`, `timeseries` and `table`.\n3. 9628's CPU, memory and file-descriptor panels use `process_*` metrics scraped from the exporter, which measures the exporter, not the database. Omitted rather than left to mislead. Its Start Time panel depends on pg_postmaster_start_time_seconds, which this exporter does not emit, so it is omitted too.\n\nChoose an exporter instance above; every panel is scoped to that instance so their data is never combined.",
         "templating": {
           "list": [
             {
@@ -122,6 +120,27 @@ data:
               "useTags": false
             },
             {
+              "name": "instance",
+              "type": "query",
+              "label": "Instance",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "$datasource"
+              },
+              "query": "label_values(pg_up, instance)",
+              "current": {
+                "text": "postgres-18",
+                "value": "postgres-18"
+              },
+              "hide": 0,
+              "includeTime": false,
+              "multi": false,
+              "refresh": 1,
+              "regex": "",
+              "skipUrlSync": false,
+              "sort": 1
+            },
+            {
               "name": "datname",
               "type": "query",
               "label": "Database",
@@ -129,7 +148,7 @@ data:
                 "type": "prometheus",
                 "uid": "$datasource"
               },
-              "query": "label_values(pg_database_size_bytes{service=\"postgres-exporter\"}, datname)",
+              "query": "label_values(pg_database_size_bytes{instance=~\"$instance\"}, datname)",
               "current": {
                 "text": "All",
                 "value": "$__all"
@@ -190,7 +209,7 @@ data:
             },
             "targets": [
               {
-                "expr": "max(pg_up{service=\"postgres-exporter\"})",
+                "expr": "max(pg_up{instance=~\"$instance\"})",
                 "format": "time_series",
                 "refId": "A",
                 "instant": true
@@ -251,7 +270,7 @@ data:
             },
             "targets": [
               {
-                "expr": "pg_static{service=\"postgres-exporter\"}",
+                "expr": "pg_static{instance=~\"$instance\"}",
                 "format": "time_series",
                 "refId": "A",
                 "legendFormat": "{{short_version}}",
@@ -309,7 +328,7 @@ data:
             },
             "targets": [
               {
-                "expr": "sum(pg_database_size_bytes{service=\"postgres-exporter\"})",
+                "expr": "sum(pg_database_size_bytes{instance=~\"$instance\"})",
                 "format": "time_series",
                 "refId": "A",
                 "instant": true
@@ -366,7 +385,7 @@ data:
             },
             "targets": [
               {
-                "expr": "count(pg_database_size_bytes{service=\"postgres-exporter\"})",
+                "expr": "count(pg_database_size_bytes{instance=~\"$instance\"})",
                 "format": "time_series",
                 "refId": "A",
                 "instant": true
@@ -423,7 +442,7 @@ data:
             },
             "targets": [
               {
-                "expr": "sum(pg_stat_database_numbackends{service=\"postgres-exporter\",datname=~\"$datname\"})",
+                "expr": "sum(pg_stat_database_numbackends{instance=~\"$instance\",datname=~\"$datname\"})",
                 "format": "time_series",
                 "refId": "A",
                 "instant": true
@@ -488,7 +507,7 @@ data:
             },
             "targets": [
               {
-                "expr": "100 * sum(pg_stat_database_numbackends{service=\"postgres-exporter\",datname=~\"$datname\"}) / max(pg_settings_max_connections{service=\"postgres-exporter\"})",
+                "expr": "100 * sum(pg_stat_database_numbackends{instance=~\"$instance\",datname=~\"$datname\"}) / max(pg_settings_max_connections{instance=~\"$instance\"})",
                 "format": "time_series",
                 "refId": "A",
                 "instant": true
@@ -556,7 +575,7 @@ data:
             },
             "targets": [
               {
-                "expr": "sum(pg_long_running_transactions{service=\"postgres-exporter\"})",
+                "expr": "sum(pg_long_running_transactions{instance=~\"$instance\"})",
                 "format": "time_series",
                 "refId": "A",
                 "instant": true
@@ -617,7 +636,7 @@ data:
             },
             "targets": [
               {
-                "expr": "sum(pg_stat_database_deadlocks{service=\"postgres-exporter\",datname=~\"$datname\"})",
+                "expr": "sum(pg_stat_database_deadlocks{instance=~\"$instance\",datname=~\"$datname\"})",
                 "format": "time_series",
                 "refId": "A",
                 "instant": true
@@ -674,7 +693,7 @@ data:
             },
             "targets": [
               {
-                "expr": "100 * sum(rate(pg_stat_database_blks_hit{service=\"postgres-exporter\",datname=~\"$datname\"}[5m])) / (sum(rate(pg_stat_database_blks_hit{service=\"postgres-exporter\",datname=~\"$datname\"}[5m])) + sum(rate(pg_stat_database_blks_read{service=\"postgres-exporter\",datname=~\"$datname\"}[5m])))",
+                "expr": "100 * sum(rate(pg_stat_database_blks_hit{instance=~\"$instance\",datname=~\"$datname\"}[5m])) / (sum(rate(pg_stat_database_blks_hit{instance=~\"$instance\",datname=~\"$datname\"}[5m])) + sum(rate(pg_stat_database_blks_read{instance=~\"$instance\",datname=~\"$datname\"}[5m])))",
                 "format": "time_series",
                 "refId": "A",
                 "instant": true
@@ -742,7 +761,7 @@ data:
             },
             "targets": [
               {
-                "expr": "min(pg_scrape_collector_success{service=\"postgres-exporter\"})",
+                "expr": "min(pg_scrape_collector_success{instance=~\"$instance\"})",
                 "format": "time_series",
                 "refId": "A",
                 "instant": true
@@ -819,7 +838,7 @@ data:
             },
             "targets": [
               {
-                "expr": "sum(pg_locks_count{service=\"postgres-exporter\",datname=~\"$datname\"})",
+                "expr": "sum(pg_locks_count{instance=~\"$instance\",datname=~\"$datname\"})",
                 "format": "time_series",
                 "refId": "A",
                 "instant": true
@@ -888,7 +907,7 @@ data:
             },
             "targets": [
               {
-                "expr": "sum by (state) (pg_stat_activity_count{service=\"postgres-exporter\",datname=~\"$datname\",state!~'disabled'})",
+                "expr": "sum by (state) (pg_stat_activity_count{instance=~\"$instance\",datname=~\"$datname\",state!~'disabled'})",
                 "format": "time_series",
                 "refId": "A",
                 "legendFormat": "{{state}}"
@@ -963,7 +982,7 @@ data:
             },
             "targets": [
               {
-                "expr": "sum by (datname) (pg_stat_database_numbackends{service=\"postgres-exporter\",datname=~\"$datname\"})",
+                "expr": "sum by (datname) (pg_stat_database_numbackends{instance=~\"$instance\",datname=~\"$datname\"})",
                 "format": "time_series",
                 "refId": "A",
                 "legendFormat": "{{datname}}"
@@ -1038,13 +1057,13 @@ data:
             },
             "targets": [
               {
-                "expr": "sum(pg_stat_database_numbackends{service=\"postgres-exporter\",datname=~\"$datname\"})",
+                "expr": "sum(pg_stat_database_numbackends{instance=~\"$instance\",datname=~\"$datname\"})",
                 "format": "time_series",
                 "refId": "A",
                 "legendFormat": "in use"
               },
               {
-                "expr": "max(pg_settings_max_connections{service=\"postgres-exporter\"})",
+                "expr": "max(pg_settings_max_connections{instance=~\"$instance\"})",
                 "format": "time_series",
                 "refId": "A",
                 "legendFormat": "max_connections"
@@ -1119,7 +1138,7 @@ data:
             },
             "targets": [
               {
-                "expr": "time() - max(pg_long_running_transactions_oldest_timestamp_seconds{service=\"postgres-exporter\"})",
+                "expr": "time() - max(pg_long_running_transactions_oldest_timestamp_seconds{instance=~\"$instance\"})",
                 "format": "time_series",
                 "refId": "A",
                 "legendFormat": "oldest transaction"
@@ -1207,13 +1226,13 @@ data:
             },
             "targets": [
               {
-                "expr": "sum by (datname) (rate(pg_stat_database_xact_commit{service=\"postgres-exporter\",datname=~\"$datname\"}[5m]))",
+                "expr": "sum by (datname) (rate(pg_stat_database_xact_commit{instance=~\"$instance\",datname=~\"$datname\"}[5m]))",
                 "format": "time_series",
                 "refId": "A",
                 "legendFormat": "{{datname}} commit"
               },
               {
-                "expr": "sum by (datname) (rate(pg_stat_database_xact_rollback{service=\"postgres-exporter\",datname=~\"$datname\"}[5m]))",
+                "expr": "sum by (datname) (rate(pg_stat_database_xact_rollback{instance=~\"$instance\",datname=~\"$datname\"}[5m]))",
                 "format": "time_series",
                 "refId": "B",
                 "legendFormat": "{{datname}} rollback"
@@ -1288,19 +1307,19 @@ data:
             },
             "targets": [
               {
-                "expr": "sum by (datname) (rate(pg_stat_database_tup_inserted{service=\"postgres-exporter\",datname=~\"$datname\"}[5m]))",
+                "expr": "sum by (datname) (rate(pg_stat_database_tup_inserted{instance=~\"$instance\",datname=~\"$datname\"}[5m]))",
                 "format": "time_series",
                 "refId": "A",
                 "legendFormat": "{{datname}} insert"
               },
               {
-                "expr": "sum by (datname) (rate(pg_stat_database_tup_updated{service=\"postgres-exporter\",datname=~\"$datname\"}[5m]))",
+                "expr": "sum by (datname) (rate(pg_stat_database_tup_updated{instance=~\"$instance\",datname=~\"$datname\"}[5m]))",
                 "format": "time_series",
                 "refId": "B",
                 "legendFormat": "{{datname}} update"
               },
               {
-                "expr": "sum by (datname) (rate(pg_stat_database_tup_deleted{service=\"postgres-exporter\",datname=~\"$datname\"}[5m]))",
+                "expr": "sum by (datname) (rate(pg_stat_database_tup_deleted{instance=~\"$instance\",datname=~\"$datname\"}[5m]))",
                 "format": "time_series",
                 "refId": "C",
                 "legendFormat": "{{datname}} delete"
@@ -1375,13 +1394,13 @@ data:
             },
             "targets": [
               {
-                "expr": "sum by (datname) (rate(pg_stat_database_tup_fetched{service=\"postgres-exporter\",datname=~\"$datname\"}[5m]))",
+                "expr": "sum by (datname) (rate(pg_stat_database_tup_fetched{instance=~\"$instance\",datname=~\"$datname\"}[5m]))",
                 "format": "time_series",
                 "refId": "A",
                 "legendFormat": "{{datname}} fetched"
               },
               {
-                "expr": "sum by (datname) (rate(pg_stat_database_tup_returned{service=\"postgres-exporter\",datname=~\"$datname\"}[5m]))",
+                "expr": "sum by (datname) (rate(pg_stat_database_tup_returned{instance=~\"$instance\",datname=~\"$datname\"}[5m]))",
                 "format": "time_series",
                 "refId": "B",
                 "legendFormat": "{{datname}} returned"
@@ -1456,13 +1475,13 @@ data:
             },
             "targets": [
               {
-                "expr": "sum by (datname) (rate(pg_stat_database_deadlocks{service=\"postgres-exporter\",datname=~\"$datname\"}[5m]))",
+                "expr": "sum by (datname) (rate(pg_stat_database_deadlocks{instance=~\"$instance\",datname=~\"$datname\"}[5m]))",
                 "format": "time_series",
                 "refId": "A",
                 "legendFormat": "{{datname}} deadlocks"
               },
               {
-                "expr": "sum by (datname) (rate(pg_stat_database_conflicts{service=\"postgres-exporter\",datname=~\"$datname\"}[5m]))",
+                "expr": "sum by (datname) (rate(pg_stat_database_conflicts{instance=~\"$instance\",datname=~\"$datname\"}[5m]))",
                 "format": "time_series",
                 "refId": "B",
                 "legendFormat": "{{datname}} conflicts"
@@ -1549,13 +1568,13 @@ data:
             },
             "targets": [
               {
-                "expr": "sum by (datname) (rate(pg_stat_database_blks_read{service=\"postgres-exporter\",datname=~\"$datname\"}[5m]))",
+                "expr": "sum by (datname) (rate(pg_stat_database_blks_read{instance=~\"$instance\",datname=~\"$datname\"}[5m]))",
                 "format": "time_series",
                 "refId": "A",
                 "legendFormat": "{{datname}} read from disk"
               },
               {
-                "expr": "sum by (datname) (rate(pg_stat_database_blks_hit{service=\"postgres-exporter\",datname=~\"$datname\"}[5m]))",
+                "expr": "sum by (datname) (rate(pg_stat_database_blks_hit{instance=~\"$instance\",datname=~\"$datname\"}[5m]))",
                 "format": "time_series",
                 "refId": "B",
                 "legendFormat": "{{datname}} hit in cache"
@@ -1630,7 +1649,7 @@ data:
             },
             "targets": [
               {
-                "expr": "100 * sum by (datname) (rate(pg_stat_database_blks_hit{service=\"postgres-exporter\",datname=~\"$datname\"}[5m])) / (sum by (datname) (rate(pg_stat_database_blks_hit{service=\"postgres-exporter\",datname=~\"$datname\"}[5m])) + sum by (datname) (rate(pg_stat_database_blks_read{service=\"postgres-exporter\",datname=~\"$datname\"}[5m])))",
+                "expr": "100 * sum by (datname) (rate(pg_stat_database_blks_hit{instance=~\"$instance\",datname=~\"$datname\"}[5m])) / (sum by (datname) (rate(pg_stat_database_blks_hit{instance=~\"$instance\",datname=~\"$datname\"}[5m])) + sum by (datname) (rate(pg_stat_database_blks_read{instance=~\"$instance\",datname=~\"$datname\"}[5m])))",
                 "format": "time_series",
                 "refId": "A",
                 "legendFormat": "{{datname}}"
@@ -1708,13 +1727,13 @@ data:
             },
             "targets": [
               {
-                "expr": "sum by (datname) (rate(pg_stat_database_temp_bytes{service=\"postgres-exporter\",datname=~\"$datname\"}[5m]))",
+                "expr": "sum by (datname) (rate(pg_stat_database_temp_bytes{instance=~\"$instance\",datname=~\"$datname\"}[5m]))",
                 "format": "time_series",
                 "refId": "A",
                 "legendFormat": "{{datname}} bytes/s"
               },
               {
-                "expr": "sum by (datname) (rate(pg_stat_database_temp_files{service=\"postgres-exporter\",datname=~\"$datname\"}[5m]))",
+                "expr": "sum by (datname) (rate(pg_stat_database_temp_files{instance=~\"$instance\",datname=~\"$datname\"}[5m]))",
                 "format": "time_series",
                 "refId": "B",
                 "legendFormat": "{{datname}} files/s"
@@ -1801,13 +1820,13 @@ data:
             },
             "targets": [
               {
-                "expr": "rate(pg_stat_checkpointer_write_time_total{service=\"postgres-exporter\"}[5m])",
+                "expr": "rate(pg_stat_checkpointer_write_time_total{instance=~\"$instance\"}[5m])",
                 "format": "time_series",
                 "refId": "A",
                 "legendFormat": "write"
               },
               {
-                "expr": "rate(pg_stat_checkpointer_sync_time_total{service=\"postgres-exporter\"}[5m])",
+                "expr": "rate(pg_stat_checkpointer_sync_time_total{instance=~\"$instance\"}[5m])",
                 "format": "time_series",
                 "refId": "B",
                 "legendFormat": "sync"
@@ -1882,19 +1901,19 @@ data:
             },
             "targets": [
               {
-                "expr": "sum(rate(pg_stat_checkpointer_num_timed_total{service=\"postgres-exporter\"}[5m]))",
+                "expr": "sum(rate(pg_stat_checkpointer_num_timed_total{instance=~\"$instance\"}[5m]))",
                 "format": "time_series",
                 "refId": "A",
                 "legendFormat": "timed/s"
               },
               {
-                "expr": "sum(rate(pg_stat_checkpointer_num_requested_total{service=\"postgres-exporter\"}[5m]))",
+                "expr": "sum(rate(pg_stat_checkpointer_num_requested_total{instance=~\"$instance\"}[5m]))",
                 "format": "time_series",
                 "refId": "B",
                 "legendFormat": "requested/s"
               },
               {
-                "expr": "rate(pg_stat_checkpointer_buffers_written_total{service=\"postgres-exporter\"}[5m])",
+                "expr": "rate(pg_stat_checkpointer_buffers_written_total{instance=~\"$instance\"}[5m])",
                 "format": "time_series",
                 "refId": "C",
                 "legendFormat": "buffers written/s"
@@ -1969,7 +1988,7 @@ data:
             },
             "targets": [
               {
-                "expr": "pg_wal_size_bytes{service=\"postgres-exporter\"}",
+                "expr": "pg_wal_size_bytes{instance=~\"$instance\"}",
                 "format": "time_series",
                 "refId": "A",
                 "legendFormat": "WAL bytes"
@@ -2044,19 +2063,19 @@ data:
             },
             "targets": [
               {
-                "expr": "pg_wal_segments{service=\"postgres-exporter\"}",
+                "expr": "pg_wal_segments{instance=~\"$instance\"}",
                 "format": "time_series",
                 "refId": "A",
                 "legendFormat": "WAL segments"
               },
               {
-                "expr": "sum(rate(pg_stat_bgwriter_buffers_alloc_total{service=\"postgres-exporter\"}[5m]))",
+                "expr": "sum(rate(pg_stat_bgwriter_buffers_alloc_total{instance=~\"$instance\"}[5m]))",
                 "format": "time_series",
                 "refId": "B",
                 "legendFormat": "buffers allocated/s"
               },
               {
-                "expr": "sum(rate(pg_stat_bgwriter_buffers_clean_total{service=\"postgres-exporter\"}[5m]))",
+                "expr": "sum(rate(pg_stat_bgwriter_buffers_clean_total{instance=~\"$instance\"}[5m]))",
                 "format": "time_series",
                 "refId": "C",
                 "legendFormat": "buffers cleaned/s"
@@ -2143,7 +2162,7 @@ data:
             },
             "targets": [
               {
-                "expr": "sum by (mode) (pg_locks_count{service=\"postgres-exporter\",datname=~\"$datname\",mode!~'accesssharelock|sireadlock'})",
+                "expr": "sum by (mode) (pg_locks_count{instance=~\"$instance\",datname=~\"$datname\",mode!~'accesssharelock|sireadlock'})",
                 "format": "time_series",
                 "refId": "A",
                 "legendFormat": "{{mode}}"
@@ -2218,7 +2237,7 @@ data:
             },
             "targets": [
               {
-                "expr": "pg_locks_count{service=\"postgres-exporter\",datname=~\"$datname\",mode=~\"exclusivelock|accessexclusivelock|sharelock|shareupdateexclusivelock|sharerowexclusivelock\"}",
+                "expr": "pg_locks_count{instance=~\"$instance\",datname=~\"$datname\",mode=~\"exclusivelock|accessexclusivelock|sharelock|shareupdateexclusivelock|sharerowexclusivelock\"}",
                 "format": "time_series",
                 "refId": "A",
                 "instant": true
@@ -2332,25 +2351,25 @@ data:
             },
             "targets": [
               {
-                "expr": "pg_database_size_bytes{service=\"postgres-exporter\"}",
+                "expr": "pg_database_size_bytes{instance=~\"$instance\"}",
                 "format": "time_series",
                 "refId": "A",
                 "legendFormat": "size"
               },
               {
-                "expr": "sum by (datname) (pg_stat_database_numbackends{service=\"postgres-exporter\",datname=~\"$datname\"})",
+                "expr": "sum by (datname) (pg_stat_database_numbackends{instance=~\"$instance\",datname=~\"$datname\"})",
                 "format": "time_series",
                 "refId": "B",
                 "legendFormat": "backends"
               },
               {
-                "expr": "sum by (datname) (rate(pg_stat_database_xact_commit{service=\"postgres-exporter\",datname=~\"$datname\"}[5m]))",
+                "expr": "sum by (datname) (rate(pg_stat_database_xact_commit{instance=~\"$instance\",datname=~\"$datname\"}[5m]))",
                 "format": "time_series",
                 "refId": "C",
                 "legendFormat": "commits/s"
               },
               {
-                "expr": "sum by (datname) (rate(pg_stat_database_tup_fetched{service=\"postgres-exporter\",datname=~\"$datname\"}[5m]))",
+                "expr": "sum by (datname) (rate(pg_stat_database_tup_fetched{instance=~\"$instance\",datname=~\"$datname\"}[5m]))",
                 "format": "time_series",
                 "refId": "D",
                 "legendFormat": "rows fetched/s"
@@ -2452,7 +2471,7 @@ data:
             },
             "targets": [
               {
-                "expr": "pg_settings_max_connections{service=\"postgres-exporter\"}",
+                "expr": "pg_settings_max_connections{instance=~\"$instance\"}",
                 "format": "time_series",
                 "refId": "A",
                 "instant": true
@@ -2509,7 +2528,7 @@ data:
             },
             "targets": [
               {
-                "expr": "pg_settings_superuser_reserved_connections{service=\"postgres-exporter\"}",
+                "expr": "pg_settings_superuser_reserved_connections{instance=~\"$instance\"}",
                 "format": "time_series",
                 "refId": "A",
                 "instant": true
@@ -2566,7 +2585,7 @@ data:
             },
             "targets": [
               {
-                "expr": "pg_settings_shared_buffers_bytes{service=\"postgres-exporter\"}",
+                "expr": "pg_settings_shared_buffers_bytes{instance=~\"$instance\"}",
                 "format": "time_series",
                 "refId": "A",
                 "instant": true
@@ -2623,7 +2642,7 @@ data:
             },
             "targets": [
               {
-                "expr": "pg_settings_effective_cache_size_bytes{service=\"postgres-exporter\"}",
+                "expr": "pg_settings_effective_cache_size_bytes{instance=~\"$instance\"}",
                 "format": "time_series",
                 "refId": "A",
                 "instant": true
@@ -2680,7 +2699,7 @@ data:
             },
             "targets": [
               {
-                "expr": "pg_settings_work_mem_bytes{service=\"postgres-exporter\"}",
+                "expr": "pg_settings_work_mem_bytes{instance=~\"$instance\"}",
                 "format": "time_series",
                 "refId": "A",
                 "instant": true
@@ -2737,7 +2756,7 @@ data:
             },
             "targets": [
               {
-                "expr": "pg_settings_maintenance_work_mem_bytes{service=\"postgres-exporter\"}",
+                "expr": "pg_settings_maintenance_work_mem_bytes{instance=~\"$instance\"}",
                 "format": "time_series",
                 "refId": "A",
                 "instant": true
@@ -2794,7 +2813,7 @@ data:
             },
             "targets": [
               {
-                "expr": "pg_settings_max_wal_size_bytes{service=\"postgres-exporter\"}",
+                "expr": "pg_settings_max_wal_size_bytes{instance=~\"$instance\"}",
                 "format": "time_series",
                 "refId": "A",
                 "instant": true
@@ -2851,7 +2870,7 @@ data:
             },
             "targets": [
               {
-                "expr": "pg_settings_block_size{service=\"postgres-exporter\"}",
+                "expr": "pg_settings_block_size{instance=~\"$instance\"}",
                 "format": "time_series",
                 "refId": "A",
                 "instant": true
@@ -2908,7 +2927,7 @@ data:
             },
             "targets": [
               {
-                "expr": "pg_settings_random_page_cost{service=\"postgres-exporter\"}",
+                "expr": "pg_settings_random_page_cost{instance=~\"$instance\"}",
                 "format": "time_series",
                 "refId": "A",
                 "instant": true
@@ -2965,7 +2984,7 @@ data:
             },
             "targets": [
               {
-                "expr": "pg_settings_seq_page_cost{service=\"postgres-exporter\"}",
+                "expr": "pg_settings_seq_page_cost{instance=~\"$instance\"}",
                 "format": "time_series",
                 "refId": "A",
                 "instant": true
@@ -3022,7 +3041,7 @@ data:
             },
             "targets": [
               {
-                "expr": "pg_settings_autovacuum{service=\"postgres-exporter\"}",
+                "expr": "pg_settings_autovacuum{instance=~\"$instance\"}",
                 "format": "time_series",
                 "refId": "A",
                 "instant": true
@@ -3079,7 +3098,7 @@ data:
             },
             "targets": [
               {
-                "expr": "pg_settings_autovacuum_naptime_seconds{service=\"postgres-exporter\"}",
+                "expr": "pg_settings_autovacuum_naptime_seconds{instance=~\"$instance\"}",
                 "format": "time_series",
                 "refId": "A",
                 "instant": true
@@ -3136,7 +3155,7 @@ data:
             },
             "targets": [
               {
-                "expr": "max by (datname) (pg_database_wraparound_age_datfrozenxid_seconds{service=\"postgres-exporter\"})",
+                "expr": "max by (datname) (pg_database_wraparound_age_datfrozenxid_seconds{instance=~\"$instance\"})",
                 "format": "time_series",
                 "refId": "A",
                 "legendFormat": "{{datname}}"
@@ -3212,7 +3231,7 @@ data:
             },
             "targets": [
               {
-                "expr": "max by (datname) (pg_database_wraparound_age_datminmxid_seconds{service=\"postgres-exporter\"})",
+                "expr": "max by (datname) (pg_database_wraparound_age_datminmxid_seconds{instance=~\"$instance\"})",
                 "format": "time_series",
                 "refId": "A",
                 "legendFormat": "{{datname}}"
@@ -3288,13 +3307,13 @@ data:
             },
             "targets": [
               {
-                "expr": "sum by (datname) (pg_stat_archiver_archived_count{service=\"postgres-exporter\"})",
+                "expr": "sum by (datname) (pg_stat_archiver_archived_count{instance=~\"$instance\"})",
                 "format": "time_series",
                 "refId": "A",
                 "legendFormat": "archived"
               },
               {
-                "expr": "sum by (datname) (pg_stat_archiver_failed_count{service=\"postgres-exporter\"})",
+                "expr": "sum by (datname) (pg_stat_archiver_failed_count{instance=~\"$instance\"})",
                 "format": "time_series",
                 "refId": "B",
                 "legendFormat": "failed"
@@ -3384,13 +3403,13 @@ data:
             },
             "targets": [
               {
-                "expr": "pg_exporter_last_scrape_duration_seconds{service=\"postgres-exporter\"}",
+                "expr": "pg_exporter_last_scrape_duration_seconds{instance=~\"$instance\"}",
                 "format": "time_series",
                 "refId": "A",
                 "legendFormat": "exporter"
               },
               {
-                "expr": "sum by (collector) (pg_scrape_collector_duration_seconds{service=\"postgres-exporter\"})",
+                "expr": "sum by (collector) (pg_scrape_collector_duration_seconds{instance=~\"$instance\"})",
                 "format": "time_series",
                 "refId": "B",
                 "legendFormat": "{{collector}}"
