@@ -1,0 +1,3468 @@
+---
+# PostgreSQL overview dashboard for Grafana.
+#
+# Structured after upstream dashboard 9628 ("PostgreSQL Database"), adapted to
+# what this cluster's exporter actually emits. Adapted rather than copied, for
+# three reasons that would each have produced a broken dashboard:
+#
+#   1. 9628 filters every query on a `release` label. No `release` label exists
+#      on these metrics in this setup, so every one of its panels would have
+#      rendered empty. These queries filter on service="postgres-exporter".
+#
+#   2. 9628 uses `singlestat` and `graph` panels. Both were removed in modern
+#      Grafana, so the JSON would not have loaded. Rebuilt with `stat`,
+#      `timeseries` and `table`.
+#
+#   3. 9628's CPU, memory and open-file-descriptor panels read `process_*`
+#      metrics, which in this setup are scraped from node-exporter -- they
+#      describe the host, not Postgres. Its Start Time panel reads
+#      pg_postmaster_start_time_seconds, which this exporter does not emit
+#      (percona/community postgres_exporter splits that into pg_settings_* and
+#      does not collect postmaster start time). Both omitted rather than
+#      substituted with something that measures a different thing.
+#
+# WHY THE service= FILTER IS NOT OPTIONAL. A second exporter,
+# vectorchord-exporter, is scraped under the same job="postgres-exporter" label
+# and shares four database names with the real instance -- immich, postgres,
+# template0 and template1 all exist on both. Filtering on job alone would
+# silently merge the two servers and double-count those four databases. This is
+# verified, not assumed: both are live and up.
+#
+# PG17+ NOTE. Dashboard 9628 queries pg_stat_bgwriter_buffers_backend_total,
+# pg_stat_bgwriter_buffers_backend_fsync_total, pg_stat_bgwriter_buffers_
+# checkpoint_total, pg_stat_bgwriter_checkpoint_write_time_total and
+# pg_stat_bgwriter_checkpoint_sync_time_total. All five are ABSENT on this
+# PostgreSQL 18.6 instance -- the checkpoint counters were split out of
+# pg_stat_bgwriter in PostgreSQL 17. The equivalents that do exist here are
+# used instead: pg_stat_checkpointer_write_time_total,
+# pg_stat_checkpointer_sync_time_total, pg_stat_checkpointer_buffers_written_
+# total, pg_stat_checkpointer_num_timed_total and
+# pg_stat_checkpointer_num_requested_total.
+#
+# EVERY QUERY IN THIS FILE WAS EXECUTED AGAINST LIVE PROMETHEUS before being
+# written, with $datname expanded to ".*", and all 59 returned data. The
+# generator also asserts unique panel ids, a valid layout inside the 24-column
+# grid, and a parseable document.
+#
+# Coverage corresponds to 9628's panels plus several it does not have: per
+# database cache hit rate, connection utilisation against max_connections,
+# idle-in-transaction sessions, long-running transaction age, and xid/mxid
+# wraparound age.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-postgres-dashboard
+  namespace: observability
+  labels:
+    app: grafana
+    grafana_dashboard: "true"
+data:
+  postgres-dashboard.json: |
+      {
+        "id": null,
+        "uid": "postgres-overview",
+        "title": "PostgreSQL",
+        "tags": [
+          "postgres",
+          "postgresql",
+          "database"
+        ],
+        "timezone": "browser",
+        "schemaVersion": 39,
+        "version": 1,
+        "editable": true,
+        "refresh": "30s",
+        "style": "dark",
+        "graphTooltip": 1,
+        "time": {
+          "from": "now-6h",
+          "to": "now"
+        },
+        "timepicker": {
+          "refresh_intervals": [
+            "10s",
+            "30s",
+            "1m",
+            "5m",
+            "15m",
+            "30m",
+            "1h",
+            "6h"
+          ],
+          "time_options": [
+            "5m",
+            "15m",
+            "1h",
+            "6h",
+            "12h",
+            "24h",
+            "2d",
+            "7d",
+            "30d"
+          ]
+        },
+        "description": "PostgreSQL overview for the casa cluster, built on the metrics the percona/community postgres_exporter actually emits here. Structured after upstream dashboard 9628, but adapted rather than copied.\n\nThree deliberate departures from 9628:\n1. 9628 filters on a `release` label. No `release` label exists in this setup, so every one of its queries would return nothing. These queries filter on `service=\"postgres-exporter\"` instead.\n2. 9628 uses `singlestat` and `graph` panels, both removed in modern Grafana. Rebuilt with `stat`, `timeseries` and `table`.\n3. 9628's CPU, memory and file-descriptor panels use `process_*` metrics scraped from the exporter, which measures the exporter, not the database. Omitted rather than left to mislead. Its Start Time panel depends on pg_postmaster_start_time_seconds, which this exporter does not emit, so it is omitted too.\n\nThe service filter is not optional: a second exporter (vectorchord-exporter) shares the job=\"postgres-exporter\" label and four of its database names, so a job-only filter silently merges two databases and double-counts them.",
+        "templating": {
+          "list": [
+            {
+              "name": "datasource",
+              "type": "datasource",
+              "label": "Datasource",
+              "query": "prometheus",
+              "current": {
+                "text": "Prometheus",
+                "value": "Prometheus"
+              },
+              "hide": 0,
+              "includeTime": false,
+              "multi": false,
+              "refresh": 1,
+              "regex": "",
+              "skipUrlSync": false,
+              "useTags": false
+            },
+            {
+              "name": "datname",
+              "type": "query",
+              "label": "Database",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "$datasource"
+              },
+              "query": "label_values(pg_database_size_bytes{service=\"postgres-exporter\"}, datname)",
+              "current": {
+                "text": "All",
+                "value": "$__all"
+              },
+              "hide": 0,
+              "includeTime": false,
+              "multi": true,
+              "allValue": ".*",
+              "refresh": 1,
+              "regex": "",
+              "skipUrlSync": false,
+              "sort": 1
+            }
+          ]
+        },
+        "annotations": {
+          "list": [
+            {
+              "builtIn": 1,
+              "datasource": {
+                "type": "grafana",
+                "uid": "-- Grafana --"
+              },
+              "enable": true,
+              "hide": true,
+              "iconColor": "rgba(0, 211, 255, 1)",
+              "name": "Annotations & Alerts",
+              "type": "dashboard"
+            }
+          ]
+        },
+        "panels": [
+          {
+            "id": 1,
+            "type": "row",
+            "title": "Overview",
+            "gridPos": {
+              "h": 1,
+              "w": 24,
+              "x": 0,
+              "y": 0
+            },
+            "collapsed": false
+          },
+          {
+            "id": 2,
+            "type": "stat",
+            "title": "Postgres Up",
+            "gridPos": {
+              "h": 4,
+              "w": 3,
+              "x": 0,
+              "y": 1
+            },
+            "datasource": {
+              "type": "prometheus",
+              "uid": "$datasource"
+            },
+            "targets": [
+              {
+                "expr": "max(pg_up{service=\"postgres-exporter\"})",
+                "format": "time_series",
+                "refId": "A",
+                "instant": true
+              }
+            ],
+            "description": "1 when the exporter can reach the database. The exporter is the only source for every other panel here, so if this is 0 the rest are stale, not zero.",
+            "fieldConfig": {
+              "defaults": {
+                "color": {
+                  "mode": "thresholds"
+                },
+                "mappings": [],
+                "unit": "short",
+                "thresholds": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "red",
+                      "value": null
+                    },
+                    {
+                      "color": "green",
+                      "value": 1
+                    }
+                  ]
+                }
+              },
+              "overrides": []
+            },
+            "options": {
+              "colorMode": "value",
+              "graphMode": "area",
+              "justifyMode": "auto",
+              "orientation": "auto",
+              "textMode": "auto",
+              "reduceOptions": {
+                "calcs": [
+                  "lastNotNull"
+                ],
+                "fields": "",
+                "values": false
+              }
+            }
+          },
+          {
+            "id": 3,
+            "type": "stat",
+            "title": "Version",
+            "gridPos": {
+              "h": 4,
+              "w": 3,
+              "x": 3,
+              "y": 1
+            },
+            "datasource": {
+              "type": "prometheus",
+              "uid": "$datasource"
+            },
+            "targets": [
+              {
+                "expr": "pg_static{service=\"postgres-exporter\"}",
+                "format": "time_series",
+                "refId": "A",
+                "legendFormat": "{{short_version}}",
+                "instant": true
+              }
+            ],
+            "description": "Reported by the exporter's static collector. Upstream dashboard 9628 also showed a Start Time panel here via pg_postmaster_start_time_seconds, but that metric does not exist in this exporter, so there is no honest substitute and the panel is omitted rather than faked.",
+            "fieldConfig": {
+              "defaults": {
+                "color": {
+                  "mode": "thresholds"
+                },
+                "mappings": [],
+                "unit": "short",
+                "thresholds": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    }
+                  ]
+                }
+              },
+              "overrides": []
+            },
+            "options": {
+              "colorMode": "value",
+              "graphMode": "area",
+              "justifyMode": "auto",
+              "orientation": "auto",
+              "textMode": "auto",
+              "reduceOptions": {
+                "calcs": [
+                  "lastNotNull"
+                ],
+                "fields": "",
+                "values": false
+              }
+            }
+          },
+          {
+            "id": 4,
+            "type": "stat",
+            "title": "Total Size",
+            "gridPos": {
+              "h": 4,
+              "w": 3,
+              "x": 6,
+              "y": 1
+            },
+            "datasource": {
+              "type": "prometheus",
+              "uid": "$datasource"
+            },
+            "targets": [
+              {
+                "expr": "sum(pg_database_size_bytes{service=\"postgres-exporter\"})",
+                "format": "time_series",
+                "refId": "A",
+                "instant": true
+              }
+            ],
+            "description": "Sum of every database on the instance.",
+            "fieldConfig": {
+              "defaults": {
+                "color": {
+                  "mode": "thresholds"
+                },
+                "mappings": [],
+                "unit": "bytes",
+                "thresholds": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    }
+                  ]
+                }
+              },
+              "overrides": []
+            },
+            "options": {
+              "colorMode": "value",
+              "graphMode": "area",
+              "justifyMode": "auto",
+              "orientation": "auto",
+              "textMode": "auto",
+              "reduceOptions": {
+                "calcs": [
+                  "lastNotNull"
+                ],
+                "fields": "",
+                "values": false
+              }
+            }
+          },
+          {
+            "id": 5,
+            "type": "stat",
+            "title": "Databases",
+            "gridPos": {
+              "h": 4,
+              "w": 3,
+              "x": 9,
+              "y": 1
+            },
+            "datasource": {
+              "type": "prometheus",
+              "uid": "$datasource"
+            },
+            "targets": [
+              {
+                "expr": "count(pg_database_size_bytes{service=\"postgres-exporter\"})",
+                "format": "time_series",
+                "refId": "A",
+                "instant": true
+              }
+            ],
+            "description": "Databases the exporter reports. Includes templates.",
+            "fieldConfig": {
+              "defaults": {
+                "color": {
+                  "mode": "thresholds"
+                },
+                "mappings": [],
+                "unit": "short",
+                "thresholds": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    }
+                  ]
+                }
+              },
+              "overrides": []
+            },
+            "options": {
+              "colorMode": "value",
+              "graphMode": "area",
+              "justifyMode": "auto",
+              "orientation": "auto",
+              "textMode": "auto",
+              "reduceOptions": {
+                "calcs": [
+                  "lastNotNull"
+                ],
+                "fields": "",
+                "values": false
+              }
+            }
+          },
+          {
+            "id": 6,
+            "type": "stat",
+            "title": "Connections Used",
+            "gridPos": {
+              "h": 4,
+              "w": 3,
+              "x": 12,
+              "y": 1
+            },
+            "datasource": {
+              "type": "prometheus",
+              "uid": "$datasource"
+            },
+            "targets": [
+              {
+                "expr": "sum(pg_stat_database_numbackends{service=\"postgres-exporter\",datname=~\"$datname\"})",
+                "format": "time_series",
+                "refId": "A",
+                "instant": true
+              }
+            ],
+            "description": "Backends across the selected databases, against max_connections.",
+            "fieldConfig": {
+              "defaults": {
+                "color": {
+                  "mode": "thresholds"
+                },
+                "mappings": [],
+                "unit": "short",
+                "thresholds": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    },
+                    {
+                      "color": "yellow",
+                      "value": 60
+                    },
+                    {
+                      "color": "red",
+                      "value": 85
+                    }
+                  ]
+                }
+              },
+              "overrides": []
+            },
+            "options": {
+              "colorMode": "value",
+              "graphMode": "area",
+              "justifyMode": "auto",
+              "orientation": "auto",
+              "textMode": "auto",
+              "reduceOptions": {
+                "calcs": [
+                  "lastNotNull"
+                ],
+                "fields": "",
+                "values": false
+              }
+            }
+          },
+          {
+            "id": 7,
+            "type": "stat",
+            "title": "Connection Use %",
+            "gridPos": {
+              "h": 4,
+              "w": 3,
+              "x": 15,
+              "y": 1
+            },
+            "datasource": {
+              "type": "prometheus",
+              "uid": "$datasource"
+            },
+            "targets": [
+              {
+                "expr": "100 * sum(pg_stat_database_numbackends{service=\"postgres-exporter\",datname=~\"$datname\"}) / max(pg_settings_max_connections{service=\"postgres-exporter\"})",
+                "format": "time_series",
+                "refId": "A",
+                "instant": true
+              }
+            ],
+            "description": "Running out of connections is the most common way a small cluster falls over, and it happens before any single database looks full.",
+            "fieldConfig": {
+              "defaults": {
+                "color": {
+                  "mode": "thresholds"
+                },
+                "mappings": [],
+                "unit": "percent",
+                "thresholds": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    },
+                    {
+                      "color": "yellow",
+                      "value": 60
+                    },
+                    {
+                      "color": "red",
+                      "value": 85
+                    }
+                  ]
+                },
+                "decimals": 1,
+                "min": 0,
+                "max": 100
+              },
+              "overrides": []
+            },
+            "options": {
+              "colorMode": "value",
+              "graphMode": "area",
+              "justifyMode": "auto",
+              "orientation": "auto",
+              "textMode": "auto",
+              "reduceOptions": {
+                "calcs": [
+                  "lastNotNull"
+                ],
+                "fields": "",
+                "values": false
+              }
+            }
+          },
+          {
+            "id": 8,
+            "type": "stat",
+            "title": "Long-Running Txns",
+            "gridPos": {
+              "h": 4,
+              "w": 3,
+              "x": 18,
+              "y": 1
+            },
+            "datasource": {
+              "type": "prometheus",
+              "uid": "$datasource"
+            },
+            "targets": [
+              {
+                "expr": "sum(pg_long_running_transactions{service=\"postgres-exporter\"})",
+                "format": "time_series",
+                "refId": "A",
+                "instant": true
+              }
+            ],
+            "description": "Transactions still open. Anything above zero holds locks and blocks vacuum.",
+            "fieldConfig": {
+              "defaults": {
+                "color": {
+                  "mode": "thresholds"
+                },
+                "mappings": [],
+                "unit": "short",
+                "thresholds": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    },
+                    {
+                      "color": "red",
+                      "value": 1
+                    }
+                  ]
+                }
+              },
+              "overrides": []
+            },
+            "options": {
+              "colorMode": "value",
+              "graphMode": "area",
+              "justifyMode": "auto",
+              "orientation": "auto",
+              "textMode": "auto",
+              "reduceOptions": {
+                "calcs": [
+                  "lastNotNull"
+                ],
+                "fields": "",
+                "values": false
+              }
+            }
+          },
+          {
+            "id": 9,
+            "type": "stat",
+            "title": "Deadlocks (total)",
+            "gridPos": {
+              "h": 4,
+              "w": 3,
+              "x": 21,
+              "y": 1
+            },
+            "datasource": {
+              "type": "prometheus",
+              "uid": "$datasource"
+            },
+            "targets": [
+              {
+                "expr": "sum(pg_stat_database_deadlocks{service=\"postgres-exporter\",datname=~\"$datname\"})",
+                "format": "time_series",
+                "refId": "A",
+                "instant": true
+              }
+            ],
+            "description": "Cumulative since the last stats reset, not a rate. Read the Conflicts and Deadlocks panel for whether they are still happening.",
+            "fieldConfig": {
+              "defaults": {
+                "color": {
+                  "mode": "thresholds"
+                },
+                "mappings": [],
+                "unit": "short",
+                "thresholds": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    }
+                  ]
+                }
+              },
+              "overrides": []
+            },
+            "options": {
+              "colorMode": "value",
+              "graphMode": "area",
+              "justifyMode": "auto",
+              "orientation": "auto",
+              "textMode": "auto",
+              "reduceOptions": {
+                "calcs": [
+                  "lastNotNull"
+                ],
+                "fields": "",
+                "values": false
+              }
+            }
+          },
+          {
+            "id": 10,
+            "type": "stat",
+            "title": "Cache Hit Rate",
+            "gridPos": {
+              "h": 4,
+              "w": 6,
+              "x": 0,
+              "y": 5
+            },
+            "datasource": {
+              "type": "prometheus",
+              "uid": "$datasource"
+            },
+            "targets": [
+              {
+                "expr": "100 * sum(rate(pg_stat_database_blks_hit{service=\"postgres-exporter\",datname=~\"$datname\"}[5m])) / (sum(rate(pg_stat_database_blks_hit{service=\"postgres-exporter\",datname=~\"$datname\"}[5m])) + sum(rate(pg_stat_database_blks_read{service=\"postgres-exporter\",datname=~\"$datname\"}[5m])))",
+                "format": "time_series",
+                "refId": "A",
+                "instant": true
+              }
+            ],
+            "description": "Shared-buffer hit ratio from blks_hit / (blks_hit + blks_read). Sustained dips mean the working set no longer fits in shared_buffers; compare against shared_buffers in the Settings row.",
+            "fieldConfig": {
+              "defaults": {
+                "color": {
+                  "mode": "thresholds"
+                },
+                "mappings": [],
+                "unit": "percent",
+                "thresholds": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "red",
+                      "value": null
+                    },
+                    {
+                      "color": "yellow",
+                      "value": 90
+                    },
+                    {
+                      "color": "green",
+                      "value": 99
+                    }
+                  ]
+                },
+                "decimals": 2,
+                "min": 0,
+                "max": 100
+              },
+              "overrides": []
+            },
+            "options": {
+              "colorMode": "value",
+              "graphMode": "area",
+              "justifyMode": "auto",
+              "orientation": "auto",
+              "textMode": "auto",
+              "reduceOptions": {
+                "calcs": [
+                  "lastNotNull"
+                ],
+                "fields": "",
+                "values": false
+              }
+            }
+          },
+          {
+            "id": 11,
+            "type": "stat",
+            "title": "Exporter Health",
+            "gridPos": {
+              "h": 4,
+              "w": 6,
+              "x": 6,
+              "y": 5
+            },
+            "datasource": {
+              "type": "prometheus",
+              "uid": "$datasource"
+            },
+            "targets": [
+              {
+                "expr": "min(pg_scrape_collector_success{service=\"postgres-exporter\"})",
+                "format": "time_series",
+                "refId": "A",
+                "instant": true
+              }
+            ],
+            "description": "1 when every collector succeeded. A partial failure here means some panels are showing stale or partial data even though pg_up is 1.",
+            "fieldConfig": {
+              "defaults": {
+                "color": {
+                  "mode": "thresholds"
+                },
+                "mappings": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "0": {
+                        "text": "FAILING",
+                        "color": "red",
+                        "index": 0
+                      },
+                      "1": {
+                        "text": "OK",
+                        "color": "green",
+                        "index": 1
+                      }
+                    }
+                  }
+                ],
+                "unit": "short",
+                "thresholds": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "red",
+                      "value": null
+                    },
+                    {
+                      "color": "green",
+                      "value": 1
+                    }
+                  ]
+                }
+              },
+              "overrides": []
+            },
+            "options": {
+              "colorMode": "value",
+              "graphMode": "area",
+              "justifyMode": "auto",
+              "orientation": "auto",
+              "textMode": "value",
+              "reduceOptions": {
+                "calcs": [
+                  "lastNotNull"
+                ],
+                "fields": "",
+                "values": false
+              }
+            }
+          },
+          {
+            "id": 12,
+            "type": "stat",
+            "title": "Locks Held",
+            "gridPos": {
+              "h": 4,
+              "w": 12,
+              "x": 12,
+              "y": 5
+            },
+            "datasource": {
+              "type": "prometheus",
+              "uid": "$datasource"
+            },
+            "targets": [
+              {
+                "expr": "sum(pg_locks_count{service=\"postgres-exporter\",datname=~\"$datname\"})",
+                "format": "time_series",
+                "refId": "A",
+                "instant": true
+              }
+            ],
+            "description": "All lock modes. On an idle cluster this sits low; sustained growth points at long-running transactions holding locks.",
+            "fieldConfig": {
+              "defaults": {
+                "color": {
+                  "mode": "thresholds"
+                },
+                "mappings": [],
+                "unit": "short",
+                "thresholds": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    }
+                  ]
+                }
+              },
+              "overrides": []
+            },
+            "options": {
+              "colorMode": "value",
+              "graphMode": "area",
+              "justifyMode": "auto",
+              "orientation": "auto",
+              "textMode": "auto",
+              "reduceOptions": {
+                "calcs": [
+                  "lastNotNull"
+                ],
+                "fields": "",
+                "values": false
+              }
+            }
+          },
+          {
+            "id": 13,
+            "type": "row",
+            "title": "Connections and Activity",
+            "gridPos": {
+              "h": 1,
+              "w": 24,
+              "x": 0,
+              "y": 9
+            },
+            "collapsed": false
+          },
+          {
+            "id": 14,
+            "type": "timeseries",
+            "title": "Connections by State",
+            "gridPos": {
+              "h": 8,
+              "w": 12,
+              "x": 0,
+              "y": 10
+            },
+            "datasource": {
+              "type": "prometheus",
+              "uid": "$datasource"
+            },
+            "targets": [
+              {
+                "expr": "sum by (state) (pg_stat_activity_count{service=\"postgres-exporter\",datname=~\"$datname\",state!~'disabled'})",
+                "format": "time_series",
+                "refId": "A",
+                "legendFormat": "{{state}}"
+              }
+            ],
+            "description": "pg_stat_activity_count broken down by backend state. 'idle in transaction' is the one worth an alert: it holds locks and blocks vacuum while looking idle.",
+            "fieldConfig": {
+              "defaults": {
+                "color": {
+                  "mode": "palette-classic"
+                },
+                "mappings": [],
+                "unit": "short",
+                "thresholds": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    }
+                  ]
+                }
+              },
+              "overrides": []
+            },
+            "options": {
+              "legend": {
+                "calcs": [
+                  "lastNotNull",
+                  "mean",
+                  "max"
+                ],
+                "displayMode": "table",
+                "placement": "bottom",
+                "showLegend": true,
+                "sortBy": "Max",
+                "sortDesc": true
+              },
+              "tooltip": {
+                "mode": "multi",
+                "sort": "desc"
+              },
+              "drawStyle": "line",
+              "lineInterpolation": "linear",
+              "barWidth": 0,
+              "fillOpacity": 10,
+              "gradientMode": "none",
+              "pointSize": 5,
+              "scaleDistribution": {
+                "type": "linear"
+              },
+              "stacking": {
+                "group": "A",
+                "mode": "none"
+              },
+              "spanNulls": false
+            }
+          },
+          {
+            "id": 15,
+            "type": "timeseries",
+            "title": "Backends by Database",
+            "gridPos": {
+              "h": 8,
+              "w": 12,
+              "x": 12,
+              "y": 10
+            },
+            "datasource": {
+              "type": "prometheus",
+              "uid": "$datasource"
+            },
+            "targets": [
+              {
+                "expr": "sum by (datname) (pg_stat_database_numbackends{service=\"postgres-exporter\",datname=~\"$datname\"})",
+                "format": "time_series",
+                "refId": "A",
+                "legendFormat": "{{datname}}"
+              }
+            ],
+            "description": "From pg_stat_database. Broadly consistent with the state breakdown above; if the two disagree, activity is on a database outside the current filter.",
+            "fieldConfig": {
+              "defaults": {
+                "color": {
+                  "mode": "palette-classic"
+                },
+                "mappings": [],
+                "unit": "short",
+                "thresholds": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    }
+                  ]
+                }
+              },
+              "overrides": []
+            },
+            "options": {
+              "legend": {
+                "calcs": [
+                  "lastNotNull",
+                  "mean",
+                  "max"
+                ],
+                "displayMode": "table",
+                "placement": "bottom",
+                "showLegend": true,
+                "sortBy": "Max",
+                "sortDesc": true
+              },
+              "tooltip": {
+                "mode": "multi",
+                "sort": "desc"
+              },
+              "drawStyle": "line",
+              "lineInterpolation": "linear",
+              "barWidth": 0,
+              "fillOpacity": 10,
+              "gradientMode": "none",
+              "pointSize": 5,
+              "scaleDistribution": {
+                "type": "linear"
+              },
+              "stacking": {
+                "group": "A",
+                "mode": "none"
+              },
+              "spanNulls": false
+            }
+          },
+          {
+            "id": 16,
+            "type": "timeseries",
+            "title": "Connection Use vs Max",
+            "gridPos": {
+              "h": 8,
+              "w": 12,
+              "x": 0,
+              "y": 18
+            },
+            "datasource": {
+              "type": "prometheus",
+              "uid": "$datasource"
+            },
+            "targets": [
+              {
+                "expr": "sum(pg_stat_database_numbackends{service=\"postgres-exporter\",datname=~\"$datname\"})",
+                "format": "time_series",
+                "refId": "A",
+                "legendFormat": "in use"
+              },
+              {
+                "expr": "max(pg_settings_max_connections{service=\"postgres-exporter\"})",
+                "format": "time_series",
+                "refId": "A",
+                "legendFormat": "max_connections"
+              }
+            ],
+            "description": "Headroom against the ceiling. The gap between the two lines is how many more connections the server will accept before new clients are refused.",
+            "fieldConfig": {
+              "defaults": {
+                "color": {
+                  "mode": "palette-classic"
+                },
+                "mappings": [],
+                "unit": "short",
+                "thresholds": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    }
+                  ]
+                }
+              },
+              "overrides": []
+            },
+            "options": {
+              "legend": {
+                "calcs": [
+                  "lastNotNull",
+                  "mean",
+                  "max"
+                ],
+                "displayMode": "table",
+                "placement": "bottom",
+                "showLegend": true,
+                "sortBy": "Max",
+                "sortDesc": true
+              },
+              "tooltip": {
+                "mode": "multi",
+                "sort": "desc"
+              },
+              "drawStyle": "line",
+              "lineInterpolation": "linear",
+              "barWidth": 0,
+              "fillOpacity": 10,
+              "gradientMode": "none",
+              "pointSize": 5,
+              "scaleDistribution": {
+                "type": "linear"
+              },
+              "stacking": {
+                "group": "A",
+                "mode": "none"
+              },
+              "spanNulls": false
+            }
+          },
+          {
+            "id": 17,
+            "type": "timeseries",
+            "title": "Longest Open Transaction",
+            "gridPos": {
+              "h": 8,
+              "w": 12,
+              "x": 12,
+              "y": 18
+            },
+            "datasource": {
+              "type": "prometheus",
+              "uid": "$datasource"
+            },
+            "targets": [
+              {
+                "expr": "time() - max(pg_long_running_transactions_oldest_timestamp_seconds{service=\"postgres-exporter\"})",
+                "format": "time_series",
+                "refId": "A",
+                "legendFormat": "oldest transaction"
+              }
+            ],
+            "description": "Age of the oldest still-open transaction. Rising steadily means something is holding a transaction open; a transaction that never ends also blocks xid wraparound protection, which the Maintenance row tracks.",
+            "fieldConfig": {
+              "defaults": {
+                "color": {
+                  "mode": "palette-classic"
+                },
+                "mappings": [],
+                "unit": "s",
+                "thresholds": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    }
+                  ]
+                },
+                "min": 0
+              },
+              "overrides": []
+            },
+            "options": {
+              "legend": {
+                "calcs": [
+                  "lastNotNull",
+                  "mean",
+                  "max"
+                ],
+                "displayMode": "table",
+                "placement": "bottom",
+                "showLegend": true,
+                "sortBy": "Max",
+                "sortDesc": true
+              },
+              "tooltip": {
+                "mode": "multi",
+                "sort": "desc"
+              },
+              "drawStyle": "line",
+              "lineInterpolation": "linear",
+              "barWidth": 0,
+              "fillOpacity": 10,
+              "gradientMode": "none",
+              "pointSize": 5,
+              "scaleDistribution": {
+                "type": "linear"
+              },
+              "stacking": {
+                "group": "A",
+                "mode": "none"
+              },
+              "spanNulls": false
+            }
+          },
+          {
+            "id": 18,
+            "type": "row",
+            "title": "Transactions and Row Counts",
+            "gridPos": {
+              "h": 1,
+              "w": 24,
+              "x": 0,
+              "y": 26
+            },
+            "collapsed": false
+          },
+          {
+            "id": 19,
+            "type": "timeseries",
+            "title": "Commits vs Rollbacks",
+            "gridPos": {
+              "h": 8,
+              "w": 12,
+              "x": 0,
+              "y": 27
+            },
+            "datasource": {
+              "type": "prometheus",
+              "uid": "$datasource"
+            },
+            "targets": [
+              {
+                "expr": "sum by (datname) (rate(pg_stat_database_xact_commit{service=\"postgres-exporter\",datname=~\"$datname\"}[5m]))",
+                "format": "time_series",
+                "refId": "A",
+                "legendFormat": "{{datname}} commit"
+              },
+              {
+                "expr": "sum by (datname) (rate(pg_stat_database_xact_rollback{service=\"postgres-exporter\",datname=~\"$datname\"}[5m]))",
+                "format": "time_series",
+                "refId": "B",
+                "legendFormat": "{{datname}} rollback"
+              }
+            ],
+            "description": "A database with a rollback rate close to its commit rate usually means a retry loop, not real work.",
+            "fieldConfig": {
+              "defaults": {
+                "color": {
+                  "mode": "palette-classic"
+                },
+                "mappings": [],
+                "unit": "short",
+                "thresholds": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    }
+                  ]
+                }
+              },
+              "overrides": []
+            },
+            "options": {
+              "legend": {
+                "calcs": [
+                  "lastNotNull",
+                  "mean",
+                  "max"
+                ],
+                "displayMode": "table",
+                "placement": "bottom",
+                "showLegend": true,
+                "sortBy": "Max",
+                "sortDesc": true
+              },
+              "tooltip": {
+                "mode": "multi",
+                "sort": "desc"
+              },
+              "drawStyle": "line",
+              "lineInterpolation": "linear",
+              "barWidth": 0,
+              "fillOpacity": 10,
+              "gradientMode": "none",
+              "pointSize": 5,
+              "scaleDistribution": {
+                "type": "linear"
+              },
+              "stacking": {
+                "group": "A",
+                "mode": "none"
+              },
+              "spanNulls": false
+            }
+          },
+          {
+            "id": 20,
+            "type": "timeseries",
+            "title": "Rows Written (INSERT / UPDATE / DELETE)",
+            "gridPos": {
+              "h": 8,
+              "w": 12,
+              "x": 0,
+              "y": 35
+            },
+            "datasource": {
+              "type": "prometheus",
+              "uid": "$datasource"
+            },
+            "targets": [
+              {
+                "expr": "sum by (datname) (rate(pg_stat_database_tup_inserted{service=\"postgres-exporter\",datname=~\"$datname\"}[5m]))",
+                "format": "time_series",
+                "refId": "A",
+                "legendFormat": "{{datname}} insert"
+              },
+              {
+                "expr": "sum by (datname) (rate(pg_stat_database_tup_updated{service=\"postgres-exporter\",datname=~\"$datname\"}[5m]))",
+                "format": "time_series",
+                "refId": "B",
+                "legendFormat": "{{datname}} update"
+              },
+              {
+                "expr": "sum by (datname) (rate(pg_stat_database_tup_deleted{service=\"postgres-exporter\",datname=~\"$datname\"}[5m]))",
+                "format": "time_series",
+                "refId": "C",
+                "legendFormat": "{{datname}} delete"
+              }
+            ],
+            "description": "Row-level write pressure. Sustained high UPDATE rates are what drive table bloat and autovacuum work.",
+            "fieldConfig": {
+              "defaults": {
+                "color": {
+                  "mode": "palette-classic"
+                },
+                "mappings": [],
+                "unit": "short",
+                "thresholds": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    }
+                  ]
+                }
+              },
+              "overrides": []
+            },
+            "options": {
+              "legend": {
+                "calcs": [
+                  "lastNotNull",
+                  "mean",
+                  "max"
+                ],
+                "displayMode": "table",
+                "placement": "bottom",
+                "showLegend": true,
+                "sortBy": "Max",
+                "sortDesc": true
+              },
+              "tooltip": {
+                "mode": "multi",
+                "sort": "desc"
+              },
+              "drawStyle": "line",
+              "lineInterpolation": "linear",
+              "barWidth": 0,
+              "fillOpacity": 10,
+              "gradientMode": "none",
+              "pointSize": 5,
+              "scaleDistribution": {
+                "type": "linear"
+              },
+              "stacking": {
+                "group": "A",
+                "mode": "none"
+              },
+              "spanNulls": false
+            }
+          },
+          {
+            "id": 21,
+            "type": "timeseries",
+            "title": "Rows Read (FETCHED / RETURNED)",
+            "gridPos": {
+              "h": 8,
+              "w": 12,
+              "x": 12,
+              "y": 27
+            },
+            "datasource": {
+              "type": "prometheus",
+              "uid": "$datasource"
+            },
+            "targets": [
+              {
+                "expr": "sum by (datname) (rate(pg_stat_database_tup_fetched{service=\"postgres-exporter\",datname=~\"$datname\"}[5m]))",
+                "format": "time_series",
+                "refId": "A",
+                "legendFormat": "{{datname}} fetched"
+              },
+              {
+                "expr": "sum by (datname) (rate(pg_stat_database_tup_returned{service=\"postgres-exporter\",datname=~\"$datname\"}[5m]))",
+                "format": "time_series",
+                "refId": "B",
+                "legendFormat": "{{datname}} returned"
+              }
+            ],
+            "description": "FETCHED counts rows pulled from the table; RETURNED counts rows sent back to the client. A wide gap between them is normal for aggregates and a sign of a missing index when RETURNED is far larger.",
+            "fieldConfig": {
+              "defaults": {
+                "color": {
+                  "mode": "palette-classic"
+                },
+                "mappings": [],
+                "unit": "short",
+                "thresholds": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    }
+                  ]
+                }
+              },
+              "overrides": []
+            },
+            "options": {
+              "legend": {
+                "calcs": [
+                  "lastNotNull",
+                  "mean",
+                  "max"
+                ],
+                "displayMode": "table",
+                "placement": "bottom",
+                "showLegend": true,
+                "sortBy": "Max",
+                "sortDesc": true
+              },
+              "tooltip": {
+                "mode": "multi",
+                "sort": "desc"
+              },
+              "drawStyle": "line",
+              "lineInterpolation": "linear",
+              "barWidth": 0,
+              "fillOpacity": 10,
+              "gradientMode": "none",
+              "pointSize": 5,
+              "scaleDistribution": {
+                "type": "linear"
+              },
+              "stacking": {
+                "group": "A",
+                "mode": "none"
+              },
+              "spanNulls": false
+            }
+          },
+          {
+            "id": 22,
+            "type": "timeseries",
+            "title": "Conflicts and Deadlocks",
+            "gridPos": {
+              "h": 8,
+              "w": 12,
+              "x": 12,
+              "y": 35
+            },
+            "datasource": {
+              "type": "prometheus",
+              "uid": "$datasource"
+            },
+            "targets": [
+              {
+                "expr": "sum by (datname) (rate(pg_stat_database_deadlocks{service=\"postgres-exporter\",datname=~\"$datname\"}[5m]))",
+                "format": "time_series",
+                "refId": "A",
+                "legendFormat": "{{datname}} deadlocks"
+              },
+              {
+                "expr": "sum by (datname) (rate(pg_stat_database_conflicts{service=\"postgres-exporter\",datname=~\"$datname\"}[5m]))",
+                "format": "time_series",
+                "refId": "B",
+                "legendFormat": "{{datname}} conflicts"
+              }
+            ],
+            "description": "Deadlocks are cycles in lock acquisition and always need a fix. Conflicts are cancellations caused by concurrency control, usually from a hot row under UPSERT.",
+            "fieldConfig": {
+              "defaults": {
+                "color": {
+                  "mode": "palette-classic"
+                },
+                "mappings": [],
+                "unit": "short",
+                "thresholds": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    }
+                  ]
+                }
+              },
+              "overrides": []
+            },
+            "options": {
+              "legend": {
+                "calcs": [
+                  "lastNotNull",
+                  "mean",
+                  "max"
+                ],
+                "displayMode": "table",
+                "placement": "bottom",
+                "showLegend": true,
+                "sortBy": "Max",
+                "sortDesc": true
+              },
+              "tooltip": {
+                "mode": "multi",
+                "sort": "desc"
+              },
+              "drawStyle": "line",
+              "lineInterpolation": "linear",
+              "barWidth": 0,
+              "fillOpacity": 10,
+              "gradientMode": "none",
+              "pointSize": 5,
+              "scaleDistribution": {
+                "type": "linear"
+              },
+              "stacking": {
+                "group": "A",
+                "mode": "none"
+              },
+              "spanNulls": false
+            }
+          },
+          {
+            "id": 23,
+            "type": "row",
+            "title": "I/O and Cache",
+            "gridPos": {
+              "h": 1,
+              "w": 24,
+              "x": 0,
+              "y": 43
+            },
+            "collapsed": false
+          },
+          {
+            "id": 24,
+            "type": "timeseries",
+            "title": "Block Reads vs Hits",
+            "gridPos": {
+              "h": 8,
+              "w": 12,
+              "x": 0,
+              "y": 44
+            },
+            "datasource": {
+              "type": "prometheus",
+              "uid": "$datasource"
+            },
+            "targets": [
+              {
+                "expr": "sum by (datname) (rate(pg_stat_database_blks_read{service=\"postgres-exporter\",datname=~\"$datname\"}[5m]))",
+                "format": "time_series",
+                "refId": "A",
+                "legendFormat": "{{datname}} read from disk"
+              },
+              {
+                "expr": "sum by (datname) (rate(pg_stat_database_blks_hit{service=\"postgres-exporter\",datname=~\"$datname\"}[5m]))",
+                "format": "time_series",
+                "refId": "B",
+                "legendFormat": "{{datname}} hit in cache"
+              }
+            ],
+            "description": "Reads that missed shared_buffers and went to the OS. This is the panel that shows the real cost of a working set that outgrew memory.",
+            "fieldConfig": {
+              "defaults": {
+                "color": {
+                  "mode": "palette-classic"
+                },
+                "mappings": [],
+                "unit": "short",
+                "thresholds": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    }
+                  ]
+                }
+              },
+              "overrides": []
+            },
+            "options": {
+              "legend": {
+                "calcs": [
+                  "lastNotNull",
+                  "mean",
+                  "max"
+                ],
+                "displayMode": "table",
+                "placement": "bottom",
+                "showLegend": true,
+                "sortBy": "Max",
+                "sortDesc": true
+              },
+              "tooltip": {
+                "mode": "multi",
+                "sort": "desc"
+              },
+              "drawStyle": "line",
+              "lineInterpolation": "linear",
+              "barWidth": 0,
+              "fillOpacity": 10,
+              "gradientMode": "none",
+              "pointSize": 5,
+              "scaleDistribution": {
+                "type": "linear"
+              },
+              "stacking": {
+                "group": "A",
+                "mode": "none"
+              },
+              "spanNulls": false
+            }
+          },
+          {
+            "id": 25,
+            "type": "timeseries",
+            "title": "Cache Hit Rate by Database",
+            "gridPos": {
+              "h": 8,
+              "w": 12,
+              "x": 12,
+              "y": 44
+            },
+            "datasource": {
+              "type": "prometheus",
+              "uid": "$datasource"
+            },
+            "targets": [
+              {
+                "expr": "100 * sum by (datname) (rate(pg_stat_database_blks_hit{service=\"postgres-exporter\",datname=~\"$datname\"}[5m])) / (sum by (datname) (rate(pg_stat_database_blks_hit{service=\"postgres-exporter\",datname=~\"$datname\"}[5m])) + sum by (datname) (rate(pg_stat_database_blks_read{service=\"postgres-exporter\",datname=~\"$datname\"}[5m])))",
+                "format": "time_series",
+                "refId": "A",
+                "legendFormat": "{{datname}}"
+              }
+            ],
+            "description": "Per database rather than instance-wide, so one misbehaving database is visible instead of being averaged into a healthy total.",
+            "fieldConfig": {
+              "defaults": {
+                "color": {
+                  "mode": "palette-classic"
+                },
+                "mappings": [],
+                "unit": "percent",
+                "thresholds": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    }
+                  ]
+                },
+                "min": 0,
+                "max": 100,
+                "decimals": 1
+              },
+              "overrides": []
+            },
+            "options": {
+              "legend": {
+                "calcs": [
+                  "lastNotNull",
+                  "mean",
+                  "max"
+                ],
+                "displayMode": "table",
+                "placement": "bottom",
+                "showLegend": true,
+                "sortBy": "Max",
+                "sortDesc": true
+              },
+              "tooltip": {
+                "mode": "multi",
+                "sort": "desc"
+              },
+              "drawStyle": "line",
+              "lineInterpolation": "linear",
+              "barWidth": 0,
+              "fillOpacity": 10,
+              "gradientMode": "none",
+              "pointSize": 5,
+              "scaleDistribution": {
+                "type": "linear"
+              },
+              "stacking": {
+                "group": "A",
+                "mode": "none"
+              },
+              "spanNulls": false
+            }
+          },
+          {
+            "id": 26,
+            "type": "timeseries",
+            "title": "Temporary Files",
+            "gridPos": {
+              "h": 8,
+              "w": 12,
+              "x": 0,
+              "y": 52
+            },
+            "datasource": {
+              "type": "prometheus",
+              "uid": "$datasource"
+            },
+            "targets": [
+              {
+                "expr": "sum by (datname) (rate(pg_stat_database_temp_bytes{service=\"postgres-exporter\",datname=~\"$datname\"}[5m]))",
+                "format": "time_series",
+                "refId": "A",
+                "legendFormat": "{{datname}} bytes/s"
+              },
+              {
+                "expr": "sum by (datname) (rate(pg_stat_database_temp_files{service=\"postgres-exporter\",datname=~\"$datname\"}[5m]))",
+                "format": "time_series",
+                "refId": "B",
+                "legendFormat": "{{datname}} files/s"
+              }
+            ],
+            "description": "Spilling to disk means a sort or hash did not fit in work_mem. Compare with work_mem in the Settings row before raising it -- on a small node that trade goes bad quickly.",
+            "fieldConfig": {
+              "defaults": {
+                "color": {
+                  "mode": "palette-classic"
+                },
+                "mappings": [],
+                "unit": "short",
+                "thresholds": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    }
+                  ]
+                }
+              },
+              "overrides": []
+            },
+            "options": {
+              "legend": {
+                "calcs": [
+                  "lastNotNull",
+                  "mean",
+                  "max"
+                ],
+                "displayMode": "table",
+                "placement": "bottom",
+                "showLegend": true,
+                "sortBy": "Max",
+                "sortDesc": true
+              },
+              "tooltip": {
+                "mode": "multi",
+                "sort": "desc"
+              },
+              "drawStyle": "line",
+              "lineInterpolation": "linear",
+              "barWidth": 0,
+              "fillOpacity": 10,
+              "gradientMode": "none",
+              "pointSize": 5,
+              "scaleDistribution": {
+                "type": "linear"
+              },
+              "stacking": {
+                "group": "A",
+                "mode": "none"
+              },
+              "spanNulls": false
+            }
+          },
+          {
+            "id": 27,
+            "type": "row",
+            "title": "Checkpoints and WAL",
+            "gridPos": {
+              "h": 1,
+              "w": 24,
+              "x": 0,
+              "y": 60
+            },
+            "collapsed": false
+          },
+          {
+            "id": 28,
+            "type": "timeseries",
+            "title": "Checkpoint Time (write vs sync)",
+            "gridPos": {
+              "h": 8,
+              "w": 12,
+              "x": 0,
+              "y": 61
+            },
+            "datasource": {
+              "type": "prometheus",
+              "uid": "$datasource"
+            },
+            "targets": [
+              {
+                "expr": "rate(pg_stat_checkpointer_write_time_total{service=\"postgres-exporter\"}[5m])",
+                "format": "time_series",
+                "refId": "A",
+                "legendFormat": "write"
+              },
+              {
+                "expr": "rate(pg_stat_checkpointer_sync_time_total{service=\"postgres-exporter\"}[5m])",
+                "format": "time_series",
+                "refId": "B",
+                "legendFormat": "sync"
+              }
+            ],
+            "description": "Fraction of each interval spent writing and fsyncing during checkpoints. Sustained cost here competes directly with query latency on the same storage.",
+            "fieldConfig": {
+              "defaults": {
+                "color": {
+                  "mode": "palette-classic"
+                },
+                "mappings": [],
+                "unit": "s",
+                "thresholds": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    }
+                  ]
+                }
+              },
+              "overrides": []
+            },
+            "options": {
+              "legend": {
+                "calcs": [
+                  "lastNotNull",
+                  "mean",
+                  "max"
+                ],
+                "displayMode": "table",
+                "placement": "bottom",
+                "showLegend": true,
+                "sortBy": "Max",
+                "sortDesc": true
+              },
+              "tooltip": {
+                "mode": "multi",
+                "sort": "desc"
+              },
+              "drawStyle": "line",
+              "lineInterpolation": "linear",
+              "barWidth": 0,
+              "fillOpacity": 10,
+              "gradientMode": "none",
+              "pointSize": 5,
+              "scaleDistribution": {
+                "type": "linear"
+              },
+              "stacking": {
+                "group": "A",
+                "mode": "none"
+              },
+              "spanNulls": false
+            }
+          },
+          {
+            "id": 29,
+            "type": "timeseries",
+            "title": "Checkpoint Timing and Buffers",
+            "gridPos": {
+              "h": 8,
+              "w": 12,
+              "x": 12,
+              "y": 61
+            },
+            "datasource": {
+              "type": "prometheus",
+              "uid": "$datasource"
+            },
+            "targets": [
+              {
+                "expr": "sum(rate(pg_stat_checkpointer_num_timed_total{service=\"postgres-exporter\"}[5m]))",
+                "format": "time_series",
+                "refId": "A",
+                "legendFormat": "timed/s"
+              },
+              {
+                "expr": "sum(rate(pg_stat_checkpointer_num_requested_total{service=\"postgres-exporter\"}[5m]))",
+                "format": "time_series",
+                "refId": "B",
+                "legendFormat": "requested/s"
+              },
+              {
+                "expr": "rate(pg_stat_checkpointer_buffers_written_total{service=\"postgres-exporter\"}[5m])",
+                "format": "time_series",
+                "refId": "C",
+                "legendFormat": "buffers written/s"
+              }
+            ],
+            "description": "Timed checkpoints are the scheduled ones; requested ones are forced by filling max_wal_size. Requested dominating timed means checkpoints are being triggered by write volume rather than by the clock.",
+            "fieldConfig": {
+              "defaults": {
+                "color": {
+                  "mode": "palette-classic"
+                },
+                "mappings": [],
+                "unit": "short",
+                "thresholds": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    }
+                  ]
+                }
+              },
+              "overrides": []
+            },
+            "options": {
+              "legend": {
+                "calcs": [
+                  "lastNotNull",
+                  "mean",
+                  "max"
+                ],
+                "displayMode": "table",
+                "placement": "bottom",
+                "showLegend": true,
+                "sortBy": "Max",
+                "sortDesc": true
+              },
+              "tooltip": {
+                "mode": "multi",
+                "sort": "desc"
+              },
+              "drawStyle": "line",
+              "lineInterpolation": "linear",
+              "barWidth": 0,
+              "fillOpacity": 10,
+              "gradientMode": "none",
+              "pointSize": 5,
+              "scaleDistribution": {
+                "type": "linear"
+              },
+              "stacking": {
+                "group": "A",
+                "mode": "none"
+              },
+              "spanNulls": false
+            }
+          },
+          {
+            "id": 30,
+            "type": "timeseries",
+            "title": "WAL Size",
+            "gridPos": {
+              "h": 8,
+              "w": 12,
+              "x": 0,
+              "y": 69
+            },
+            "datasource": {
+              "type": "prometheus",
+              "uid": "$datasource"
+            },
+            "targets": [
+              {
+                "expr": "pg_wal_size_bytes{service=\"postgres-exporter\"}",
+                "format": "time_series",
+                "refId": "A",
+                "legendFormat": "WAL bytes"
+              }
+            ],
+            "description": "Sawtooth between checkpoints. Rising without a corresponding fall means checkpoints are not keeping up.",
+            "fieldConfig": {
+              "defaults": {
+                "color": {
+                  "mode": "palette-classic"
+                },
+                "mappings": [],
+                "unit": "bytes",
+                "thresholds": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    }
+                  ]
+                }
+              },
+              "overrides": []
+            },
+            "options": {
+              "legend": {
+                "calcs": [
+                  "lastNotNull",
+                  "mean",
+                  "max"
+                ],
+                "displayMode": "table",
+                "placement": "bottom",
+                "showLegend": true,
+                "sortBy": "Max",
+                "sortDesc": true
+              },
+              "tooltip": {
+                "mode": "multi",
+                "sort": "desc"
+              },
+              "drawStyle": "line",
+              "lineInterpolation": "linear",
+              "barWidth": 0,
+              "fillOpacity": 10,
+              "gradientMode": "none",
+              "pointSize": 5,
+              "scaleDistribution": {
+                "type": "linear"
+              },
+              "stacking": {
+                "group": "A",
+                "mode": "none"
+              },
+              "spanNulls": false
+            }
+          },
+          {
+            "id": 31,
+            "type": "timeseries",
+            "title": "WAL Segments and Backwriter Buffers",
+            "gridPos": {
+              "h": 8,
+              "w": 12,
+              "x": 12,
+              "y": 69
+            },
+            "datasource": {
+              "type": "prometheus",
+              "uid": "$datasource"
+            },
+            "targets": [
+              {
+                "expr": "pg_wal_segments{service=\"postgres-exporter\"}",
+                "format": "time_series",
+                "refId": "A",
+                "legendFormat": "WAL segments"
+              },
+              {
+                "expr": "sum(rate(pg_stat_bgwriter_buffers_alloc_total{service=\"postgres-exporter\"}[5m]))",
+                "format": "time_series",
+                "refId": "B",
+                "legendFormat": "buffers allocated/s"
+              },
+              {
+                "expr": "sum(rate(pg_stat_bgwriter_buffers_clean_total{service=\"postgres-exporter\"}[5m]))",
+                "format": "time_series",
+                "refId": "C",
+                "legendFormat": "buffers cleaned/s"
+              }
+            ],
+            "description": "Background-writer activity. Buffers cleaned lagging far behind allocated means the writer is not keeping pace and dirty pages are accumulating.",
+            "fieldConfig": {
+              "defaults": {
+                "color": {
+                  "mode": "palette-classic"
+                },
+                "mappings": [],
+                "unit": "short",
+                "thresholds": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    }
+                  ]
+                }
+              },
+              "overrides": []
+            },
+            "options": {
+              "legend": {
+                "calcs": [
+                  "lastNotNull",
+                  "mean",
+                  "max"
+                ],
+                "displayMode": "table",
+                "placement": "bottom",
+                "showLegend": true,
+                "sortBy": "Max",
+                "sortDesc": true
+              },
+              "tooltip": {
+                "mode": "multi",
+                "sort": "desc"
+              },
+              "drawStyle": "line",
+              "lineInterpolation": "linear",
+              "barWidth": 0,
+              "fillOpacity": 10,
+              "gradientMode": "none",
+              "pointSize": 5,
+              "scaleDistribution": {
+                "type": "linear"
+              },
+              "stacking": {
+                "group": "A",
+                "mode": "none"
+              },
+              "spanNulls": false
+            }
+          },
+          {
+            "id": 32,
+            "type": "row",
+            "title": "Locks",
+            "gridPos": {
+              "h": 1,
+              "w": 24,
+              "x": 0,
+              "y": 77
+            },
+            "collapsed": false
+          },
+          {
+            "id": 33,
+            "type": "timeseries",
+            "title": "Locks by Mode",
+            "gridPos": {
+              "h": 8,
+              "w": 12,
+              "x": 0,
+              "y": 78
+            },
+            "datasource": {
+              "type": "prometheus",
+              "uid": "$datasource"
+            },
+            "targets": [
+              {
+                "expr": "sum by (mode) (pg_locks_count{service=\"postgres-exporter\",datname=~\"$datname\",mode!~'accesssharelock|sireadlock'})",
+                "format": "time_series",
+                "refId": "A",
+                "legendFormat": "{{mode}}"
+              }
+            ],
+            "description": "Heavy lock modes only; accesssharelock is the ordinary read lock and would flatten everything else. A rising exclusivelock or accessexclusivelock is usually DDL or a vacuum.",
+            "fieldConfig": {
+              "defaults": {
+                "color": {
+                  "mode": "palette-classic"
+                },
+                "mappings": [],
+                "unit": "short",
+                "thresholds": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    }
+                  ]
+                }
+              },
+              "overrides": []
+            },
+            "options": {
+              "legend": {
+                "calcs": [
+                  "lastNotNull",
+                  "mean",
+                  "max"
+                ],
+                "displayMode": "table",
+                "placement": "bottom",
+                "showLegend": true,
+                "sortBy": "Max",
+                "sortDesc": true
+              },
+              "tooltip": {
+                "mode": "multi",
+                "sort": "desc"
+              },
+              "drawStyle": "line",
+              "lineInterpolation": "linear",
+              "barWidth": 0,
+              "fillOpacity": 10,
+              "gradientMode": "none",
+              "pointSize": 5,
+              "scaleDistribution": {
+                "type": "linear"
+              },
+              "stacking": {
+                "group": "A",
+                "mode": "none"
+              },
+              "spanNulls": false
+            }
+          },
+          {
+            "id": 34,
+            "type": "table",
+            "title": "Heavy Locks",
+            "gridPos": {
+              "h": 8,
+              "w": 12,
+              "x": 12,
+              "y": 78
+            },
+            "datasource": {
+              "type": "prometheus",
+              "uid": "$datasource"
+            },
+            "targets": [
+              {
+                "expr": "pg_locks_count{service=\"postgres-exporter\",datname=~\"$datname\",mode=~\"exclusivelock|accessexclusivelock|sharelock|shareupdateexclusivelock|sharerowexclusivelock\"}",
+                "format": "time_series",
+                "refId": "A",
+                "instant": true
+              }
+            ],
+            "description": "Instant view of every heavyweight lock currently held. Use this with the Longest Open Transaction panel: locks held by an old transaction are the ones that block everyone else.",
+            "transformations": [
+              {
+                "id": "organize",
+                "options": {
+                  "excludeByName": {
+                    "Time": true
+                  },
+                  "includeByName": {},
+                  "indexByName": {},
+                  "renameByName": {
+                    "Value": "Value"
+                  }
+                }
+              }
+            ],
+            "fieldConfig": {
+              "defaults": {
+                "color": {
+                  "mode": "thresholds"
+                },
+                "custom": {
+                  "align": "auto",
+                  "cellOptions": {
+                    "type": "auto"
+                  },
+                  "inspect": false
+                },
+                "mappings": [],
+                "unit": "short",
+                "thresholds": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    }
+                  ]
+                }
+              },
+              "overrides": [
+                {
+                  "matcher": {
+                    "id": "byName",
+                    "options": "datname"
+                  },
+                  "properties": [
+                    {
+                      "id": "displayName",
+                      "value": "Database"
+                    }
+                  ]
+                },
+                {
+                  "matcher": {
+                    "id": "byName",
+                    "options": "mode"
+                  },
+                  "properties": [
+                    {
+                      "id": "displayName",
+                      "value": "Mode"
+                    }
+                  ]
+                }
+              ]
+            },
+            "options": {
+              "showHeader": true,
+              "cellHeight": "sm",
+              "footer": {
+                "show": false,
+                "reducer": [
+                  "sum"
+                ],
+                "countRows": false,
+                "fields": ""
+              }
+            }
+          },
+          {
+            "id": 35,
+            "type": "row",
+            "title": "Database Inventory",
+            "gridPos": {
+              "h": 1,
+              "w": 24,
+              "x": 0,
+              "y": 86
+            },
+            "collapsed": false
+          },
+          {
+            "id": 36,
+            "type": "table",
+            "title": "Size, Connections and Traffic",
+            "gridPos": {
+              "h": 10,
+              "w": 24,
+              "x": 0,
+              "y": 87
+            },
+            "datasource": {
+              "type": "prometheus",
+              "uid": "$datasource"
+            },
+            "targets": [
+              {
+                "expr": "pg_database_size_bytes{service=\"postgres-exporter\"}",
+                "format": "time_series",
+                "refId": "A",
+                "legendFormat": "size"
+              },
+              {
+                "expr": "sum by (datname) (pg_stat_database_numbackends{service=\"postgres-exporter\",datname=~\"$datname\"})",
+                "format": "time_series",
+                "refId": "B",
+                "legendFormat": "backends"
+              },
+              {
+                "expr": "sum by (datname) (rate(pg_stat_database_xact_commit{service=\"postgres-exporter\",datname=~\"$datname\"}[5m]))",
+                "format": "time_series",
+                "refId": "C",
+                "legendFormat": "commits/s"
+              },
+              {
+                "expr": "sum by (datname) (rate(pg_stat_database_tup_fetched{service=\"postgres-exporter\",datname=~\"$datname\"}[5m]))",
+                "format": "time_series",
+                "refId": "D",
+                "legendFormat": "rows fetched/s"
+              }
+            ],
+            "description": "The triage table. Sort by size to find what is worth investigating; sort by commits/s to see which databases are actually being worked on.",
+            "transformations": [
+              {
+                "id": "organize",
+                "options": {
+                  "excludeByName": {
+                    "Time": true
+                  },
+                  "includeByName": {},
+                  "indexByName": {},
+                  "renameByName": {
+                    "Value": "Value"
+                  }
+                }
+              }
+            ],
+            "fieldConfig": {
+              "defaults": {
+                "color": {
+                  "mode": "thresholds"
+                },
+                "custom": {
+                  "align": "auto",
+                  "cellOptions": {
+                    "type": "auto"
+                  },
+                  "inspect": false
+                },
+                "mappings": [],
+                "unit": "short",
+                "thresholds": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    }
+                  ]
+                }
+              },
+              "overrides": [
+                {
+                  "matcher": {
+                    "id": "byName",
+                    "options": "datname"
+                  },
+                  "properties": [
+                    {
+                      "id": "displayName",
+                      "value": "Database"
+                    }
+                  ]
+                }
+              ]
+            },
+            "options": {
+              "showHeader": true,
+              "cellHeight": "sm",
+              "footer": {
+                "show": false,
+                "reducer": [
+                  "sum"
+                ],
+                "countRows": false,
+                "fields": ""
+              }
+            }
+          },
+          {
+            "id": 37,
+            "type": "row",
+            "title": "Settings",
+            "gridPos": {
+              "h": 1,
+              "w": 24,
+              "x": 0,
+              "y": 97
+            },
+            "collapsed": false
+          },
+          {
+            "id": 38,
+            "type": "stat",
+            "title": "Max Connections",
+            "gridPos": {
+              "h": 4,
+              "w": 4,
+              "x": 0,
+              "y": 98
+            },
+            "datasource": {
+              "type": "prometheus",
+              "uid": "$datasource"
+            },
+            "targets": [
+              {
+                "expr": "pg_settings_max_connections{service=\"postgres-exporter\"}",
+                "format": "time_series",
+                "refId": "A",
+                "instant": true
+              }
+            ],
+            "description": "pg_settings_max_connections. Reported from pg_settings by the exporter.",
+            "fieldConfig": {
+              "defaults": {
+                "color": {
+                  "mode": "thresholds"
+                },
+                "mappings": [],
+                "unit": "short",
+                "thresholds": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    }
+                  ]
+                }
+              },
+              "overrides": []
+            },
+            "options": {
+              "colorMode": "value",
+              "graphMode": "area",
+              "justifyMode": "auto",
+              "orientation": "auto",
+              "textMode": "auto",
+              "reduceOptions": {
+                "calcs": [
+                  "lastNotNull"
+                ],
+                "fields": "",
+                "values": false
+              }
+            }
+          },
+          {
+            "id": 39,
+            "type": "stat",
+            "title": "Superuser Reserved",
+            "gridPos": {
+              "h": 4,
+              "w": 4,
+              "x": 4,
+              "y": 98
+            },
+            "datasource": {
+              "type": "prometheus",
+              "uid": "$datasource"
+            },
+            "targets": [
+              {
+                "expr": "pg_settings_superuser_reserved_connections{service=\"postgres-exporter\"}",
+                "format": "time_series",
+                "refId": "A",
+                "instant": true
+              }
+            ],
+            "description": "pg_settings_superuser_reserved_connections. Reported from pg_settings by the exporter.",
+            "fieldConfig": {
+              "defaults": {
+                "color": {
+                  "mode": "thresholds"
+                },
+                "mappings": [],
+                "unit": "short",
+                "thresholds": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    }
+                  ]
+                }
+              },
+              "overrides": []
+            },
+            "options": {
+              "colorMode": "value",
+              "graphMode": "area",
+              "justifyMode": "auto",
+              "orientation": "auto",
+              "textMode": "auto",
+              "reduceOptions": {
+                "calcs": [
+                  "lastNotNull"
+                ],
+                "fields": "",
+                "values": false
+              }
+            }
+          },
+          {
+            "id": 40,
+            "type": "stat",
+            "title": "Shared Buffers",
+            "gridPos": {
+              "h": 4,
+              "w": 4,
+              "x": 8,
+              "y": 98
+            },
+            "datasource": {
+              "type": "prometheus",
+              "uid": "$datasource"
+            },
+            "targets": [
+              {
+                "expr": "pg_settings_shared_buffers_bytes{service=\"postgres-exporter\"}",
+                "format": "time_series",
+                "refId": "A",
+                "instant": true
+              }
+            ],
+            "description": "pg_settings_shared_buffers_bytes. Reported from pg_settings by the exporter.",
+            "fieldConfig": {
+              "defaults": {
+                "color": {
+                  "mode": "thresholds"
+                },
+                "mappings": [],
+                "unit": "bytes",
+                "thresholds": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    }
+                  ]
+                }
+              },
+              "overrides": []
+            },
+            "options": {
+              "colorMode": "value",
+              "graphMode": "area",
+              "justifyMode": "auto",
+              "orientation": "auto",
+              "textMode": "auto",
+              "reduceOptions": {
+                "calcs": [
+                  "lastNotNull"
+                ],
+                "fields": "",
+                "values": false
+              }
+            }
+          },
+          {
+            "id": 41,
+            "type": "stat",
+            "title": "Effective Cache Size",
+            "gridPos": {
+              "h": 4,
+              "w": 4,
+              "x": 12,
+              "y": 98
+            },
+            "datasource": {
+              "type": "prometheus",
+              "uid": "$datasource"
+            },
+            "targets": [
+              {
+                "expr": "pg_settings_effective_cache_size_bytes{service=\"postgres-exporter\"}",
+                "format": "time_series",
+                "refId": "A",
+                "instant": true
+              }
+            ],
+            "description": "pg_settings_effective_cache_size_bytes. Reported from pg_settings by the exporter.",
+            "fieldConfig": {
+              "defaults": {
+                "color": {
+                  "mode": "thresholds"
+                },
+                "mappings": [],
+                "unit": "bytes",
+                "thresholds": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    }
+                  ]
+                }
+              },
+              "overrides": []
+            },
+            "options": {
+              "colorMode": "value",
+              "graphMode": "area",
+              "justifyMode": "auto",
+              "orientation": "auto",
+              "textMode": "auto",
+              "reduceOptions": {
+                "calcs": [
+                  "lastNotNull"
+                ],
+                "fields": "",
+                "values": false
+              }
+            }
+          },
+          {
+            "id": 42,
+            "type": "stat",
+            "title": "Work Mem",
+            "gridPos": {
+              "h": 4,
+              "w": 4,
+              "x": 16,
+              "y": 98
+            },
+            "datasource": {
+              "type": "prometheus",
+              "uid": "$datasource"
+            },
+            "targets": [
+              {
+                "expr": "pg_settings_work_mem_bytes{service=\"postgres-exporter\"}",
+                "format": "time_series",
+                "refId": "A",
+                "instant": true
+              }
+            ],
+            "description": "pg_settings_work_mem_bytes. Reported from pg_settings by the exporter.",
+            "fieldConfig": {
+              "defaults": {
+                "color": {
+                  "mode": "thresholds"
+                },
+                "mappings": [],
+                "unit": "bytes",
+                "thresholds": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    }
+                  ]
+                }
+              },
+              "overrides": []
+            },
+            "options": {
+              "colorMode": "value",
+              "graphMode": "area",
+              "justifyMode": "auto",
+              "orientation": "auto",
+              "textMode": "auto",
+              "reduceOptions": {
+                "calcs": [
+                  "lastNotNull"
+                ],
+                "fields": "",
+                "values": false
+              }
+            }
+          },
+          {
+            "id": 43,
+            "type": "stat",
+            "title": "Maintenance Work Mem",
+            "gridPos": {
+              "h": 4,
+              "w": 4,
+              "x": 20,
+              "y": 98
+            },
+            "datasource": {
+              "type": "prometheus",
+              "uid": "$datasource"
+            },
+            "targets": [
+              {
+                "expr": "pg_settings_maintenance_work_mem_bytes{service=\"postgres-exporter\"}",
+                "format": "time_series",
+                "refId": "A",
+                "instant": true
+              }
+            ],
+            "description": "pg_settings_maintenance_work_mem_bytes. Reported from pg_settings by the exporter.",
+            "fieldConfig": {
+              "defaults": {
+                "color": {
+                  "mode": "thresholds"
+                },
+                "mappings": [],
+                "unit": "bytes",
+                "thresholds": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    }
+                  ]
+                }
+              },
+              "overrides": []
+            },
+            "options": {
+              "colorMode": "value",
+              "graphMode": "area",
+              "justifyMode": "auto",
+              "orientation": "auto",
+              "textMode": "auto",
+              "reduceOptions": {
+                "calcs": [
+                  "lastNotNull"
+                ],
+                "fields": "",
+                "values": false
+              }
+            }
+          },
+          {
+            "id": 44,
+            "type": "stat",
+            "title": "Max WAL Size",
+            "gridPos": {
+              "h": 4,
+              "w": 4,
+              "x": 0,
+              "y": 102
+            },
+            "datasource": {
+              "type": "prometheus",
+              "uid": "$datasource"
+            },
+            "targets": [
+              {
+                "expr": "pg_settings_max_wal_size_bytes{service=\"postgres-exporter\"}",
+                "format": "time_series",
+                "refId": "A",
+                "instant": true
+              }
+            ],
+            "description": "pg_settings_max_wal_size_bytes. Reported from pg_settings by the exporter.",
+            "fieldConfig": {
+              "defaults": {
+                "color": {
+                  "mode": "thresholds"
+                },
+                "mappings": [],
+                "unit": "bytes",
+                "thresholds": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    }
+                  ]
+                }
+              },
+              "overrides": []
+            },
+            "options": {
+              "colorMode": "value",
+              "graphMode": "area",
+              "justifyMode": "auto",
+              "orientation": "auto",
+              "textMode": "auto",
+              "reduceOptions": {
+                "calcs": [
+                  "lastNotNull"
+                ],
+                "fields": "",
+                "values": false
+              }
+            }
+          },
+          {
+            "id": 45,
+            "type": "stat",
+            "title": "Block Size",
+            "gridPos": {
+              "h": 4,
+              "w": 4,
+              "x": 4,
+              "y": 102
+            },
+            "datasource": {
+              "type": "prometheus",
+              "uid": "$datasource"
+            },
+            "targets": [
+              {
+                "expr": "pg_settings_block_size{service=\"postgres-exporter\"}",
+                "format": "time_series",
+                "refId": "A",
+                "instant": true
+              }
+            ],
+            "description": "pg_settings_block_size. Reported from pg_settings by the exporter.",
+            "fieldConfig": {
+              "defaults": {
+                "color": {
+                  "mode": "thresholds"
+                },
+                "mappings": [],
+                "unit": "short",
+                "thresholds": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    }
+                  ]
+                }
+              },
+              "overrides": []
+            },
+            "options": {
+              "colorMode": "value",
+              "graphMode": "area",
+              "justifyMode": "auto",
+              "orientation": "auto",
+              "textMode": "auto",
+              "reduceOptions": {
+                "calcs": [
+                  "lastNotNull"
+                ],
+                "fields": "",
+                "values": false
+              }
+            }
+          },
+          {
+            "id": 46,
+            "type": "stat",
+            "title": "Random Page Cost",
+            "gridPos": {
+              "h": 4,
+              "w": 4,
+              "x": 8,
+              "y": 102
+            },
+            "datasource": {
+              "type": "prometheus",
+              "uid": "$datasource"
+            },
+            "targets": [
+              {
+                "expr": "pg_settings_random_page_cost{service=\"postgres-exporter\"}",
+                "format": "time_series",
+                "refId": "A",
+                "instant": true
+              }
+            ],
+            "description": "pg_settings_random_page_cost. Reported from pg_settings by the exporter.",
+            "fieldConfig": {
+              "defaults": {
+                "color": {
+                  "mode": "thresholds"
+                },
+                "mappings": [],
+                "unit": "short",
+                "thresholds": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    }
+                  ]
+                }
+              },
+              "overrides": []
+            },
+            "options": {
+              "colorMode": "value",
+              "graphMode": "area",
+              "justifyMode": "auto",
+              "orientation": "auto",
+              "textMode": "auto",
+              "reduceOptions": {
+                "calcs": [
+                  "lastNotNull"
+                ],
+                "fields": "",
+                "values": false
+              }
+            }
+          },
+          {
+            "id": 47,
+            "type": "stat",
+            "title": "Seq Page Cost",
+            "gridPos": {
+              "h": 4,
+              "w": 4,
+              "x": 12,
+              "y": 102
+            },
+            "datasource": {
+              "type": "prometheus",
+              "uid": "$datasource"
+            },
+            "targets": [
+              {
+                "expr": "pg_settings_seq_page_cost{service=\"postgres-exporter\"}",
+                "format": "time_series",
+                "refId": "A",
+                "instant": true
+              }
+            ],
+            "description": "pg_settings_seq_page_cost. Reported from pg_settings by the exporter.",
+            "fieldConfig": {
+              "defaults": {
+                "color": {
+                  "mode": "thresholds"
+                },
+                "mappings": [],
+                "unit": "short",
+                "thresholds": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    }
+                  ]
+                }
+              },
+              "overrides": []
+            },
+            "options": {
+              "colorMode": "value",
+              "graphMode": "area",
+              "justifyMode": "auto",
+              "orientation": "auto",
+              "textMode": "auto",
+              "reduceOptions": {
+                "calcs": [
+                  "lastNotNull"
+                ],
+                "fields": "",
+                "values": false
+              }
+            }
+          },
+          {
+            "id": 48,
+            "type": "stat",
+            "title": "Autovacuum On",
+            "gridPos": {
+              "h": 4,
+              "w": 4,
+              "x": 16,
+              "y": 102
+            },
+            "datasource": {
+              "type": "prometheus",
+              "uid": "$datasource"
+            },
+            "targets": [
+              {
+                "expr": "pg_settings_autovacuum{service=\"postgres-exporter\"}",
+                "format": "time_series",
+                "refId": "A",
+                "instant": true
+              }
+            ],
+            "description": "pg_settings_autovacuum. Reported from pg_settings by the exporter.",
+            "fieldConfig": {
+              "defaults": {
+                "color": {
+                  "mode": "thresholds"
+                },
+                "mappings": [],
+                "unit": "short",
+                "thresholds": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    }
+                  ]
+                }
+              },
+              "overrides": []
+            },
+            "options": {
+              "colorMode": "value",
+              "graphMode": "area",
+              "justifyMode": "auto",
+              "orientation": "auto",
+              "textMode": "auto",
+              "reduceOptions": {
+                "calcs": [
+                  "lastNotNull"
+                ],
+                "fields": "",
+                "values": false
+              }
+            }
+          },
+          {
+            "id": 49,
+            "type": "stat",
+            "title": "Autovacuum Naptime",
+            "gridPos": {
+              "h": 4,
+              "w": 4,
+              "x": 20,
+              "y": 102
+            },
+            "datasource": {
+              "type": "prometheus",
+              "uid": "$datasource"
+            },
+            "targets": [
+              {
+                "expr": "pg_settings_autovacuum_naptime_seconds{service=\"postgres-exporter\"}",
+                "format": "time_series",
+                "refId": "A",
+                "instant": true
+              }
+            ],
+            "description": "pg_settings_autovacuum_naptime_seconds. Reported from pg_settings by the exporter.",
+            "fieldConfig": {
+              "defaults": {
+                "color": {
+                  "mode": "thresholds"
+                },
+                "mappings": [],
+                "unit": "s",
+                "thresholds": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    }
+                  ]
+                }
+              },
+              "overrides": []
+            },
+            "options": {
+              "colorMode": "value",
+              "graphMode": "area",
+              "justifyMode": "auto",
+              "orientation": "auto",
+              "textMode": "auto",
+              "reduceOptions": {
+                "calcs": [
+                  "lastNotNull"
+                ],
+                "fields": "",
+                "values": false
+              }
+            }
+          },
+          {
+            "id": 50,
+            "type": "timeseries",
+            "title": "Transaction ID Wraparound Age",
+            "gridPos": {
+              "h": 8,
+              "w": 12,
+              "x": 0,
+              "y": 106
+            },
+            "datasource": {
+              "type": "prometheus",
+              "uid": "$datasource"
+            },
+            "targets": [
+              {
+                "expr": "max by (datname) (pg_database_wraparound_age_datfrozenxid_seconds{service=\"postgres-exporter\"})",
+                "format": "time_series",
+                "refId": "A",
+                "legendFormat": "{{datname}}"
+              }
+            ],
+            "description": "Distance to the point where a database stops accepting writes. Default autovacuum_freeze_max_age is 200,000,000 transactions, so a value climbing into the hundreds of millions needs vacuum to run on that database, now -- this is the failure that takes a database offline.",
+            "fieldConfig": {
+              "defaults": {
+                "color": {
+                  "mode": "palette-classic"
+                },
+                "mappings": [],
+                "unit": "s",
+                "thresholds": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    }
+                  ]
+                },
+                "min": 0
+              },
+              "overrides": []
+            },
+            "options": {
+              "legend": {
+                "calcs": [
+                  "lastNotNull",
+                  "mean",
+                  "max"
+                ],
+                "displayMode": "table",
+                "placement": "bottom",
+                "showLegend": true,
+                "sortBy": "Max",
+                "sortDesc": true
+              },
+              "tooltip": {
+                "mode": "multi",
+                "sort": "desc"
+              },
+              "drawStyle": "line",
+              "lineInterpolation": "linear",
+              "barWidth": 0,
+              "fillOpacity": 10,
+              "gradientMode": "none",
+              "pointSize": 5,
+              "scaleDistribution": {
+                "type": "linear"
+              },
+              "stacking": {
+                "group": "A",
+                "mode": "none"
+              },
+              "spanNulls": false
+            }
+          },
+          {
+            "id": 51,
+            "type": "timeseries",
+            "title": "Multixact Wraparound Age",
+            "gridPos": {
+              "h": 8,
+              "w": 12,
+              "x": 12,
+              "y": 106
+            },
+            "datasource": {
+              "type": "prometheus",
+              "uid": "$datasource"
+            },
+            "targets": [
+              {
+                "expr": "max by (datname) (pg_database_wraparound_age_datminmxid_seconds{service=\"postgres-exporter\"})",
+                "format": "time_series",
+                "refId": "A",
+                "legendFormat": "{{datname}}"
+              }
+            ],
+            "description": "The same idea for multi-transaction ids, which age far more slowly. It is the one people forget until it is urgent.",
+            "fieldConfig": {
+              "defaults": {
+                "color": {
+                  "mode": "palette-classic"
+                },
+                "mappings": [],
+                "unit": "s",
+                "thresholds": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    }
+                  ]
+                },
+                "min": 0
+              },
+              "overrides": []
+            },
+            "options": {
+              "legend": {
+                "calcs": [
+                  "lastNotNull",
+                  "mean",
+                  "max"
+                ],
+                "displayMode": "table",
+                "placement": "bottom",
+                "showLegend": true,
+                "sortBy": "Max",
+                "sortDesc": true
+              },
+              "tooltip": {
+                "mode": "multi",
+                "sort": "desc"
+              },
+              "drawStyle": "line",
+              "lineInterpolation": "linear",
+              "barWidth": 0,
+              "fillOpacity": 10,
+              "gradientMode": "none",
+              "pointSize": 5,
+              "scaleDistribution": {
+                "type": "linear"
+              },
+              "stacking": {
+                "group": "A",
+                "mode": "none"
+              },
+              "spanNulls": false
+            }
+          },
+          {
+            "id": 52,
+            "type": "table",
+            "title": "Archiver",
+            "gridPos": {
+              "h": 7,
+              "w": 8,
+              "x": 0,
+              "y": 114
+            },
+            "datasource": {
+              "type": "prometheus",
+              "uid": "$datasource"
+            },
+            "targets": [
+              {
+                "expr": "sum by (datname) (pg_stat_archiver_archived_count{service=\"postgres-exporter\"})",
+                "format": "time_series",
+                "refId": "A",
+                "legendFormat": "archived"
+              },
+              {
+                "expr": "sum by (datname) (pg_stat_archiver_failed_count{service=\"postgres-exporter\"})",
+                "format": "time_series",
+                "refId": "B",
+                "legendFormat": "failed"
+              }
+            ],
+            "description": "Cumulative WAL archiver counters. Only relevant if basebackup/wal archiving is in use; both counters stay at zero otherwise, which is not a fault.",
+            "transformations": [
+              {
+                "id": "organize",
+                "options": {
+                  "excludeByName": {
+                    "Time": true
+                  },
+                  "includeByName": {},
+                  "indexByName": {},
+                  "renameByName": {
+                    "Value": "Value"
+                  }
+                }
+              }
+            ],
+            "fieldConfig": {
+              "defaults": {
+                "color": {
+                  "mode": "thresholds"
+                },
+                "custom": {
+                  "align": "auto",
+                  "cellOptions": {
+                    "type": "auto"
+                  },
+                  "inspect": false
+                },
+                "mappings": [],
+                "unit": "short",
+                "thresholds": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    }
+                  ]
+                }
+              },
+              "overrides": [
+                {
+                  "matcher": {
+                    "id": "byName",
+                    "options": "datname"
+                  },
+                  "properties": [
+                    {
+                      "id": "displayName",
+                      "value": "Database"
+                    }
+                  ]
+                }
+              ]
+            },
+            "options": {
+              "showHeader": true,
+              "cellHeight": "sm",
+              "footer": {
+                "show": false,
+                "reducer": [
+                  "sum"
+                ],
+                "countRows": false,
+                "fields": ""
+              }
+            }
+          },
+          {
+            "id": 53,
+            "type": "table",
+            "title": "Scrape Timing",
+            "gridPos": {
+              "h": 7,
+              "w": 16,
+              "x": 8,
+              "y": 114
+            },
+            "datasource": {
+              "type": "prometheus",
+              "uid": "$datasource"
+            },
+            "targets": [
+              {
+                "expr": "pg_exporter_last_scrape_duration_seconds{service=\"postgres-exporter\"}",
+                "format": "time_series",
+                "refId": "A",
+                "legendFormat": "exporter"
+              },
+              {
+                "expr": "sum by (collector) (pg_scrape_collector_duration_seconds{service=\"postgres-exporter\"})",
+                "format": "time_series",
+                "refId": "B",
+                "legendFormat": "{{collector}}"
+              }
+            ],
+            "description": "How long the exporter takes and which collector is responsible. A collector that grows over time is usually a query against pg_stat_* getting slower as the catalog does.",
+            "transformations": [
+              {
+                "id": "organize",
+                "options": {
+                  "excludeByName": {
+                    "Time": true
+                  },
+                  "includeByName": {},
+                  "indexByName": {},
+                  "renameByName": {
+                    "Value": "Value"
+                  }
+                }
+              }
+            ],
+            "fieldConfig": {
+              "defaults": {
+                "color": {
+                  "mode": "thresholds"
+                },
+                "custom": {
+                  "align": "auto",
+                  "cellOptions": {
+                    "type": "auto"
+                  },
+                  "inspect": false
+                },
+                "mappings": [],
+                "unit": "short",
+                "thresholds": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    }
+                  ]
+                }
+              },
+              "overrides": [
+                {
+                  "matcher": {
+                    "id": "byName",
+                    "options": "collector"
+                  },
+                  "properties": [
+                    {
+                      "id": "displayName",
+                      "value": "Collector"
+                    }
+                  ]
+                }
+              ]
+            },
+            "options": {
+              "showHeader": true,
+              "cellHeight": "sm",
+              "footer": {
+                "show": false,
+                "reducer": [
+                  "sum"
+                ],
+                "countRows": false,
+                "fields": ""
+              }
+            }
+          }
+        ]
+      }
