@@ -65,3 +65,7 @@ resources:
   - grafana/grafana-dashboards/alerts-dashboard.yaml
   - grafana/grafana-dashboards/amdgpu-dashboard.yaml
   - grafana/grafana-dashboards/security-scans-dashboard.yaml
+  # The workload itself: PVC + Deployment + Service + Middleware + Ingress in namespace
+  # `observability`. It reads observability-grafana-admin and observability-grafana-oidc (Task 3) and
+  # titan-tls, reflected in.
+  - grafana/grafana.yaml

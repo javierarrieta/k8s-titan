@@ -94,3 +94,9 @@ spec:
         # unread in a running pod — the same inert-annotation defect the monitoring entry above
         # records for promtail. `watchGlobally: false` means this list is the whole scope.
         - open-webui
+        # Grafana. Without this line `reloader.stakater.com/auto: "true"` on the Deployment is inert
+        # and a dashboard or OIDC Secret edit never restarts the pod — Grafana keeps serving whatever
+        # it read at start and reports healthy the whole time. This is the third time this list has
+        # bitten (promtail, then open-webui, both recorded above), which is why the comment is here
+        # rather than in a commit message nobody will read.
+        - observability
