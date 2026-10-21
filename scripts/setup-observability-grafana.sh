@@ -12,7 +12,7 @@
 # THREE FILES, TWO CREDENTIALS
 #   - the OIDC pair: authentik's blueprint AND Grafana's env. If they disagree, every login fails
 #     with an OIDC error that reads like a Grafana bug. `make observability-oidc-check` proves it.
-#   - the admin password: Grafana's escape hatch, held once, in one Secret the Deployment envFroms.
+#   - the admin credential: Grafana's escape hatch, held once, in one Secret the Deployment envFroms.
 #
 # Nothing prints a value. What you see is a truncated SHA-256 per file, so a re-run can be compared
 # against the last one without a secret being on screen.
