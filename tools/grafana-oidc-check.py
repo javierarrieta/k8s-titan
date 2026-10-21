@@ -33,14 +33,50 @@ from sopsload import find, load_docs, load_text, load_tolerating_tags, secret_ke
 
 import yaml  # noqa: E402
 
-TEMPLATE = "authentik/blueprints-grafana.yaml"
-PLACEHOLDERS = ("GRAFANA_OIDC_CLIENT_ID", "GRAFANA_OIDC_CLIENT_SECRET")
-REDIRECT = "https://tesla-boards.titan.arrieta.eu/login/generic_oauth"
-HOST = "tesla-boards.titan.arrieta.eu"
-BLUEPRINT_SECRET = "authentik-grafana-blueprint"
-BLUEPRINT_KEY = "grafana.yaml"
-APP_SECRET = "tesla-grafana-oidc"
-APP_NS = "apps"
+# Two Grafanas, one gate. Each variant is the same four-way agreement — reviewed template vs rendered
+# blueprint, Grafana's copy vs authentik's copy, mounted vs not, redirect host vs served host — over
+# a different set of names. A forked script was declined (spec §9 of the 2026-10-21 Grafana design):
+# the failure modes are identical and two scripts drift, which is the thing these gates exist to
+# prevent. `tesla` is the default so `make grafana-oidc-check` behaves exactly as it always did.
+VARIANTS = {
+    "tesla": {
+        "TEMPLATE": "authentik/blueprints-grafana.yaml",
+        "PLACEHOLDERS": ("GRAFANA_OIDC_CLIENT_ID", "GRAFANA_OIDC_CLIENT_SECRET"),
+        "REDIRECT": "https://tesla-boards.titan.arrieta.eu/login/generic_oauth",
+        "HOST": "tesla-boards.titan.arrieta.eu",
+        "BLUEPRINT_SECRET": "authentik-grafana-blueprint",
+        "BLUEPRINT_KEY": "grafana.yaml",
+        "APP_SECRET": "tesla-grafana-oidc",
+        "APP_NS": "apps",
+        "DEPLOY": "tesla-grafana",
+        "SLUG": "tesla-boards",
+        "SCRIPT": "scripts/setup-grafana-oidc.sh",
+    },
+    "observability": {
+        "TEMPLATE": "authentik/blueprints-observability.yaml",
+        "PLACEHOLDERS": ("GRAFANA_OIDC_CLIENT_ID", "GRAFANA_OIDC_CLIENT_SECRET"),
+        "REDIRECT": "https://grafana.titan.arrieta.eu/login/generic_oauth",
+        "HOST": "grafana.titan.arrieta.eu",
+        "BLUEPRINT_SECRET": "authentik-observability-blueprint",
+        "BLUEPRINT_KEY": "observability.yaml",
+        "APP_SECRET": "observability-grafana-oidc",
+        "APP_NS": "observability",
+        "DEPLOY": "grafana",
+        "SLUG": "observability",
+        "SCRIPT": "scripts/setup-observability-grafana.sh",
+    },
+}
+
+
+def variant_from(argv):
+    """The variant named by --variant=NAME, else tesla. argv[1] stays the tree root."""
+    for a in argv[2:]:
+        if a.startswith("--variant="):
+            name = a.split("=", 1)[1]
+            if name not in VARIANTS:
+                sys.exit(f"grafana-oidc-check: unknown variant {name!r}; known: {', '.join(VARIANTS)}")
+            return VARIANTS[name]
+    return VARIANTS["tesla"]
 
 
 def provider_entry(bp):
@@ -72,6 +108,11 @@ def container_env(deploy):
 
 def main():
     root = sys.argv[1] if len(sys.argv) > 1 else "apply"
+    v = variant_from(sys.argv)
+    TEMPLATE, PLACEHOLDERS = v["TEMPLATE"], v["PLACEHOLDERS"]
+    REDIRECT, HOST = v["REDIRECT"], v["HOST"]
+    BLUEPRINT_SECRET, BLUEPRINT_KEY = v["BLUEPRINT_SECRET"], v["BLUEPRINT_KEY"]
+    APP_SECRET, APP_NS = v["APP_SECRET"], v["APP_NS"]
     docs = load_docs(root)
     checked = bad = 0
 
@@ -98,8 +139,8 @@ def main():
         fail(f"{TEMPLATE} declares no authentik_core.application entry")
     if pe and ae:
         checked += 1
-        if (ae.get("attrs") or {}).get("slug") != "tesla-boards":
-            fail("the application slug is not 'tesla-boards' - with issuer_mode per_provider the "
+        if (ae.get("attrs") or {}).get("slug") != v["SLUG"]:
+            fail(f"the application slug is not {v['SLUG']!r} - with issuer_mode per_provider the "
                  "slug IS the issuer path, so Grafana's configured issuer and authentik's would "
                  "differ, and that failure looks like a bad token, not a bad slug")
         uris = [u.get("url") for u in ((pe.get("attrs") or {}).get("redirect_uris") or [])]
@@ -124,8 +165,8 @@ def main():
     # --- B. Grafana's copy, and the rendered artifact ------------------------------------------
     cid, cdata = secret_key(docs, APP_SECRET, APP_NS, "GF_AUTH_GENERIC_OAUTH_CLIENT_ID")
     if cdata is None:
-        print("grafana-oidc-check: tesla-grafana-oidc not present - 0 rendered OIDC artifacts to "
-              "reconcile (run scripts/setup-grafana-oidc.sh)")
+        print(f"grafana-oidc-check: {APP_SECRET} not present - 0 rendered OIDC artifacts to "
+              f"reconcile (run {v['SCRIPT']})")
         print(f"grafana-oidc-check: {checked} template check(s) run, {bad} mismatch(es)")
         sys.exit(1 if bad else 0)
 
@@ -160,7 +201,7 @@ def main():
                 fail(f"authentik's client_id is {rattrs.get('client_id')!r} but Grafana is "
                      f"configured with {cid!r} - the two copies of this credential disagree")
             elif rattrs.get("client_secret") != csec:
-                fail("authentik's client_secret does not match tesla-grafana-oidc - every login "
+                fail(f"authentik's client_secret does not match {APP_SECRET} - every login "
                      "will fail with an OIDC error that reads like a Grafana bug")
             else:
                 checked += 1
@@ -170,7 +211,7 @@ def main():
                 if load_tolerating_tags(rendered) != load_tolerating_tags(expected):
                     fail(f"{BLUEPRINT_SECRET}:{BLUEPRINT_KEY} is not the committed template with "
                          f"the two credentials substituted - the applied artifact has drifted from "
-                         f"the reviewed source; re-run scripts/setup-grafana-oidc.sh")
+                         f"the reviewed source; re-run {v['SCRIPT']}")
                 checked += 1
             except yaml.YAMLError as exc:
                 fail(f"rendered blueprint is not valid YAML: {exc}")
@@ -190,9 +231,9 @@ def main():
             fail(f"nothing mounts {BLUEPRINT_SECRET}: the worker never sees it, so the blueprint "
                  f"cannot apply. Add it under spec.values.blueprints.secrets")
 
-    deploy = find(docs, "Deployment", "tesla-grafana", APP_NS)
+    deploy = find(docs, "Deployment", v["DEPLOY"], APP_NS)
     if deploy is None:
-        fail("no Deployment apps/tesla-grafana - cannot check how Grafana is configured")
+        fail(f"no Deployment {APP_NS}/{v['DEPLOY']} - cannot check how Grafana is configured")
     else:
         checked += 1
         env, from_secrets = container_env(deploy)

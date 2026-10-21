@@ -79,3 +79,11 @@ resources:
   - authentik-open-webui-blueprint.yaml
   - open-webui-db-credentials.yaml
   - open-webui-secrets.yaml
+  # Grafana on titan. Minted together by scripts/setup-observability-grafana.sh so the duplicated
+  # half cannot be authored apart: the OIDC client exists in authentik's blueprint (namespace auth)
+  # and in Grafana's own env (namespace observability), and `make observability-oidc-check` is what
+  # proves they agree. The admin Secret is the escape hatch that keeps GF_AUTH_BASIC_ENABLED=true
+  # meaningful. An unlisted file here builds green and is silently never applied.
+  - authentik-observability-blueprint.yaml
+  - observability-grafana-oidc.yaml
+  - observability-grafana-admin.yaml

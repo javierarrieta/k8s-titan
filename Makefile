@@ -13,12 +13,12 @@ KUSTOMIZE_DIRS := $(shell find apply -name kustomization.yaml 2>/dev/null | sed 
 # not be able to slip between the encryption rule and the validation glob.
 SECRET_FIND := find apply/10-secrets \( -name '*.yaml' -o -name '*.yml' \) ! -name kustomization.yaml
 
-.PHONY: check check-ci kustomize-check kustomize-listing dry-run py-deps validate update-keys scan leak-check secrets-placement secrets-list secrets-present release-secrets db-url-check oidc-check grafana-oidc-check open-webui-oidc-check crd-check tesla-forwarder-test update-cnpg-crds update-crds
+.PHONY: check check-ci kustomize-check kustomize-listing dry-run py-deps validate update-keys scan leak-check secrets-placement secrets-list secrets-present release-secrets db-url-check oidc-check grafana-oidc-check observability-oidc-check open-webui-oidc-check crd-check tesla-forwarder-test update-cnpg-crds update-crds
 
 # leak-check runs FIRST: make has no -k, so it stops at the first failing prerequisite.
 # validate needs the age key, so an operator who forgot SOPS_AGE_KEY_FILE would never
 # reach a leak gate placed behind it.
-check: py-deps leak-check kustomize-check kustomize-listing validate secrets-placement release-secrets db-url-check oidc-check grafana-oidc-check open-webui-oidc-check crd-check tesla-forwarder-test
+check: py-deps leak-check kustomize-check kustomize-listing validate secrets-placement release-secrets db-url-check oidc-check grafana-oidc-check observability-oidc-check open-webui-oidc-check crd-check tesla-forwarder-test
 	@echo "check: all offline gates passed"
 
 # The subset provable from the tree alone - no age key, no cluster, no network.
@@ -509,6 +509,13 @@ oidc-check:
 # repo renamed that host once. Reads Secrets, so a local gate, not a CI one.
 grafana-oidc-check:
 	@python3 tools/grafana-oidc-check.py apply
+
+# observability-oidc-check: the same four-way agreement, one Grafana further along. Same script,
+# different variant — see spec §9 of the 2026-10-21 Grafana design for why a fork was declined. The
+# variant is not optional: an unrecognised --variant exits non-zero rather than quietly falling back
+# to tesla and reporting a clean run over the wrong Grafana.
+observability-oidc-check:
+	@python3 tools/grafana-oidc-check.py apply --variant=observability
 
 # open-webui-oidc-check: the same class again, with two traps the coder and Grafana gates cannot
 # express. open-webui's client lives in the reviewed template, the rendered blueprint, and the app's
