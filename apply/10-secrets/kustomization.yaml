@@ -1,6 +1,8 @@
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:
+  # Telegram credentials used by titan's independent Gatus monitor.
+  - gatus-telegram.yaml
   - ovh-domain-secrets.yaml
   # Referenced by the Cluster's s3Credentials, not by a HelmRelease, so `make
   # release-secrets` cannot vouch for it - see the gate's own comment in Makefile.
