@@ -204,10 +204,10 @@ was a second worker restart: `kubectl -n auth rollout restart deploy/authentik-w
   dashboards.
 - **`make release-secrets` does not scan this Deployment.** It reads `HelmRelease` values only, so a
   typo'd `secretRef` here surfaces as a `Pending` pod, not a red gate. open-webui has the same hole.
-- **Blueprint ingestion is unproven for this blueprint.** §7 step 6 is the only check that
-  distinguishes "never ingested" from "ingested and fine", and mounting in both places — which this PR
-  does — is necessary but was demonstrably not sufficient once before. Nobody has run step 6 against
-  `titan-observability`.
+- **Blueprint ingestion works, but only after a second restart.** Proven on first deploy (§9): the
+  Reloader-triggered restart skipped the file and a manual restart ingested it. The `BlueprintInstance`
+  row from §7 step 4b is the only thing that distinguishes "never ingested" from "ingested and fine",
+  and mounting in both places is necessary but not sufficient.
 - **No alerting.** No rules, no contact points, no Alertmanager here. The `alerts` board shows
   casa's.
 - **`grafana.titan.arrieta.eu` has no explicit DNS record** and relies on the `*.titan` wildcard.
@@ -297,5 +297,25 @@ Evidence trail, including the two readings that were wrong, because the wrong tu
    global, `jwks` carrying the slug, all four scopes offered, `refresh_token` granted. The manifest was
    never the problem.
 
-**Open.** Restart the worker so startup discovery ingests the file that is now provably on disk, then
-re-run the §7 step 4b query and expect `titan-observability mounted/secret-authentik-observability-blueprint/observability.yaml successful`. Until that row exists, treat the provider as hand-made.
+**Closed on 2026-10-21 at 15:33:53Z.** `kubectl -n auth rollout restart deploy/authentik-worker` fixed
+it: startup discovery created the row —
+
+```
+titan-observability mounted/secret-authentik-observability-blueprint/observability.yaml successful 2026-10-21 15:33:53
+```
+
+— 13 seconds after the new pod started, alongside the four blueprints that had been there all along.
+
+The uncomfortable part is *which* restart worked. Reloader restarted the worker at 15:02:04 when the
+Secret landed, the projection directory carries that same `15:02:04` timestamp, and discovery still
+skipped the file. A manual restart half an hour later, with the identical mount, ingested it
+immediately. The difference between the two is not explained by anything measured here, and the
+2026-10-20 incident needed the same second restart — so treat the pattern, not the cause:
+
+> **After adding a blueprint Secret, the Reloader-triggered restart is not enough. Check the
+> `BlueprintInstance` row (§7 step 4b). If it is absent, restart the worker once more and check again.**
+
+What a missing row actually costs is worth stating, because it is not downtime: `ak apply_blueprint`
+creates the objects and they survive restarts, so logins work — which is exactly why this is easy to
+leave half-fixed. Without the row nothing reconciles the provider, so a later edit to the blueprint in
+git changes nothing, and the next person has no record that the client came from a blueprint at all.
