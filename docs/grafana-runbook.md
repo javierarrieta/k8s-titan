@@ -147,7 +147,11 @@ curl -sS -G https://prometheus.local.arrieta.eu/api/v1/query --data-urlencode 'q
 # 6. BEFORE signing in: did authentik actually ingest the blueprint? Mounting is not applying, and
 #    this repo has a dated record of a mounted blueprint that silently never applied (see below).
 #    Needs an admin context — k8s-reader is Forbidden on pods/exec in `auth`.
-kubectl -n auth exec deploy/authentik-worker -- ak shell -c 'from authentik.blueprints.models import BlueprintInstance; [print(b.name, "|", b.path, "|", b.status, "|", b.last_applied) for b in BlueprintInstance.objects.all()]'
+kubectl -n auth exec deploy/authentik-worker -- ak shell -c 'for b in __import__("authentik.blueprints.models", fromlist=["BlueprintInstance"]).BlueprintInstance.objects.all(): print(b.name, b.path, b.status, b.last_applied)'
+> Written as one expression with no `;` on purpose. A semicolon-separated `-c` string does not survive
+> pasting into a shell reliably — measured 2026-10-21, where `from x import y; print(...)` arrived at
+> Django as just `from x import y` and failed with a SyntaxError that looked like a broken query.
+
 ```
 
 **A `titan-observability` row must exist before you debug a login.** Its absence is not a lag and not a
@@ -266,3 +270,32 @@ recorded rather than assumed).
 **Still unverified as of this writing:** the `BlueprintInstance` row, in-cluster `/api/health`, the role
 an authentik Admin actually receives, both datasources' Save & test, one panel per dashboard, and the
 UI/restart drift controls.
+
+### The blueprint did not land on first deploy — 2026-10-21, and what it cost to diagnose
+
+`ak apply_blueprint` succeeded and the provider is live, but **no `BlueprintInstance` row was created**,
+so the provider exists and is unmanaged: nothing in authentik knows it came from git, and nothing will
+re-apply it. Same end state as 2026-10-20.
+
+Evidence trail, including the two readings that were wrong, because the wrong turns are the useful part:
+
+1. `…/o/observability/.well-known/openid-configuration` → 404 while `…/o/tesla-boards/…` → 200. That
+   pair is a good test and worth keeping: it proves the provider is absent without any admin access.
+2. The live `HelmRelease` lists `authentik-observability-blueprint` in `blueprints.secrets`, the live
+   Reloader namespaces include `observability`, and `authentik-worker` restarted at `15:02:04Z`. So the
+   mount and the restart both happened, and neither was sufficient — again.
+3. `ls -l /blueprints/mounted/secret-authentik-observability-blueprint/` printed `total 0`, which was
+   read as "the Secret projected nothing". **That reading was wrong**, and the second opinion that
+   caught it was cheap: `kubectl get secret … -o go-template` showed the key `observability.yaml`
+   present, created `15:00:03Z`, and `ls -la` on the same path minutes later showed
+   `observability.yaml -> ..data/observability.yaml` with the `..2026_10_21_15_02_04` projection
+   directory. The `total 0` is unexplained and should be treated as bad data, not as a fact.
+   **Lesson: `ls -la`, not `ls -l`, and check the Secret's keys before believing an empty listing.**
+4. After `ak apply_blueprint`: discovery and jwks both `200`, issuer
+   `https://auth.titan.arrieta.eu/application/o/observability/`, and all four endpoints Grafana is
+   configured with matched the live discovery document exactly — `authorize`, `token` and `userinfo`
+   global, `jwks` carrying the slug, all four scopes offered, `refresh_token` granted. The manifest was
+   never the problem.
+
+**Open.** Restart the worker so startup discovery ingests the file that is now provably on disk, then
+re-run the §7 step 4b query and expect `titan-observability mounted/secret-authentik-observability-blueprint/observability.yaml successful`. Until that row exists, treat the provider as hand-made.

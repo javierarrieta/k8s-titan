@@ -1247,7 +1247,7 @@ Expected: a `*.titan.arrieta.eu` cert. A `TRAEFIK DEFAULT CERT` means Reflector 
 Needs the admin context; `k8s-reader` is `Forbidden` on `pods/exec` in `auth`.
 
 ```bash
-kubectl -n auth exec deploy/authentik-worker -- ak shell -c 'from authentik.blueprints.models import BlueprintInstance; [print(b.name, "|", b.path, "|", b.status, "|", b.last_applied) for b in BlueprintInstance.objects.all()]'
+kubectl -n auth exec deploy/authentik-worker -- ak shell -c 'for b in __import__("authentik.blueprints.models", fromlist=["BlueprintInstance"]).BlueprintInstance.objects.all(): print(b.name, b.path, b.status, b.last_applied)'
 ```
 
 Expected: a `titan-observability` row with `status: successful` and a `path` of
