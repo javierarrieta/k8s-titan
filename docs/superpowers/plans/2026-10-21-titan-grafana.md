@@ -1282,9 +1282,16 @@ are on purpose.
 
 - [ ] **Step 8: Prove the drift controls work**
 
-Try to save a dashboard edit in the UI — it should not offer to. Then change one byte of a dashboard
-in git, push, and confirm the pod restarts. A restart proves the Reloader namespace entry landed;
-no restart means the annotation is sitting inert and step 6 of Task 2 needs re-checking.
+Two different things, and conflating them produces a false alarm. **Overwriting** a provisioned
+dashboard must be refused — `allowUiUpdates: false` is on all seven providers and blocks saving over
+the file-backed UID, so the original keeps its Provisioned badge and refuses a plain Save. **Save As**
+is allowed by design: it mints a new UID no provider owns. Measured on first deploy, saving a copy of
+`Security Scans` as `Security Scans 2` succeeded and that is correct; the copy then lives in sqlite on
+the PVC, unbacked and invisible to git, so delete copies you do not want.
+
+The control that actually fails silently is the second one: change one byte of a dashboard in git,
+push, and confirm the pod restarts. A restart proves the Reloader namespace entry landed; no restart
+means the annotation is sitting inert and step 6 of Task 2 needs re-checking.
 
 - [ ] **Step 9: Record what was observed**
 

@@ -166,9 +166,23 @@ Then in the browser: sign in through authentik and **check the role, not just th
 authentik Admin must land as `Admin`); Connections → data sources → Save & test on both; and one
 panel per dashboard, with §3 telling you which empties are expected.
 
-Finally, prove the drift controls work: the UI should not offer to save a dashboard edit, and a
-one-byte change to a dashboard in git should restart the pod. No restart means §6's Reloader list is
-missing the namespace.
+Finally, prove the drift controls work — and be precise about what the first one proves, because
+"the UI let me save a dashboard" is not automatically a failure:
+
+- **Overwriting a provisioned dashboard must be refused.** `allowUiUpdates: false` is set on all seven
+  providers, and it blocks saving *over the file-backed UID*. The original board should still show the
+  **Provisioned** badge and refuse a plain Save.
+- **"Save As" is allowed, and that is correct.** It creates a new dashboard with a new UID that no
+  provider owns, so nothing is being overwritten. Measured on first deploy: saving a copy of
+  `Security Scans` as `Security Scans 2` succeeded, and that is expected behaviour, not a hole.
+
+The consequence of a Save As copy is worth knowing: it lives in Grafana's sqlite on the PVC — the one
+part of this deployment with no backup — and git can never change or delete it. Delete copies you do not
+want, or keep them knowingly.
+
+The second control is the one that actually fails silently: change one byte of a dashboard in git, push,
+and confirm the pod restarts. No restart means §6's Reloader list is missing the namespace, and the pod
+will report healthy while serving whatever it read at start.
 
 ### Forcing the blueprint
 
@@ -319,3 +333,19 @@ What a missing row actually costs is worth stating, because it is not downtime: 
 creates the objects and they survive restarts, so logins work — which is exactly why this is easy to
 leave half-fixed. Without the row nothing reconciles the provider, so a later edit to the blueprint in
 git changes nothing, and the next person has no record that the client came from a blueprint at all.
+
+### Browser verification — 2026-10-21, by the operator
+
+Signed in through authentik, checked the role rather than just the login, ran Save & test on both
+datasources, and looked at the boards. Reported good on all of it. The one observation worth recording
+is the `Save As` case above: a copy of `Security Scans` saved as `Security Scans 2`, which is permitted
+by design and is not `allowUiUpdates` failing — all seven providers carry `allowUiUpdates: false`, and
+what that flag blocks is overwriting the file-backed UID.
+
+Recorded at that granularity on purpose. Per-panel values were not captured, and the expected empties
+(`postgres` is casa's database, `alerts` is casa's Alertmanager, `security-scans` is thin by
+construction) were not individually re-listed against what appeared.
+
+**Still not done:** the git half of the drift control — one byte changed in `main`, pod should restart.
+That is the check that proves the Reloader namespace entry is live, and nothing above substitutes for
+it.
