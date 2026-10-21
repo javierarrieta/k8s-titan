@@ -1,0 +1,303 @@
+# Grafana — the homelab's pane of glass.
+#
+# Design and every declined alternative: docs/superpowers/specs/2026-10-21-titan-grafana-design.md.
+# The three things below are the ones that fail silently, so they are stated where the manifests are.
+#
+#   1. THE IMAGE IS grafana/grafana, NOT teslamate/grafana. The Tesla image (what casa and
+#      tesla-boards both use) ships Tesla's dashboards and provisions a Postgres datasource from
+#      DATABASE_*; neither is wanted here, and inheriting the image would inherit both.
+#
+#   2. THE EDGE GATE AND OIDC ANSWER DIFFERENT QUESTIONS. The Middleware below decides whether the
+#      host may be reached at all and never tells Grafana who you are; GF_AUTH_GENERIC_OAUTH_*
+#      supplies identity and role. Both are on purpose — the same split tesla-boards records, and
+#      the reason is there: without OIDC the only thing inside a public host is a shared admin
+#      password, and without the edge gate Grafana's own config is the only barrier between the
+#      internet and every cluster this Prometheus holds.
+#
+#   3. THE SECRETS THIS envFrom'S ARRIVE IN TASK 3. Between the two commits the pod is Pending on a
+#      missing Secret. That is a half-finished tree, not a broken one, and it resolves within the
+#      same PR.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: grafana-data
+  namespace: observability
+spec:
+  accessModes:
+  - ReadWriteOnce
+  # local-path-retain, the same class open-webui uses: it survives `kubectl delete pvc`, which
+  # local-path does not. Note this volume is NOT backed up — this cluster backs up the Postgres
+  # cluster and nothing else. With allowUiUpdates false on every provider the volume holds only
+  # Grafana's sqlite (users, preferences, API keys), so losing it means re-login, not lost
+  # dashboards. That is an argument, not a drilled restore.
+  storageClassName: local-path-retain
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: grafana
+  namespace: observability
+  annotations:
+    # Does nothing until `observability` is in reloader's values.reloader.namespaces — Reloader does
+    # not look at a namespace outside that list, and the annotation sitting inert is the recorded
+    # promtail/open-webui defect. Both halves are in this PR; the comment is so the next person does
+    # not delete the "useless" one.
+    reloader.stakater.com/auto: "true"
+spec:
+  replicas: 1
+  # RWO PVC: a RollingUpdate schedules pod 2 while pod 1 still holds the volume and the new pod sits
+  # Pending on a volume conflict forever. Recreate costs a few seconds of dashboards.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: grafana
+  template:
+    metadata:
+      labels:
+        app: grafana
+    spec:
+      securityContext:
+        # The official image's own USER is grafana at uid 472, gid 0, and Grafana's images keep gid 0
+        # deliberately so a mounted PVC can be group-writable. Same reasoning tesla-boards records.
+        runAsNonRoot: true
+        runAsUser: 472
+        runAsGroup: 0
+        fsGroup: 0
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: grafana
+        image: grafana/grafana:12.3.1@sha256:2175aaa91c96733d86d31cf270d5310b278654b03f5718c59de12a865380a31f
+        ports:
+        - containerPort: 3000
+          name: http
+        envFrom:
+        - secretRef:
+            name: observability-grafana-admin
+        - secretRef:
+            name: observability-grafana-oidc
+        env:
+        # What Grafana puts in the links it generates itself, so it must be the hostname users
+        # actually reach. The OIDC redirect below has to name this same host; make
+        # observability-oidc-check fails if the two ever move apart.
+        - name: GF_SERVER_ROOT_URL
+          value: https://grafana.titan.arrieta.eu/
+        - name: GF_SERVER_SERVE_FROM_SUB_PATH
+          value: "false"
+        - name: TZ
+          value: UTC
+        - name: GF_AUTH_ANONYMOUS_ENABLED
+          value: "false"
+        # Grafana's own signup form, separate from OIDC's allow_sign_up below. Off: accounts come
+        # from authentik, not from whoever finds the form.
+        - name: GF_USERS_ALLOW_SIGN_UP
+          value: "false"
+        - name: GF_ANALYTICS_REPORTING_ENABLED
+          value: "false"
+        - name: GF_ANALYTICS_CHECK_FOR_UPDATES
+          value: "false"
+        # --- single sign-on: Grafana delegates identity to authentik over OIDC ------------------
+        # Endpoints from this instance's live discovery document, not from documentation: authorize,
+        # token and userinfo are GLOBAL paths with no slug in them; only issuer and jwks carry the
+        # slug. Composing `.../o/observability/authorize/` looks obvious and 404s.
+        - name: GF_AUTH_GENERIC_OAUTH_ENABLED
+          value: "true"
+        - name: GF_AUTH_GENERIC_OAUTH_NAME
+          value: authentik
+        - name: GF_AUTH_GENERIC_OAUTH_AUTH_URL
+          value: https://auth.titan.arrieta.eu/application/o/authorize/
+        - name: GF_AUTH_GENERIC_OAUTH_TOKEN_URL
+          value: https://auth.titan.arrieta.eu/application/o/token/
+        - name: GF_AUTH_GENERIC_OAUTH_API_URL
+          value: https://auth.titan.arrieta.eu/application/o/userinfo/
+        # Without validate_id_token Grafana trusts an unverified id_token, which is a real weakening
+        # even behind the edge gate. It is not free: with it true and a wrong jwk_set_url,
+        # authentication fails outright.
+        - name: GF_AUTH_GENERIC_OAUTH_VALIDATE_ID_TOKEN
+          value: "true"
+        - name: GF_AUTH_GENERIC_OAUTH_JWK_SET_URL
+          value: https://auth.titan.arrieta.eu/application/o/observability/jwks/
+        # profile is load-bearing, not decoration: the `groups` claim exists only because authentik's
+        # default profile scope mapping emits it. Drop it and the role expression below evaluates
+        # against a missing claim and everyone silently lands as Viewer.
+        - name: GF_AUTH_GENERIC_OAUTH_SCOPES
+          value: openid email profile offline_access
+        - name: GF_AUTH_GENERIC_OAUTH_EMAIL_ATTRIBUTE_PATH
+          value: email
+        - name: GF_AUTH_GENERIC_OAUTH_LOGIN_ATTRIBUTE_PATH
+          value: preferred_username
+        - name: GF_AUTH_GENERIC_OAUTH_NAME_ATTRIBUTE_PATH
+          value: name
+        # authentik Admins -> Grafana Org Admin, everyone else Viewer. GrafanaAdmin (server admin) is
+        # deliberately not granted.
+        - name: GF_AUTH_GENERIC_OAUTH_ROLE_ATTRIBUTE_PATH
+          value: contains(groups[*], 'authentik Admins') && 'Admin' || 'Viewer'
+        - name: GF_AUTH_GENERIC_OAUTH_ALLOW_SIGN_UP
+          value: "true"
+        # Safe specifically because the edge gate means authentik already holds a session by the time
+        # Grafana is reached, so this is a silent redirect, not a second prompt. If the forward-auth
+        # annotation is ever removed, revisit this — it is then the thing deciding who gets in.
+        - name: GF_AUTH_GENERIC_OAUTH_AUTO_LOGIN
+          value: "true"
+        - name: GF_AUTH_GENERIC_OAUTH_USE_REFRESH_TOKEN
+          value: "true"
+        # THE ESCAPE HATCH — keep this true. If the OIDC config is ever wrong and basic auth is off,
+        # the only way back in is editing the admin Secret and restarting the pod.
+        - name: GF_AUTH_BASIC_ENABLED
+          value: "true"
+        volumeMounts:
+        - name: data
+          mountPath: /var/lib/grafana
+        - name: datasources
+          mountPath: /etc/grafana/provisioning/datasources
+          readOnly: true
+        - name: dashboard-provisioning
+          mountPath: /etc/grafana/provisioning/dashboards
+          readOnly: true
+        - name: dashboards-node-exporter
+          mountPath: /var/lib/grafana/dashboards/node-exporter
+          readOnly: true
+        - name: dashboards-postgres
+          mountPath: /var/lib/grafana/dashboards/postgres
+          readOnly: true
+        - name: dashboards-comin
+          mountPath: /var/lib/grafana/dashboards/comin
+          readOnly: true
+        - name: dashboards-disk
+          mountPath: /var/lib/grafana/dashboards/disk
+          readOnly: true
+        - name: dashboards-alerts
+          mountPath: /var/lib/grafana/dashboards/alerts
+          readOnly: true
+        - name: dashboards-amdgpu
+          mountPath: /var/lib/grafana/dashboards/amdgpu
+          readOnly: true
+        - name: dashboards-security-scans
+          mountPath: /var/lib/grafana/dashboards/security-scans
+          readOnly: true
+        livenessProbe:
+          httpGet:
+            path: /api/health
+            port: http
+          initialDelaySeconds: 30
+          periodSeconds: 30
+        readinessProbe:
+          httpGet:
+            path: /api/health
+            port: http
+        resources:
+          requests:
+            cpu: 100m
+            memory: 256Mi
+          limits:
+            cpu: 500m
+            memory: 512Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+      volumes:
+      - name: data
+        persistentVolumeClaim:
+          claimName: grafana-data
+      - name: datasources
+        configMap:
+          name: grafana-datasources
+      - name: dashboard-provisioning
+        configMap:
+          name: grafana-dashboard-provisioning
+      - name: dashboards-node-exporter
+        configMap:
+          name: grafana-node-exporter-dashboard
+      - name: dashboards-postgres
+        configMap:
+          name: grafana-postgres-dashboard
+      - name: dashboards-comin
+        configMap:
+          name: grafana-comin-dashboard
+      - name: dashboards-disk
+        configMap:
+          name: grafana-disk-dashboard
+      - name: dashboards-alerts
+        configMap:
+          name: grafana-alerts-dashboard
+      - name: dashboards-amdgpu
+        configMap:
+          name: grafana-amdgpu-dashboard
+      - name: dashboards-security-scans
+        configMap:
+          name: grafana-security-scans-dashboard
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: grafana
+  namespace: observability
+spec:
+  selector:
+    app: grafana
+  ports:
+  - name: http
+    port: 80
+    targetPort: http
+---
+# Forward-auth to authentik's embedded outpost. Its own Middleware because Traefik CRD middlewares
+# are namespaced — apps-teslamate-auth cannot be referenced from observability, and a second
+# namespace needs its own object.
+#
+# The three values are tesla-boards' and for its documented reasons: the outpost selects its provider
+# from X-Forwarded-Host (so trustForwardHeader is what makes resolution work at all), and
+# maxResponseBodySize is what authentik's own Traefik-3 generator sets — unset, Traefik logs a DoS
+# warning and buffers an unbounded auth response.
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: grafana-auth
+  namespace: observability
+spec:
+  forwardAuth:
+    address: http://authentik-server.auth.svc.cluster.local/outpost.goauthentik.io/auth/traefik
+    trustForwardHeader: true
+    maxResponseBodySize: 4194304
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: grafana
+  namespace: observability
+  # THE LINE THAT MATTERS MOST IN THIS FILE. Without it the homelab's metrics are public to anyone who
+  # learns the hostname, with only Grafana's own login in front — which is the state tesla-boards was
+  # in by accident and documents. The `@kubernetescrd` suffix is the CRD provider's own name;
+  # `@kubernetes` is the Ingress provider and does not resolve a CRD middleware.
+  #
+  # No authentik proxy-provider change is needed for this host: the provider is forward_domain over
+  # titan.arrieta.eu with cookie_domain at that apex, so any host under the domain is served and the
+  # existing session cookie already covers it. That is also a coupling worth knowing — the provider
+  # lives in apply/50-apps/auth/tesla-outpost-blueprint.yaml, a Tesla file, and narrowing it later
+  # reaches this host. Spec §10.
+  annotations:
+    traefik.ingress.kubernetes.io/router.middlewares: observability-grafana-auth@kubernetescrd
+spec:
+  ingressClassName: traefik
+  rules:
+  - host: grafana.titan.arrieta.eu
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: grafana
+            port:
+              number: 80
+  tls:
+  - hosts:
+    - grafana.titan.arrieta.eu
+    # Reflected from namespace `certificates` by Reflector. `observability` must be in the allow-list
+    # on apply/40-certificates/titan-wildcard.yaml — step 4. Hand-copying this Secret is forbidden by
+    # AGENTS.md.
+    secretName: titan-tls
