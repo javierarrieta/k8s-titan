@@ -29,6 +29,9 @@ metadata:
 data:
   prometheus.yaml: |
     apiVersion: 1
+    # `name` is load-bearing, not a label: all seven copied dashboards carry a datasource
+    # template variable whose current value is the literal string "Prometheus", so renaming it
+    # silently re-points every board at whatever else answers to type=prometheus.
     datasources:
       - name: Prometheus
         type: prometheus
