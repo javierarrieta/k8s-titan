@@ -1200,8 +1200,9 @@ every panel at once. Also records that the postgres board is casa's database, no
 
 ### Task 5: Post-merge live verification
 
-Requires the operator's go-ahead to merge, and an admin kubeconfig context for step 2. Run in order —
-each step distinguishes "not deployed yet" from "deployed and wrong".
+Requires the operator's go-ahead to merge, and an admin kubeconfig context for steps 2 and 4b (both
+use `pods/exec`, which `k8s-reader` cannot). Run in order — each step distinguishes "not deployed yet"
+from "deployed and wrong".
 
 - [ ] **Step 1: Merge, then watch the two stages converge**
 
@@ -1241,8 +1242,29 @@ echo | openssl s_client -connect grafana.titan.arrieta.eu:443 -servername grafan
 Expected: a `*.titan.arrieta.eu` cert. A `TRAEFIK DEFAULT CERT` means Reflector has not delivered
 `titan-tls` into `observability` — re-check the allow-list edit.
 
+- [ ] **Step 4b: authentik actually ingested the blueprint — before debugging any login**
+
+Needs the admin context; `k8s-reader` is `Forbidden` on `pods/exec` in `auth`.
+
+```bash
+kubectl -n auth exec deploy/authentik-worker -- ak shell -c 'from authentik.blueprints.models import BlueprintInstance; [print(b.name, "|", b.path, "|", b.status, "|", b.last_applied) for b in BlueprintInstance.objects.all()]'
+```
+
+Expected: a `titan-observability` row with `status: successful` and a `path` of
+`mounted/secret-authentik-observability-blueprint/observability.yaml`. **Run this before step 5, not
+after it fails**, because the failure mode is invisible from Grafana: `docs/authentik-runbook.md` §5
+records 2026-10-20, when a blueprint was applied by Flux, the worker restarted for it, the file was
+demonstrably on disk, `apply_blueprint` finished with `exc: null` — and no `BlueprintInstance` was
+created. Mounting in both places (Task 3 step 7) is necessary and was demonstrably not sufficient.
+No row is not a lag and not a Grafana bug; the login in step 5 would simply fail in a way that reads
+like one. The `path` column is what distinguishes a wrong mount from a wrong blueprint. To apply now
+rather than wait for the hourly discovery, use the command in `docs/grafana-runbook.md` "Forcing the
+blueprint" — pipe it through the `sed -E 's/[a-f0-9]{64}/REDACTED/g'` filter there, because a
+validation failure prints the client secret to stdout.
+
 - [ ] **Step 5: Sign in, and check the role rather than the login**
 
+Only after step 4b shows a successful row.
 Sign in through authentik. Confirm an authentik Admin lands as Grafana Admin-adjacent `Admin` and a
 non-member as `Viewer`. A login that works with everyone as Viewer means the `profile` scope went
 missing on one side of the pair.
@@ -1267,5 +1289,5 @@ no restart means the annotation is sitting inert and step 6 of Task 2 needs re-c
 - [ ] **Step 9: Record what was observed**
 
 Append the measured results to `docs/grafana-runbook.md` — which panels returned what, the health
-output, the 302 — in a dated "first deploy" section, the way `docs/open-webui-runbook.md` records
-its own first deploy. Evidence, not a claim.
+output, the 302, and the `BlueprintInstance` row from step 4b — in a dated "first deploy" section, the
+way `docs/open-webui-runbook.md` records its own first deploy. Evidence, not a claim.
