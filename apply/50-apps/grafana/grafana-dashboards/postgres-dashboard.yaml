@@ -50,7 +50,11 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: grafana-postgres-dashboard
-  namespace: casa
+  # observability, not casa's `casa`. This file is a port of k8s-casa's dashboard and the
+  # ConfigMap header came across with it; a ConfigMap naming a namespace this cluster does not
+  # have fails server-side apply, and because Flux applies a stage atomically that one line took
+  # the whole `apps` stage down — including this dashboard, so the port never appeared in the UI.
+  namespace: observability
   labels:
     app: grafana
     grafana_dashboard: "true"
