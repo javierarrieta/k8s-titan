@@ -22,7 +22,12 @@ lands as Viewer, which is a permissions bug that presents as working.
 
 Like oidc-check this is reference-driven and refuses to report clean when a Secret will not decrypt.
 When Grafana's OIDC values do not exist yet it says so and counts zero, which is honest and empty
-rather than a pass over nothing.
+rather than a pass over nothing — but only while the Deployment is also absent; once the workload is
+in the tree, missing credentials are a split state and that is a failure, not an empty pass.
+
+Two Grafanas are covered by one script through VARIANTS below, because the failure modes are identical
+and two scripts drift. An unrecognised or malformed --variant is a hard error rather than a fallback
+to tesla: a gate that silently checks the wrong Grafana and prints a clean count is worse than no gate.
 """
 import os
 import re
@@ -68,15 +73,34 @@ VARIANTS = {
 }
 
 
-def variant_from(argv):
-    """The variant named by --variant=NAME, else tesla. argv[1] stays the tree root."""
-    for a in argv[2:]:
+def parse_args(argv):
+    """(root, variant) from argv. Every unrecognised flag is an error, never a silent fallback.
+
+    This gate exists because a Grafana OIDC mismatch looks like some other bug, so the worst thing it
+    can do is report clean about the wrong Grafana. `--variant observability` (space, not `=`),
+    `--veriant=observability`, or a forgotten root argument would each otherwise fall back to tesla and
+    print "13 check(s) run, 0 mismatch(es)" over the wrong deployment — the exact defect this
+    refactor was supposed to close. A zero-count pass over a nonexistent root is the same failure.
+    """
+    name, positional = "tesla", []
+    for a in argv[1:]:
         if a.startswith("--variant="):
             name = a.split("=", 1)[1]
             if name not in VARIANTS:
                 sys.exit(f"grafana-oidc-check: unknown variant {name!r}; known: {', '.join(VARIANTS)}")
-            return VARIANTS[name]
-    return VARIANTS["tesla"]
+        elif a.startswith("--"):
+            sys.exit(f"grafana-oidc-check: unrecognised flag {a!r}. The only flag is --variant=NAME "
+                     f"({', '.join(VARIANTS)}), and it must use `=`. Guessing a default here would "
+                     f"check the other Grafana and report a clean run.")
+        else:
+            positional.append(a)
+    if len(positional) > 1:
+        sys.exit(f"grafana-oidc-check: expected at most one tree root, got {positional}")
+    root = positional[0] if positional else "apply"
+    if not os.path.isdir(root):
+        sys.exit(f"grafana-oidc-check: {root!r} is not a directory - load_docs would walk nothing and "
+                 f"return zero documents, i.e. a confident clean run over an empty tree")
+    return root, VARIANTS[name]
 
 
 def provider_entry(bp):
@@ -107,8 +131,7 @@ def container_env(deploy):
 
 
 def main():
-    root = sys.argv[1] if len(sys.argv) > 1 else "apply"
-    v = variant_from(sys.argv)
+    root, v = parse_args(sys.argv)
     TEMPLATE, PLACEHOLDERS = v["TEMPLATE"], v["PLACEHOLDERS"]
     REDIRECT, HOST = v["REDIRECT"], v["HOST"]
     BLUEPRINT_SECRET, BLUEPRINT_KEY = v["BLUEPRINT_SECRET"], v["BLUEPRINT_KEY"]
@@ -165,6 +188,16 @@ def main():
     # --- B. Grafana's copy, and the rendered artifact ------------------------------------------
     cid, cdata = secret_key(docs, APP_SECRET, APP_NS, "GF_AUTH_GENERIC_OAUTH_CLIENT_ID")
     if cdata is None:
+        # Zero rendered artifacts is honest only BEFORE the credentials exist. Once the workload is in
+        # the tree, the same absence is the split state — Deployment merged and its Secret missing or
+        # unlisted in apply/10-secrets/kustomization.yaml, which is the failure `secrets-placement`
+        # cannot see because an unlisted file simply is not there to check.
+        if find(docs, "Deployment", v["DEPLOY"], APP_NS) is not None:
+            fail(f"Deployment {APP_NS}/{v['DEPLOY']} is in the tree but {APP_SECRET} is not - the pod "
+                 f"is Pending on a missing Secret, or the Secret exists on disk and no kustomization "
+                 f"lists it, which is the same thing as far as the cluster is concerned")
+            print(f"grafana-oidc-check: {checked} template check(s) run, {bad} mismatch(es)")
+            sys.exit(1)
         print(f"grafana-oidc-check: {APP_SECRET} not present - 0 rendered OIDC artifacts to "
               f"reconcile (run {v['SCRIPT']})")
         print(f"grafana-oidc-check: {checked} template check(s) run, {bad} mismatch(es)")
@@ -172,7 +205,7 @@ def main():
 
     csec, _ = secret_key(docs, APP_SECRET, APP_NS, "GF_AUTH_GENERIC_OAUTH_CLIENT_SECRET")
     if not cid or not csec:
-        fail("tesla-grafana-oidc is present but the client id or secret is empty")
+        fail(f"{APP_SECRET} is present but the client id or secret is empty")
     checked += 1
 
     bp_secret = find(docs, "Secret", BLUEPRINT_SECRET, "auth")
@@ -262,6 +295,14 @@ def main():
             fail(f"GF_AUTH_GENERIC_OAUTH_SCOPES is {scopes!r} and omits email - Grafana requires an "
                  f"email for OAuth sign-up and will refuse the login without one")
         checked += 1
+        # The slug is the issuer path under issuer_mode: per_provider, so the JWKS URL and the
+        # application slug are the same string in two places. Renaming one passes every other check
+        # here and fails at token validation, which reads like a bad token rather than a bad slug.
+        jwks = env.get("GF_AUTH_GENERIC_OAUTH_JWK_SET_URL") or ""
+        if f"/o/{v['SLUG']}/" not in jwks:
+            fail(f"GF_AUTH_GENERIC_OAUTH_JWK_SET_URL is {jwks!r} and does not name the application "
+                 f"slug {v['SLUG']!r} - with issuer_mode per_provider the slug IS the issuer path, so "
+                 f"validate_id_token rejects every token against the wrong key set")
 
     print(f"grafana-oidc-check: {checked} check(s) run, {bad} mismatch(es)")
     sys.exit(1 if bad else 0)
