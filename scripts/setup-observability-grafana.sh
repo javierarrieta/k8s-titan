@@ -18,6 +18,10 @@
 # against the last one without a secret being on screen.
 set -euo pipefail
 
+# The plaintext staging files exist for seconds, but "seconds" is the whole exposure window and a
+# world-readable credential file is a real one. Cheap to close, so close it.
+umask 077
+
 REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$REPO"
 
@@ -33,7 +37,12 @@ KEY=${SOPS_AGE_KEY_FILE:-$HOME/.config/sops/age/keys.txt}
 # Never leave plaintext behind, whatever fails. All three staging paths are git-ignored by name
 # (apply/10-secrets/.staging.*.yaml) and sit under apply/10-secrets/ because sops picks its
 # recipients from the file's own path, not from your intent.
-trap 'rm -f "$STAGE_BP" "$STAGE_APP" "$STAGE_ADMIN"' EXIT
+# EXIT alone is not enough: bash does not run an EXIT trap for an untrapped SIGINT/SIGTERM, so a
+# Ctrl-C between the plaintext write and `sops --encrypt` would leave plaintext on disk. The EXIT trap
+# still fires from inside these, so the cleanup is defined once.
+cleanup() { rm -f "$STAGE_BP" "$STAGE_APP" "$STAGE_ADMIN"; }
+trap cleanup EXIT
+trap 'cleanup; exit 130' INT TERM
 
 for tool in sops python3; do
   command -v "$tool" >/dev/null || { echo "FAIL: $tool not on PATH"; exit 1; }
@@ -115,11 +124,16 @@ dump(env["STAGE_ADMIN"], {
 })
 PY
 
+# Encrypt all three BEFORE any of them lands in place. Moving per-file would leave the blueprint Secret
+# holding a new client while observability-grafana-oidc still held the old one if sops failed on the
+# second file — the exact split this change exists to prevent, reachable from a transient sops error
+# rather than from anyone editing one side. `make observability-oidc-check` does catch the split, but
+# a gate that reports a self-inflicted wound is worse than one that cannot happen.
 for f in "$STAGE_BP" "$STAGE_APP" "$STAGE_ADMIN"; do
   sops --encrypt --in-place "$f"
-  if [ "$f" = "$STAGE_BP" ]; then dest=$BP_SECRET
-  elif [ "$f" = "$STAGE_APP" ]; then dest=$APP_SECRET
-  else dest=$ADMIN_SECRET; fi
+done
+for pair in "$STAGE_BP:$BP_SECRET" "$STAGE_APP:$APP_SECRET" "$STAGE_ADMIN:$ADMIN_SECRET"; do
+  f=${pair%:*}; dest=${pair#*:}
   mv "$f" "$dest"
   echo "wrote $dest  (fingerprint $(python3 -c "import hashlib,sys;print(hashlib.sha256(open(sys.argv[1],'rb').read()).hexdigest()[:12])" "$dest"))"
 done
@@ -132,7 +146,10 @@ Still to do, in order:
   1. List all three in apply/10-secrets/kustomization.yaml, and mount the blueprint in
      apply/50-apps/auth/authentik.yaml (blueprints.secrets AND the reloader annotation).
   2. make observability-oidc-check  proves the two copies, the mount and the host agree.
-  3. Merge, and let the authentik worker apply the blueprint (hourly, or force it from the UI).
+  3. Merge, and let the authentik worker apply the blueprint (hourly, or force it — see
+     docs/grafana-runbook.md "Forcing the blueprint"). Then CONFIRM it landed: a mounted blueprint that
+     silently never applied is a recorded failure here, not a hypothetical. Step 6 of that runbook's §7
+     prints the BlueprintInstance rows; do it before debugging any login.
   4. Sign in with authentik once and confirm the role you expected. GF_AUTH_BASIC_ENABLED stays
      true on purpose: it is the way back in if the OIDC config is ever wrong.
 DONE

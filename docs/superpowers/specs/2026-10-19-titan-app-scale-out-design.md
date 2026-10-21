@@ -154,6 +154,16 @@ Tesla's risk profile than coder's, because a `HelmRelease` with bad `values` fai
 ConfigMap with a mis-nested field fails the whole unit. Promote on that shape as well as on freeze
 cost.
 
+The shape that promotes is bulk **authored in this repo**, and the distinction is not pedantry: what
+fails the unit is a field someone typed into the wrong nesting. Grafana (2026-10-21) is the case that
+forced the distinction, and it stayed in `apps` on purpose — see its design spec §10 for the failure
+domain it accepted by doing so. Its 24,671 lines of dashboard ConfigMaps are not authored here: they
+are byte-for-byte copies of files k8s-casa owns, changed by one anchored `sed` on the namespace line,
+and `make kustomize-check` builds every one of them offline before merge. Copied-and-verified bulk
+carries the malformed-manifest risk of its source tree, not of this one; bulk someone edits here
+carries it here. Alert rules, recording rules and generated JSON written in this repo are the second
+kind, and they promote on shape.
+
 **Promotion is a three-commit change, and the order is not optional.** Moving objects out of a stage
 that has `prune: true` makes them stale by `inventory.Diff` the instant the move lands, and Flux
 deletes them — then the new stage recreates them from nothing. For a `Deployment` that is an outage;

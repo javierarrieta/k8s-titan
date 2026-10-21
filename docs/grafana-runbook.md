@@ -95,6 +95,14 @@ To add a dashboard:
 4. **List the file in `apply/50-apps/kustomization.yaml`.** An unlisted manifest builds green and is
    silently never applied — `make kustomize-listing` is the gate that exists for exactly that.
 
+Copied dashboard files are left **unedited** apart from the one anchored `namespace:` line, so a single
+`cmp` against `k8s-casa` proves a re-sync changed nothing else. That is deliberate and it has a cost:
+some copied headers name casa's own paths — `security-scans-dashboard.yaml` and `alerts-dashboard.yaml`
+say they are mounted in `apply/50-apps/casa/grafana.yaml`, which is true there and false here. Fixing
+those two comments is free to type and not free to verify, so they stay. The mount is the
+`volumeMounts` list in `apply/50-apps/grafana/grafana.yaml`, which is the only thing here that decides
+where a dashboard actually lands.
+
 ## 6. When a dashboard edit does not appear
 
 Check this **first**, because it looks like Grafana ignoring its own config:
@@ -135,7 +143,20 @@ echo | openssl s_client -connect grafana.titan.arrieta.eu:443 -servername grafan
 
 # 5. datasources answer from outside the cluster too
 curl -sS -G https://prometheus.local.arrieta.eu/api/v1/query --data-urlencode 'query=count(up)'
+
+# 6. BEFORE signing in: did authentik actually ingest the blueprint? Mounting is not applying, and
+#    this repo has a dated record of a mounted blueprint that silently never applied (see below).
+#    Needs an admin context — k8s-reader is Forbidden on pods/exec in `auth`.
+kubectl -n auth exec deploy/authentik-worker -- ak shell -c 'from authentik.blueprints.models import BlueprintInstance; [print(b.name, "|", b.path, "|", b.status, "|", b.last_applied) for b in BlueprintInstance.objects.all()]'
 ```
+
+**A `titan-observability` row must exist before you debug a login.** Its absence is not a lag and not a
+Grafana bug: `docs/authentik-runbook.md` §5 records 2026-10-20, when `authentik-grafana-blueprint` was
+applied by Flux, the worker restarted for it, the file was demonstrably on disk at 5637 bytes, and
+`apply_blueprint` finished with `exc: null` — and **no `BlueprintInstance` was created**. Nothing
+reported a failure; the blueprint list simply did not contain it, and it cost an hour of live breakage.
+The `path` column settles what no log answers: mounted blueprints land at
+`mounted/secret-<secret>/<key>.yaml`, so it distinguishes a wrong mount from a wrong blueprint.
 
 Then in the browser: sign in through authentik and **check the role, not just the login** (an
 authentik Admin must land as `Admin`); Connections → data sources → Save & test on both; and one
@@ -144,6 +165,28 @@ panel per dashboard, with §3 telling you which empties are expected.
 Finally, prove the drift controls work: the UI should not offer to save a dashboard edit, and a
 one-byte change to a dashboard in git should restart the pod. No restart means §6's Reloader list is
 missing the namespace.
+
+### Forcing the blueprint
+
+The worker discovers mounted blueprints at startup and hourly. To apply now rather than wait, use the
+authentik UI or the same code path the periodic task uses:
+
+```fish
+kubectl -n auth exec deploy/authentik-worker -- ak apply_blueprint \
+  /blueprints/mounted/secret-authentik-observability-blueprint/observability.yaml 2>&1 \
+  | sed -E 's/[a-f0-9]{64}/REDACTED/g' | tail -5
+```
+
+Two cautions, both from `docs/authentik-runbook.md` §5, and both traps rather than background:
+
+- that `exec` needs an **admin context** — the read-only `k8s-reader` identity is `Forbidden` on
+  `pods/exec` in `auth`;
+- **a blueprint validation failure prints the client secret to stdout.** The `sed` above is not
+  decoration: the generated `client_secret` is 64 hex characters, which is exactly what that filter
+  catches. Do not paste the output anywhere until it has been read.
+
+If the run reports success but step 6 still shows no row, that is the 2026-10-20 failure and the fix
+was a second worker restart: `kubectl -n auth rollout restart deploy/authentik-worker`.
 
 ## 8. Not proven
 
@@ -157,6 +200,10 @@ missing the namespace.
   dashboards.
 - **`make release-secrets` does not scan this Deployment.** It reads `HelmRelease` values only, so a
   typo'd `secretRef` here surfaces as a `Pending` pod, not a red gate. open-webui has the same hole.
+- **Blueprint ingestion is unproven for this blueprint.** §7 step 6 is the only check that
+  distinguishes "never ingested" from "ingested and fine", and mounting in both places — which this PR
+  does — is necessary but was demonstrably not sufficient once before. Nobody has run step 6 against
+  `titan-observability`.
 - **No alerting.** No rules, no contact points, no Alertmanager here. The `alerts` board shows
   casa's.
 - **`grafana.titan.arrieta.eu` has no explicit DNS record** and relies on the `*.titan` wildcard.
