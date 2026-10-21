@@ -210,3 +210,59 @@ was a second worker restart: `kubectl -n auth rollout restart deploy/authentik-w
   That holds until something issues a `*.grafana.titan` certificate — which is what forced explicit
   A records for `coder.titan` and `streaming.titan`. If this host ever starts failing to resolve
   while the Certificate reports Ready, that is the mechanism.
+
+## 9. First deploy — measured 2026-10-21
+
+Merged as `9e48f0c` at 14:59:06Z. Everything below was run from a workspace with the read-only
+`k8s-reader` identity; nothing here is a claim about a command that was not run.
+
+**Converged.** All seven `Kustomization`s `Ready=True` at `main@sha1:9e48f0c` by 15:03. The first
+reading of the chain was all-red — `secrets: dependency 'flux-system/flux-system' is not ready` — and
+that was an artifact, not a fault: `secrets` evaluated its dependency at `14:59:32` and `flux-system`
+reported `ReconciliationSucceeded` at `14:59:33`. One second. Worth recording because the red cascade
+looks alarming and resolves itself on the next cycle without intervention.
+
+**Workload.** `pvc/grafana-data` `Bound` 1Gi `local-path-retain`; `deploy/grafana` 1/1; pod `Running`,
+0 restarts.
+
+**Edge gate holds.** `curl -sSI https://grafana.titan.arrieta.eu/` → `HTTP/2 302`, `location` at
+`auth.titan.arrieta.eu/application/o/authorize/` with the redirect state pointing back at
+`grafana.titan.arrieta.eu`, and `set-cookie: authentik_proxy_…; Domain=titan.arrieta.eu`. The
+forward-auth annotation landed.
+
+**TLS is the wildcard.** Subject `CN=titan.arrieta.eu`, SAN `*.titan.arrieta.eu`, issuer Let's Encrypt
+`YR1`, `notAfter Jan 1 13:55:37 2027 GMT`. Not the Traefik default, so Reflector delivered `titan-tls`
+into `observability`.
+
+**Prometheus path intact.** `count(up)` → `106`, matching the §2 baseline.
+
+**Loki is under a path prefix, and that is not a defect.** `https://loki.local.arrieta.eu/` answers
+`200 OK`, `/api/v1/labels` and `/ready` answer `404`, and `/loki/api/v1/labels` answers `200`. Grafana's
+Loki datasource appends `/loki/api/v1/...` to the configured URL itself, so `url:
+https://loki.local.arrieta.eu` is correct — confirmed against casa's own datasource, which points at
+`http://loki-gateway.monitoring.svc` behind an ingress that routes `/` prefix to the same gateway. The
+`/ready` 404 is the gateway not exposing that path, nothing more.
+
+**Both drift controls landed live.** `values.reloader.namespaces` on the live `HelmRelease/reloader` is
+`["coder","auth","monitoring","open-webui","observability"]`, and `spec.values.blueprints.secrets` on
+the live authentik `HelmRelease` ends with `authentik-observability-blueprint`. Reloader fired for it:
+`authentik-worker-7f9c88dc6f-wt5t8` started `2026-10-21T15:02:04Z`, three minutes after the merge.
+
+### Not met: the OIDC provider does not exist yet
+
+`https://auth.titan.arrieta.eu/application/o/observability/.well-known/openid-configuration` → **404**,
+probed at 15:03 and twice at 15:05, while the control `/application/o/tesla-boards/…` → **200**. The
+`jwks/` path 404s identically. So the blueprint has not been applied, and Grafana's OIDC login cannot
+succeed until it is — the edge gate will hand a browser to authentik and authentik will not recognise
+the client.
+
+This is the §5 signature exactly, and note how much evidence says the *plumbing* is right: the Secret is
+applied, the HelmRelease mounts it, the worker restarted for it. Mounting is necessary and not
+sufficient, and the only thing that distinguishes "not yet" from "silently never" is the
+`BlueprintInstance` query in §7 step 4b — which needs an admin context, as does `pods/exec` for §7 step
+2 (`system:serviceaccount:k8s-reader:k8s-reader cannot create resource "pods/exec"` in `observability`,
+recorded rather than assumed).
+
+**Still unverified as of this writing:** the `BlueprintInstance` row, in-cluster `/api/health`, the role
+an authentik Admin actually receives, both datasources' Save & test, one panel per dashboard, and the
+UI/restart drift controls.
