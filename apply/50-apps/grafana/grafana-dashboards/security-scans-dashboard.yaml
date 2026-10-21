@@ -1,0 +1,745 @@
+---
+# Security Scans dashboard JSON.
+#
+# Two halves, and they fail differently. The Coverage row reads kube_job_* from
+# Prometheus and works today. The Findings and Reports rows read Loki and are
+# empty until a scan runs after the stdout emission landed in
+# apply/50-apps/security/vuln-scan.yaml -- an empty findings panel is NOT a
+# clean scan, which is also why the Coverage row sits above it rather than
+# beside it.
+#
+# Wired the same way as every other dashboard here: this ConfigMap is mounted as
+# a directory in apply/50-apps/casa/grafana.yaml, picked up by the provider entry
+# in grafana-dashboard-provisioning.yaml, and needs the Loki datasource in
+# grafana-datasources.yaml. There is no Grafana sidecar, so all four have to
+# agree; adding this file alone would show nothing.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-security-scans-dashboard
+  namespace: observability
+  labels:
+    app: grafana
+    grafana_dashboard: "true"
+data:
+  security-scans.json: |
+    {
+      "id": null,
+      "uid": "security-scans",
+      "title": "Security Scans",
+      "tags": [
+        "security",
+        "nuclei",
+        "zap",
+        "scans"
+      ],
+      "timezone": "utc",
+      "schemaVersion": 39,
+      "version": 1,
+      "refresh": "5m",
+      "editable": true,
+      "graphTooltip": 1,
+      "time": {
+        "from": "now-14d",
+        "to": "now"
+      },
+      "links": [
+        {
+          "title": "Report browser (NFS tree)",
+          "type": "link",
+          "iconOuterEnabled": false,
+          "targetBlank": true,
+          "url": "https://scans.l.arrieta.eu"
+        }
+      ],
+      "templating": {
+        "list": [
+          {
+            "name": "datasource",
+            "type": "datasource",
+            "label": "Prometheus",
+            "query": "prometheus",
+            "current": {
+              "text": "Prometheus",
+              "value": "Prometheus"
+            },
+            "hide": 0,
+            "refresh": 1,
+            "includeAll": false,
+            "multi": false
+          },
+          {
+            "name": "loki",
+            "type": "datasource",
+            "label": "Loki",
+            "query": "loki",
+            "current": {
+              "text": "Loki",
+              "value": "Loki"
+            },
+            "hide": 0,
+            "refresh": 1,
+            "includeAll": false,
+            "multi": false
+          }
+        ]
+      },
+      "annotations": {
+        "list": []
+      },
+      "panels": [
+        {
+          "type": "row",
+          "title": "Coverage -- is the scan actually running",
+          "collapsed": false,
+          "gridPos": {
+            "h": 1,
+            "w": 24,
+            "x": 0,
+            "y": 0
+          },
+          "panels": [],
+          "id": 0
+        },
+        {
+          "type": "stat",
+          "title": "Nuclei: last successful run",
+          "description": "Completion time of the newest SUCCESSFUL nuclei-scan-varrieta job. kube_job_status_succeeded==1 is required: a failed job still exposes completion_time for some controllers, and reading that as a fresh scan is how a broken scanner looks healthy.",
+          "id": 10,
+          "gridPos": {
+            "h": 4,
+            "w": 6,
+            "x": 0,
+            "y": 1
+          },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "$datasource"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "timeTicks",
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  },
+                  {
+                    "color": "red",
+                    "value": 1
+                  }
+                ]
+              },
+              "color": {
+                "mode": "thresholds"
+              },
+              "mappings": []
+            },
+            "overrides": []
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "colorMode": "background",
+            "graphMode": "none",
+            "textMode": "auto"
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "$datasource"
+              },
+              "expr": "max(kube_job_status_completion_time{namespace=\"security\", job_name=~\"nuclei-scan-varrieta.*\"} and on(job_name) kube_job_status_succeeded{namespace=\"security\", job_name=~\"nuclei-scan-varrieta.*\"} == 1)",
+              "instant": true,
+              "queryType": "instant",
+              "legendFormat": ""
+            }
+          ]
+        },
+        {
+          "type": "stat",
+          "title": "ZAP: last successful run",
+          "description": "Completion time of the newest successful zap-baseline-varrieta job. Weekly by design (Sun 23:45 UTC).",
+          "id": 16,
+          "gridPos": {
+            "h": 4,
+            "w": 6,
+            "x": 6,
+            "y": 1
+          },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "$datasource"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "timeTicks",
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  },
+                  {
+                    "color": "red",
+                    "value": 1
+                  }
+                ]
+              },
+              "color": {
+                "mode": "thresholds"
+              },
+              "mappings": []
+            },
+            "overrides": []
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "colorMode": "background",
+            "graphMode": "none",
+            "textMode": "auto"
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "$datasource"
+              },
+              "expr": "max(kube_job_status_completion_time{namespace=\"security\", job_name=~\"zap-baseline-varrieta.*\"} and on(job_name) kube_job_status_succeeded{namespace=\"security\", job_name=~\"zap-baseline-varrieta.*\"} == 1)",
+              "instant": true,
+              "queryType": "instant",
+              "legendFormat": ""
+            }
+          ]
+        },
+        {
+          "type": "stat",
+          "title": "Nuclei: age of last success",
+          "description": "Same 93600s (26h) threshold as the NucleiScanStale alert, so the panel and the alert never disagree.",
+          "id": 22,
+          "gridPos": {
+            "h": 4,
+            "w": 6,
+            "x": 12,
+            "y": 1
+          },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "$datasource"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "s",
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  },
+                  {
+                    "color": "red",
+                    "value": 93600
+                  }
+                ]
+              },
+              "color": {
+                "mode": "thresholds"
+              },
+              "mappings": []
+            },
+            "overrides": []
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "colorMode": "background",
+            "graphMode": "none",
+            "textMode": "auto"
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "$datasource"
+              },
+              "expr": "time() - max(kube_job_status_completion_time{namespace=\"security\", job_name=~\"nuclei-scan-varrieta.*\"} and on(job_name) kube_job_status_succeeded{namespace=\"security\", job_name=~\"nuclei-scan-varrieta.*\"} == 1)",
+              "instant": true,
+              "queryType": "instant",
+              "legendFormat": ""
+            }
+          ]
+        },
+        {
+          "type": "stat",
+          "title": "ZAP: age of last success",
+          "description": "Same 691200s (8d) threshold as ZapScanStale.",
+          "id": 28,
+          "gridPos": {
+            "h": 4,
+            "w": 6,
+            "x": 18,
+            "y": 1
+          },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "$datasource"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "s",
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  },
+                  {
+                    "color": "red",
+                    "value": 691200
+                  }
+                ]
+              },
+              "color": {
+                "mode": "thresholds"
+              },
+              "mappings": []
+            },
+            "overrides": []
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "colorMode": "background",
+            "graphMode": "none",
+            "textMode": "auto"
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "$datasource"
+              },
+              "expr": "time() - max(kube_job_status_completion_time{namespace=\"security\", job_name=~\"zap-baseline-varrieta.*\"} and on(job_name) kube_job_status_succeeded{namespace=\"security\", job_name=~\"zap-baseline-varrieta.*\"} == 1)",
+              "instant": true,
+              "queryType": "instant",
+              "legendFormat": ""
+            }
+          ]
+        },
+        {
+          "type": "row",
+          "title": "Findings",
+          "collapsed": false,
+          "gridPos": {
+            "h": 1,
+            "w": 24,
+            "x": 0,
+            "y": 5
+          },
+          "panels": [],
+          "id": 5
+        },
+        {
+          "type": "timeseries",
+          "title": "Findings per scan run",
+          "id": 60,
+          "description": "One point per scan, from the logfmt scan_summary line each job prints to stdout -- including the clean runs, which is the only way findings=0 stays distinguishable from 'never scanned'. Needs the Loki emission added in apply/50-apps/security/vuln-scan.yaml; empty until a run happens after that change.",
+          "gridPos": {
+            "h": 9,
+            "w": 16,
+            "x": 0,
+            "y": 6
+          },
+          "datasource": {
+            "type": "loki",
+            "uid": "$loki"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "custom": {
+                "drawStyle": "bars",
+                "barAlignment": 0,
+                "lineWidth": 1,
+                "fillOpacity": 60,
+                "showPoints": "never"
+              },
+              "color": {
+                "mode": "palette-classic"
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "multi"
+            }
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": {
+                "type": "loki",
+                "uid": "$loki"
+              },
+              "legendFormat": "{{scan}}",
+              "expr": "sum by (scan) (sum_over_time({namespace=\"security\"} | logfmt | scan=~\"nuclei|zap\" | unwrap findings [$__auto]))"
+            }
+          ]
+        },
+        {
+          "type": "stat",
+          "title": "Nuclei findings (last 24h)",
+          "description": "Count over the daily window. No data means no scan in 24h, not a clean scan -- check the Coverage row.",
+          "id": 76,
+          "gridPos": {
+            "h": 4,
+            "w": 6,
+            "x": 16,
+            "y": 6
+          },
+          "datasource": {
+            "type": "loki",
+            "uid": "$loki"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  },
+                  {
+                    "color": "orange",
+                    "value": 1
+                  },
+                  {
+                    "color": "red",
+                    "value": 2
+                  }
+                ]
+              },
+              "color": {
+                "mode": "thresholds"
+              },
+              "mappings": []
+            },
+            "overrides": []
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "colorMode": "background",
+            "graphMode": "none",
+            "textMode": "auto"
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": {
+                "type": "loki",
+                "uid": "$loki"
+              },
+              "expr": "sum(sum_over_time({namespace=\"security\", app=\"nuclei-scan-varrieta\"} | logfmt | scan=\"nuclei\" | unwrap findings [24h]))",
+              "instant": true,
+              "queryType": "instant",
+              "legendFormat": ""
+            }
+          ]
+        },
+        {
+          "type": "stat",
+          "title": "ZAP medium/high (last 8d)",
+          "description": "Weekly scan, so the window is 8d to cover one full cycle plus grace.",
+          "id": 116,
+          "gridPos": {
+            "h": 4,
+            "w": 6,
+            "x": 16,
+            "y": 10
+          },
+          "datasource": {
+            "type": "loki",
+            "uid": "$loki"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  },
+                  {
+                    "color": "orange",
+                    "value": 1
+                  },
+                  {
+                    "color": "red",
+                    "value": 2
+                  }
+                ]
+              },
+              "color": {
+                "mode": "thresholds"
+              },
+              "mappings": []
+            },
+            "overrides": []
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "colorMode": "background",
+            "graphMode": "none",
+            "textMode": "auto"
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": {
+                "type": "loki",
+                "uid": "$loki"
+              },
+              "expr": "sum(sum_over_time({namespace=\"security\", app=\"zap-baseline-varrieta\"} | logfmt | scan=\"zap\" | unwrap findings [8d]))",
+              "instant": true,
+              "queryType": "instant",
+              "legendFormat": ""
+            }
+          ]
+        },
+        {
+          "type": "stat",
+          "title": "High/critical nuclei findings (last 8d)",
+          "id": 101,
+          "description": "Counted from the raw JSONL the job cats to stdout, not from the summary line, so it reflects nuclei's own severity field rather than the shell's grep.",
+          "gridPos": {
+            "h": 4,
+            "w": 8,
+            "x": 16,
+            "y": 10
+          },
+          "datasource": {
+            "type": "loki",
+            "uid": "$loki"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  },
+                  {
+                    "color": "red",
+                    "value": 1
+                  }
+                ]
+              },
+              "color": {
+                "mode": "thresholds"
+              },
+              "mappings": []
+            },
+            "overrides": []
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "sum"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "colorMode": "background",
+            "graphMode": "none"
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": {
+                "type": "loki",
+                "uid": "$loki"
+              },
+              "instant": true,
+              "queryType": "instant",
+              "expr": "count(count_over_time({namespace=\"security\", app=\"nuclei-scan-varrieta\"} | json | severity=~\"high|critical\" [8d]))"
+            }
+          ]
+        },
+        {
+          "type": "row",
+          "title": "Reports",
+          "collapsed": false,
+          "gridPos": {
+            "h": 1,
+            "w": 24,
+            "x": 0,
+            "y": 15
+          },
+          "panels": [],
+          "id": 15
+        },
+        {
+          "type": "logs",
+          "title": "scan_summary -- one line per run",
+          "description": "The uniform line both scanners emit, clean runs included. Fields: scan, target, findings, maxsev, report.",
+          "id": 160,
+          "gridPos": {
+            "h": 11,
+            "w": 12,
+            "x": 0,
+            "y": 16
+          },
+          "datasource": {
+            "type": "loki",
+            "uid": "$loki"
+          },
+          "options": {
+            "showTime": true,
+            "wrapLogMessage": true,
+            "prettifyLogMessage": false,
+            "enableLogDetails": true,
+            "dedupStrategy": "none",
+            "sortOrder": "Descending"
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": {
+                "type": "loki",
+                "uid": "$loki"
+              },
+              "expr": "{namespace=\"security\"} | logfmt | scan=~\"nuclei|zap\"",
+              "queryType": "range",
+              "maxLines": 200
+            }
+          ]
+        },
+        {
+          "type": "logs",
+          "title": "Nuclei findings (raw JSONL)",
+          "description": "Verbatim nuclei output. `| json` drops the [INF] progress lines because they fail to parse, which is also why this panel is empty rather than noisy on a clean night.",
+          "id": 172,
+          "gridPos": {
+            "h": 11,
+            "w": 12,
+            "x": 12,
+            "y": 16
+          },
+          "datasource": {
+            "type": "loki",
+            "uid": "$loki"
+          },
+          "options": {
+            "showTime": true,
+            "wrapLogMessage": true,
+            "prettifyLogMessage": false,
+            "enableLogDetails": true,
+            "dedupStrategy": "none",
+            "sortOrder": "Descending"
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": {
+                "type": "loki",
+                "uid": "$loki"
+              },
+              "expr": "{namespace=\"security\", app=\"nuclei-scan-varrieta\"} | json | severity=~\"medium|high|critical\"",
+              "queryType": "range",
+              "maxLines": 200
+            }
+          ]
+        },
+        {
+          "type": "logs",
+          "title": "ZAP baseline output",
+          "description": "Full zap-baseline.py stdout: PASS/WARN/HIGH lines plus the scan_summary line. The HTML report itself is on the report browser, linked at the top of this dashboard.",
+          "id": 270,
+          "gridPos": {
+            "h": 10,
+            "w": 24,
+            "x": 0,
+            "y": 27
+          },
+          "datasource": {
+            "type": "loki",
+            "uid": "$loki"
+          },
+          "options": {
+            "showTime": true,
+            "wrapLogMessage": true,
+            "prettifyLogMessage": false,
+            "enableLogDetails": true,
+            "dedupStrategy": "none",
+            "sortOrder": "Descending"
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": {
+                "type": "loki",
+                "uid": "$loki"
+              },
+              "expr": "{namespace=\"security\", app=\"zap-baseline-varrieta\"}",
+              "queryType": "range",
+              "maxLines": 200
+            }
+          ]
+        }
+      ]
+    }

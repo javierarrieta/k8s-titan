@@ -1,0 +1,93 @@
+# Dashboard providers: one per dashboard ConfigMap, each pointed at the directory that ConfigMap is
+# mounted into (see the volumeMounts on the Deployment in grafana.yaml).
+#
+# allowUiUpdates is FALSE on every provider, which is the one place this file differs from casa's
+# (casa uses `editable: true`). A UI edit there survives every later apply — Grafana never reverts
+# it, and `make dry-run` cannot see it — which is the same class of invisible live drift AGENTS.md
+# already warns about for `kubectl edit`. Here the dashboards are in git, so git is the only editor
+# and a browser edit is an anomaly rather than a state to tolerate.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboard-provisioning
+  namespace: observability
+  labels:
+    app: grafana
+data:
+  node-exporter-dashboards.yaml: |
+    apiVersion: 1
+    providers:
+      - name: 'node-exporter'
+        orgId: 1
+        folder: 'Servers'
+        type: file
+        disableDeletion: false
+        allowUiUpdates: false
+        options:
+          path: /var/lib/grafana/dashboards/node-exporter
+  disk-dashboards.yaml: |
+    apiVersion: 1
+    providers:
+      - name: 'disk'
+        orgId: 1
+        folder: 'Servers'
+        type: file
+        disableDeletion: false
+        allowUiUpdates: false
+        options:
+          path: /var/lib/grafana/dashboards/disk
+  comin-dashboards.yaml: |
+    apiVersion: 1
+    providers:
+      - name: 'comin'
+        orgId: 1
+        folder: 'Servers'
+        type: file
+        disableDeletion: false
+        allowUiUpdates: false
+        options:
+          path: /var/lib/grafana/dashboards/comin
+  amdgpu-dashboards.yaml: |
+    apiVersion: 1
+    providers:
+      - name: 'amdgpu'
+        orgId: 1
+        folder: 'Servers'
+        type: file
+        disableDeletion: false
+        allowUiUpdates: false
+        options:
+          path: /var/lib/grafana/dashboards/amdgpu
+  postgres-dashboards.yaml: |
+    apiVersion: 1
+    providers:
+      - name: 'postgres'
+        orgId: 1
+        folder: 'Databases'
+        type: file
+        disableDeletion: false
+        allowUiUpdates: false
+        options:
+          path: /var/lib/grafana/dashboards/postgres
+  alerts-dashboards.yaml: |
+    apiVersion: 1
+    providers:
+      - name: 'alerts'
+        orgId: 1
+        folder: 'Monitoring'
+        type: file
+        disableDeletion: false
+        allowUiUpdates: false
+        options:
+          path: /var/lib/grafana/dashboards/alerts
+  security-scans-dashboards.yaml: |
+    apiVersion: 1
+    providers:
+      - name: 'security-scans'
+        orgId: 1
+        folder: 'Security'
+        type: file
+        disableDeletion: false
+        allowUiUpdates: false
+        options:
+          path: /var/lib/grafana/dashboards/security-scans

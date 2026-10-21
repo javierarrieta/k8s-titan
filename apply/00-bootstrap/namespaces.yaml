@@ -114,3 +114,23 @@ metadata:
     name: open-webui
   annotations:
     kubernetes.io/description: "Open WebUI - OIDC sign-in through authentik, data in the shared CNPG cluster"
+---
+# Grafana, and nothing else. It fails the admission test in
+# docs/superpowers/specs/2026-10-19-titan-app-scale-out-design.md §3.1 on own public hostname and
+# own Secret set, so it gets a namespace; it stays in the shared `apps` stage, per coder and
+# open-webui (see the §3.1/§3.2 amendment of 2026-10-21 — §3.1 buys a namespace, not a stage).
+#
+# Unlike open-webui, this one CAN carry the restricted warn label: the official grafana image runs
+# as uid 472 gid 0 by design, and the Deployment sets runAsNonRoot. A warn label on a workload that
+# can never meet it is noise (open-webui's note above); on this one it is a real signal.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: observability
+  labels:
+    name: observability
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: latest
+  annotations:
+    kubernetes.io/metadata.name: observability
+    kubernetes.io/description: "Grafana, reading casa's Prometheus and Loki over the mesh"

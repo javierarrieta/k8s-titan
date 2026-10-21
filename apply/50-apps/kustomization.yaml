@@ -51,3 +51,17 @@ resources:
   # role above. A pod that starts before its Secret exists sits crash-looping, which reads like an app
   # bug rather than a missing file — the ordering note at the top of this file applies.
   - open-webui/open-webui.yaml
+  # Grafana. Ten files, and the listing is not ceremony: an unlisted manifest builds green and is
+  # silently never applied, which is the coder-db.yaml story. The dashboards are ConfigMaps, so a
+  # mis-nested field in one of them fails THIS unit atomically and freezes coder's and authentik's
+  # updates until the next commit — the accepted cost recorded in the header above and in
+  # docs/superpowers/specs/2026-10-21-titan-grafana-design.md §10.
+  - grafana/grafana-datasources.yaml
+  - grafana/grafana-dashboard-provisioning.yaml
+  - grafana/grafana-dashboards/node-exporter-dashboard.yaml
+  - grafana/grafana-dashboards/postgres-dashboard.yaml
+  - grafana/grafana-dashboards/comin-dashboard.yaml
+  - grafana/grafana-dashboards/disk-dashboard.yaml
+  - grafana/grafana-dashboards/alerts-dashboard.yaml
+  - grafana/grafana-dashboards/amdgpu-dashboard.yaml
+  - grafana/grafana-dashboards/security-scans-dashboard.yaml
