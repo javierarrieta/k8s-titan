@@ -122,6 +122,37 @@ If the ConfigMap is newer than the pod and no rollout happened, the namespace is
 list. The same rule applies to the OIDC Secrets: a rotated client sits unread until something
 restarts the pod.
 
+### The definitive check is Reloader's own annotation, not the pod's age
+
+Pod start time only tells you something restarted. This tells you Reloader did, and which ConfigMap it
+blames:
+
+```sh
+kubectl -n observability get deploy grafana -o jsonpath='{.spec.template.metadata.annotations.reloader\.stakater\.com/last-reloaded-from}'; echo
+```
+
+Measured on 2026-10-21, after a one-comment change to `grafana-datasources`:
+
+```json
+{"type":"CONFIGMAP","name":"grafana-datasources","namespace":"observability",
+ "hash":"e6521c2f0f06d816da77cb73575f5734e15353b3","containerRefs":["grafana"]}
+```
+
+**Do not look for `reloader.stakater.com/configmap-checksum`.** Older Reloader wrote that on the pod;
+this version does not, and a runbook that told you to grep for it produces a confident false negative on
+a deploy where the restart demonstrably happened — which is exactly what happened when this section was
+first written from assumption rather than measurement.
+
+Two timings worth expecting, both measured:
+
+- **Merge to applied is not immediate.** The stage cascade runs one cycle behind, so `apps` sat on
+  `dependency 'flux-system/certificates' is not ready` for roughly four minutes before it picked the
+  commit up. Nothing is stuck; the `Kustomization` conditions resolve one second out of order and
+  self-heal on the next pass.
+- **The outage is about 12 seconds, not zero.** `strategy: Recreate` is deliberate — the PVC is RWO, so
+  a rolling update would leave the new pod Pending on a volume conflict forever. Expect a gap with no
+  ready pod rather than an overlap.
+
 ## 7. Verification
 
 Run in order; each step distinguishes "not deployed" from "deployed and wrong".
@@ -181,8 +212,9 @@ part of this deployment with no backup — and git can never change or delete it
 want, or keep them knowingly.
 
 The second control is the one that actually fails silently: change one byte of a dashboard in git, push,
-and confirm the pod restarts. No restart means §6's Reloader list is missing the namespace, and the pod
-will report healthy while serving whatever it read at start.
+and confirm the pod restarts. Confirm it with Reloader's annotation from §6 rather than the pod's age —
+"a new pod" and "Reloader did it" are different claims. This was measured working on 2026-10-21 (§9), so
+a failure here is a regression, not an unknown.
 
 ### Forcing the blueprint
 
@@ -346,6 +378,20 @@ Recorded at that granularity on purpose. Per-panel values were not captured, and
 (`postgres` is casa's database, `alerts` is casa's Alertmanager, `security-scans` is thin by
 construction) were not individually re-listed against what appeared.
 
-**Still not done:** the git half of the drift control — one byte changed in `main`, pod should restart.
-That is the check that proves the Reloader namespace entry is live, and nothing above substitutes for
-it.
+**The git half of the drift control is now proven, not assumed.** A single comment line added inside
+the `prometheus.yaml` value of `ConfigMap/grafana-datasources` — inside the block scalar, so it changes
+the stored string and therefore the checksum, while changing no behaviour — produced, on merge:
+
+```
+live ConfigMap before   212 bytes  sha256 b85d685f85911a97
+after merge             467 bytes  sha256 1658ef6f809c0a8e   (byte-identical to the built manifest)
+pod                     grafana-5cc9bcb89b-qbcqz (15:02:03) → grafana-77dc46f445-27zdz (16:04:28)
+Deployment              generation 2, revision 1 → 2, old ReplicaSet scaled to 0
+Available again         16:04:40Z
+Reloader's own record   last-reloaded-from names grafana-datasources, hash e6521c2f…, containerRefs [grafana]
+```
+
+The causal chain is documented rather than inferred, which matters because every claim in §5 about
+editing dashboards in git depends on it. Note where the comment had to go: a YAML comment above `data:`
+is discarded at build time, produces identical stored bytes, and would have shown no restart for a
+reason that had nothing to do with Reloader.
