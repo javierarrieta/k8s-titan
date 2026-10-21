@@ -1,0 +1,122 @@
+# Prometheus Community exporter for titan's shared CNPG PostgreSQL instance.
+# CNPG's native endpoint emits cnpg_* families; the shared dashboard requires
+# postgres_exporter pg_* families. This role inherits pg_monitor only.
+apiVersion: postgresql.cnpg.io/v1
+kind: DatabaseRole
+metadata:
+  name: postgres-exporter
+  namespace: databases
+spec:
+  name: postgres_exporter
+  cluster:
+    name: postgres
+  login: true
+  inRoles:
+    - pg_monitor
+  passwordSecret:
+    name: postgres-exporter-credentials
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres-exporter
+  namespace: databases
+  labels:
+    app: postgres-exporter
+    app.kubernetes.io/component: metrics
+    app.kubernetes.io/name: postgres-exporter
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: postgres-exporter
+  template:
+    metadata:
+      labels:
+        app: postgres-exporter
+        app.kubernetes.io/component: metrics
+        app.kubernetes.io/name: postgres-exporter
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        fsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: postgres-exporter
+          image: quay.io/prometheuscommunity/postgres-exporter:v0.20.1
+          args:
+            - --config.file=
+            - --collector.long_running_transactions
+            - --collector.database_wraparound
+            - --collector.stat_checkpointer
+          env:
+            - name: DATA_SOURCE_URI
+              value: "postgres-rw.databases.svc:5432/postgres?sslmode=disable"
+            - name: DATA_SOURCE_USER
+              value: postgres_exporter
+            - name: DATA_SOURCE_PASS_FILE
+              value: /etc/postgres-exporter/password
+            - name: PG_EXPORTER_COLLECTION_TIMEOUT
+              value: 30s
+          ports:
+            - name: metrics
+              containerPort: 9187
+              protocol: TCP
+          resources:
+            limits:
+              cpu: 200m
+              memory: 128Mi
+            requests:
+              cpu: 25m
+              memory: 48Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: credentials
+              mountPath: /etc/postgres-exporter
+              readOnly: true
+          livenessProbe:
+            tcpSocket:
+              port: metrics
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          readinessProbe:
+            tcpSocket:
+              port: metrics
+            initialDelaySeconds: 5
+            periodSeconds: 15
+      volumes:
+        - name: credentials
+          secret:
+            secretName: postgres-exporter-credentials
+            defaultMode: 0400
+---
+# NodePort gives casa's ScrapeConfig a node-reachable endpoint. The Nix firewall
+# admits 30087 only through wg0 from the static mesh and configured LAN CIDR.
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-exporter-mesh
+  namespace: databases
+  labels:
+    app: postgres-exporter
+spec:
+  type: NodePort
+  externalTrafficPolicy: Local
+  selector:
+    app: postgres-exporter
+  ports:
+    - name: metrics
+      protocol: TCP
+      port: 9187
+      targetPort: metrics
+      nodePort: 30087

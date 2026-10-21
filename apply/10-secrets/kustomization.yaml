@@ -1,10 +1,14 @@
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:
+  # Telegram credentials used by titan's independent Gatus monitor.
+  - gatus-telegram.yaml
   - ovh-domain-secrets.yaml
   # Referenced by the Cluster's s3Credentials, not by a HelmRelease, so `make
   # release-secrets` cannot vouch for it - see the gate's own comment in Makefile.
   - s3-backup-secrets.yaml
+  # CNPG role credential for the read-only metrics exporter.
+  - postgres-exporter-secrets.yaml
   # Two Secrets in one file, one value shared between them: DatabaseRole needs the password
   # to ALTER ROLE, authentik needs it to connect, and Reflector is deliberately scoped to
   # TLS only (spec 5.3) so it cannot carry a credential across namespaces. Duplicating one
