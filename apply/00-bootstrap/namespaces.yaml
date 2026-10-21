@@ -46,6 +46,15 @@ metadata:
 apiVersion: v1
 kind: Namespace
 metadata:
+  name: gatus
+  labels:
+    name: gatus
+  annotations:
+    kubernetes.io/description: "Gatus probing casa's public services from titan"
+---
+apiVersion: v1
+kind: Namespace
+metadata:
   name: cnpg-system
   labels:
     name: cnpg-system

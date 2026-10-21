@@ -1,0 +1,60 @@
+apiVersion: v1
+kind: Secret
+metadata:
+    name: gatus-telegram
+    namespace: gatus
+type: Opaque
+stringData:
+    TELEGRAM_BOT_ID: ENC[AES256_GCM,data:DldcsRm6QUbj,iv:XR0NMu3xjMCtu9M6LnZu3N0FruKm++c7Hd/4Za9kqpc=,tag:hvFd4mkO1+s3vGZ/CKsbbQ==,type:str]
+    TELEGRAM_TOKEN: ENC[AES256_GCM,data:dOnZMU4FieFct2va1BDJLR9bLvMvWdACigD7FJJSa52qegmSkGlF0tTpm8J0Qw==,iv:zvICtHInsdqFgf+GC15xkF5AFDCQPAthVNu2LeSeo1A=,tag:9ns04EukPIuxhkvQzfY3bg==,type:str]
+sops:
+    age:
+        - enc: |
+            -----BEGIN AGE ENCRYPTED FILE-----
+            YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSAxMlJnUEdFaHNwNENRS0dv
+            S0RiaWwxVCtFOUpvQW9HNkhZOUNzN25yTFJjCmtWZk5Ec2QxVXNJTDJ4eDNFdFh3
+            QWNQMk8rZU5SQzZOdVlNOElYS2V0WlUKLS0tIGFtWGQrMU1lT05vL1Y4bEZjVis2
+            M1Z5cFBMd1RNTEhzNy9lVldNd1FkVDQK0KqyNFAT0gkM8Dco8mqSGvfgY9nPILbx
+            bTgFvjVZsxYh3cb+1Zqk6PtI2h3PfAWKDFIPuy4emQcex3xDucl+AQ==
+            -----END AGE ENCRYPTED FILE-----
+          recipient: age1t5z4ef69wlwewylplzr5pphrgwn5weqetkrmyuel9p8qr9p7j39q5ux7ak
+        - enc: |
+            -----BEGIN AGE ENCRYPTED FILE-----
+            YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSBNdTdnWlN5NUtML1R3cFlL
+            eUNMSVZockFGMmJQVTcvMUt3SEJmRk1pZ0QwCk1FTSt4ay9QRWt6TVJKNW9uN3kr
+            VWxocHhmbEIzVlRLODVvQU8yOGIvQUUKLS0tIDVTelJwRHVrYVMxMnZFcnVMbkN3
+            MjZ4U1g1ZkJNRmdkdmZ6c2NVV1p5REkKkMa5VIp74y9Xeq/7Ozdb1N8MAVQFrDvx
+            lVQ3OcI8Gnpx+6CKLBQ/dhwnTPzDfNySiTPzeAzmVH7NI5uyqgh5aw==
+            -----END AGE ENCRYPTED FILE-----
+          recipient: age1m5w6y8mh0cq00w8k3du5fk3ct92pyr5z3kdy9ww5w7avgwycgdtq2ezmt3
+        - enc: |
+            -----BEGIN AGE ENCRYPTED FILE-----
+            YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSBVeHc0YnBVczc0cVQyOEpz
+            cUVTS3VDaHZEYmo5Z0krOHVMV0JoWXRudURNCmxRZ3B6WldFVXlMVlE1cUQ5YlhB
+            TEVFRXM4QURHNmJtODFSUXJPaEdWYncKLS0tIFlrYTRXa1R2QjlubUxHRm1YVjhM
+            aGV6UVZEMWNwWTc0QytTNWZQN1ZaVmMKZOo/bkOpMgEQhpqsFf2u5MkGmzsTZqlJ
+            RYpu2c0bkQ/Qw1E1R5KPASt/Yn1fQlzaozwNWcWR9SmDOpx7i7L0eQ==
+            -----END AGE ENCRYPTED FILE-----
+          recipient: age1et4nveeh9wlsk4el5kaww60fy3n7vgylxejfte9y7qgv0d4e0d2qj5slae
+        - enc: |
+            -----BEGIN AGE ENCRYPTED FILE-----
+            YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSB2V3FqTzVtcjZ6OENpU1FV
+            bHp1bDNVVmdOcDJ0TFRhWVc0eXI1eVc5UTFZClJZSG1nZWhwdGczZE10VWlwQmNz
+            VHM3R1RKQTZFTENpSzZIYmJheHg3MXcKLS0tIDFCeVppVzgrbjQvWVgvR1B5WEFU
+            MkxwaVJEUHVGR3pqTHJKdWUrTFBSbEEKdLarVfErD65pH53hNeXXoKMY2+3RT6Em
+            EM+nA1Cyah5JfOiAHb93TkDtzhd4ZWWjNLBFfT2BxxTshELIcQGjpQ==
+            -----END AGE ENCRYPTED FILE-----
+          recipient: age1wynx7pnkg8z6n20zxg2krecmgyy5gdlj6xrs2tmfjctefy2xwv3qa2v24g
+        - enc: |
+            -----BEGIN AGE ENCRYPTED FILE-----
+            YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSBwcXpVVmkxN0FkeWk0bWZM
+            Tm9ZQ1NIRVcxcmMxMzByOFNydFhZeHVvbFRBCmlCSlJEQmFuMDlnUWtaK3Fpd1E1
+            VzIxMnBjN0k4bk8rb25GNiszcDNIaTgKLS0tIDdaZXIybFlXaTg1bXU5WFR3VHha
+            cmFCOElORkEyMkNJL2NkZmQrSndTdHMKl3Fdu+/dsJB6ULPUNp4OKTx0a27nV7xA
+            fyp9cOcIWY3NZgtI4C1VkGlXspky5ydTEGPYNjXePRZHYnHZpy2u2A==
+            -----END AGE ENCRYPTED FILE-----
+          recipient: age1ewq0v3rjm0y4m86xq9z555weuspsklz4sz07emhx4awqttjd9sjqnf2t3u
+    encrypted_regex: ^(data|stringData)$
+    lastmodified: "2026-10-21T15:05:27Z"
+    mac: ENC[AES256_GCM,data:2UBlTtkOJhN3PbTgIY585kkRUFHwuUUNoPhw7LICK4CgBXd2DtTLRUiUlDZdScEgZPG1/FWmkHb0IUp+ALovcY45GHgm5HCMqjMRWGOhB8i5AJ2y32yTTsaqWGBI8NIjX+HW4kIXKUd6Y+yZy9WDNFC4A4LGIVF42hGa1FeuvUc=,iv:sjk4aI97FilFscGFDMfjs27w3+cuYMBLOnJT74x2F2E=,tag:RN0s1VDLsSrbcwGtjOERcQ==,type:str]
+    version: 3.13.3

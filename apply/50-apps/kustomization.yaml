@@ -69,3 +69,5 @@ resources:
   # `observability`. It reads observability-grafana-admin and observability-grafana-oidc (Task 3) and
   # titan-tls, reflected in.
   - grafana/grafana.yaml
+  # Gatus probes casa through public DNS from titan and sends alerts directly to Telegram.
+  - gatus/gatus.yaml
