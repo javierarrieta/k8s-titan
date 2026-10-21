@@ -15,7 +15,8 @@ made and what was deliberately left out.
     apply/40-certificates/  the titan.arrieta.eu wildcard, in namespace `certificates`
     apply/50-apps/          authentik with its declarative `Database`/`DatabaseRole` in
                             namespace `auth`, coder with its own, open-webui with its own in
-                            namespace `open-webui`, and any future app that passes the admission
+                            namespace `open-webui`, grafana with its own in namespace
+                            `observability`, and any future app that passes the admission
                             test below
     apply/60-tesla/         TeslaMate with its own `Database`/`DatabaseRole`, Grafana and the
                             Tesla Fleet Telemetry intake, in namespace `apps`
@@ -73,7 +74,14 @@ before trusting anything else in that file.
 
 Metrics: this cluster runs no Prometheus. k8s-casa's central Prometheus pulls node, control-plane,
 kubelet, cAdvisor and kube-state-metrics metrics over the WireGuard mesh from `192.168.133.1`, and
-`docs/titan-metrics-scrape.md` is the runbook. Two things there are load-bearing and easy to undo by
+`docs/titan-metrics-scrape.md` is the runbook. **The consumer of all of it now lives on titan**:
+`apply/50-apps/grafana/` runs a Grafana in namespace `observability` whose Prometheus datasource is
+casa's, reached over the mesh at `https://prometheus.local.arrieta.eu`. It is a whole-homelab view by
+decision, not misconfiguration — that Prometheus holds casa, titan and techdelivery, and `cluster` is
+absent on titan's own node_exporter and comin scrapes, so it is not a usable filter. Both
+datasources are unauthenticated and Grafana proxies them server-side, so casa putting
+`prometheus.local` behind authentik empties every panel at once with the pod still healthy.
+`docs/grafana-runbook.md` is that runbook. Two things there are load-bearing and easy to undo by
 accident: node metrics come from the NixOS `node_exporter` and never from a DaemonSet (the host owns
 `:9100`, and the `k3s_etcd_snapshot_*` gauges a broken backup depends on cannot be produced by a pod),
 and kube-state-metrics leaves the cluster through the kube-apiserver service proxy rather than a
