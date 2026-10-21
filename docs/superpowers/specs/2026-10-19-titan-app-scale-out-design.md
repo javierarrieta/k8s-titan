@@ -109,6 +109,12 @@ needed, and adding a second ordering mechanism to prove the first one worked wou
 
 The last clause is the one that would have caught Tesla.
 
+**Amended 2026-10-21, because this test was read wrongly the next day.** §3.1 decides **namespace**
+only. It says nothing about stages, and the sentence "gets its own namespace and its own entry in
+`apply/00-bootstrap/namespaces.yaml`" means exactly what it says — a namespace, not a stage. Read as
+a stage rule it disqualifies workloads the tree has already placed in `apps`, which is what §3.2 now
+says out loud instead of leaving to inference.
+
 ### 3.2 Where the small apps go
 
 A new small app is **a subdirectory of `apply/50-apps/` listed in `apply/50-apps/kustomization.yaml`**
@@ -129,9 +135,24 @@ app with no database and no hostname of its own, a freeze that clears on the nex
 proportionate outcome. For Tesla, with 27 hand-written objects and a database behind it, it was not —
 which is why Tesla got `60-tesla`.
 
-**Promote an app to its own numbered stage when** it fails the §3.1 test on any axis (own `Certificate`,
-own Secret set, own database, more than a couple of pods), or when freezing it alongside authentik and
-coder stops being an inconvenience.
+**Two axes, and the first draft conflated them.** Own `Certificate`, own Secret set, own database or
+more than a couple of pods decide **namespace** (§3.1). They do not decide **stage**. A stage is
+bought by object count, edit frequency, and whether freezing your neighbours is tolerable — which is
+why Tesla got `60-tesla` (27 hand-written objects, own `Certificate`, own database) and coder and
+open-webui did not, despite both having their own namespace, their own Secret set, their own public
+hostname and open-webui a database as well.
+
+So the rule is: **an app gets its own namespace when it fails §3.1, and its own numbered stage when
+freezing it alongside authentik and coder stops being an inconvenience.** The `apps` stage header
+already states the accepted cost — a malformed manifest in a small app freezes coder's *updates*, not
+coder — and open-webui's D6 recorded the same reading when it landed in `apps` while literally
+qualifying for promotion. Neither was an oversight; the text was the problem.
+
+What is *not* softened: the malformed-manifest class is real, and hand-written YAML is where it lives.
+An app whose bulk is large hand-written ConfigMaps — dashboards, rules, generated JSON — is closer to
+Tesla's risk profile than coder's, because a `HelmRelease` with bad `values` fails on its own and a
+ConfigMap with a mis-nested field fails the whole unit. Promote on that shape as well as on freeze
+cost.
 
 **Promotion is a three-commit change, and the order is not optional.** Moving objects out of a stage
 that has `prune: true` makes them stale by `inventory.Diff` the instant the move lands, and Flux
