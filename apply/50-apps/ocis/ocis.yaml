@@ -90,6 +90,24 @@ spec:
                 secretKeyRef:
                   name: ocis-secrets
                   key: machine-auth-api-key
+            # Three values oCIS refuses to start without, each checked by a different service's
+            # Validate(): JWT secret, transfer secret and system-user API key
+            # (ocis-pkg/config/parser/parse.go:134, services/storage-system/pkg/config/parser/parse.go:41).
+            # The first reconcile crash-looped on exactly this - the container died with
+            # "The transfer_secret has not been set properly" before any of the interesting subsystems
+            # got a turn, which is why STORAGE_* was still untested afterwards.
+            - name: OCIS_TRANSFER_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: ocis-secrets
+                  key: transfer-secret
+            # Note the name has no OCIS_ prefix (ocis-pkg/shared/shared_types.go:104). Sharing,
+            # settings and storage-system all check it.
+            - name: SYSTEM_USER_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: ocis-secrets
+                  key: system-user-api-key
             # --- authentik as the identity provider -------------------------------------------
             # The IdP's TLS verification chains off the global OCIS_INSECURE above
             # (env:"OCIS_INSECURE;PROXY_OIDC_INSECURE"), and envdecode takes the LAST variable in the
@@ -206,6 +224,14 @@ spec:
             - collaboration
             - server
           env:
+            # The collaboration service validates exactly three things: JWT secret, WOPI secret and
+            # WOPI src (services/collaboration/pkg/config/parser/parse.go:40-48). The first reconcile
+            # died on the missing secret.
+            - name: COLLABORATION_WOPI_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: ocis-secrets
+                  key: wopi-secret
             - name: COLLABORATION_GRPC_ADDR
               value: "127.0.0.1:9301"
             - name: COLLABORATION_HTTP_ADDR
