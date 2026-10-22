@@ -13,12 +13,12 @@ KUSTOMIZE_DIRS := $(shell find apply -name kustomization.yaml 2>/dev/null | sed 
 # not be able to slip between the encryption rule and the validation glob.
 SECRET_FIND := find apply/10-secrets \( -name '*.yaml' -o -name '*.yml' \) ! -name kustomization.yaml
 
-.PHONY: check check-ci kustomize-check kustomize-listing dry-run py-deps validate update-keys scan leak-check secrets-placement secrets-list secrets-present release-secrets db-url-check oidc-check grafana-oidc-check observability-oidc-check open-webui-oidc-check crd-check tesla-forwarder-test update-cnpg-crds update-crds
+.PHONY: check check-ci kustomize-check kustomize-listing dry-run py-deps validate update-keys scan leak-check secrets-placement secrets-list secrets-present release-secrets db-url-check oidc-check grafana-oidc-check observability-oidc-check open-webui-oidc-check crd-check namespace-check tesla-forwarder-test update-cnpg-crds update-crds
 
 # leak-check runs FIRST: make has no -k, so it stops at the first failing prerequisite.
 # validate needs the age key, so an operator who forgot SOPS_AGE_KEY_FILE would never
 # reach a leak gate placed behind it.
-check: py-deps leak-check kustomize-check kustomize-listing validate secrets-placement release-secrets db-url-check oidc-check grafana-oidc-check observability-oidc-check open-webui-oidc-check crd-check tesla-forwarder-test
+check: py-deps leak-check kustomize-check kustomize-listing validate secrets-placement release-secrets db-url-check oidc-check grafana-oidc-check observability-oidc-check open-webui-oidc-check crd-check namespace-check tesla-forwarder-test
 	@echo "check: all offline gates passed"
 
 # The subset provable from the tree alone - no age key, no cluster, no network.
@@ -38,7 +38,7 @@ check: py-deps leak-check kustomize-check kustomize-listing validate secrets-pla
 # Secret values, every Secret here is sops-encrypted, and the age key does not go in CI.
 check-ci:
 	@rc=0; \
-	for t in py-deps leak-check kustomize-check kustomize-listing secrets-placement release-secrets crd-check tesla-forwarder-test; do \
+	for t in py-deps leak-check kustomize-check kustomize-listing secrets-placement release-secrets crd-check namespace-check tesla-forwarder-test; do \
 	  echo "--- $$t ---"; \
 	  $(MAKE) --no-print-directory $$t || rc=1; \
 	done; \
@@ -93,6 +93,41 @@ crd-check:
 # do not exist and misses the real ones.
 	{ for d in $(KUSTOMIZE_DIRS); do kubectl kustomize "$$d" || exit 1; printf -- '---\n'; done; } \
 	  | python3 tools/crd-field-check.py \
+	      vendor/cnpg-crds vendor/flux-crds vendor/cert-manager-crds vendor/traefik-crds
+
+# namespace-check: every namespace a built object names must be a namespace this tree declares.
+#
+# Why this exists, in one line: on 2026-10-21 the apps stage went red for three hours over
+# `namespace: casa` in the Grafana Postgres dashboard ConfigMap - a line copied from k8s-casa,
+# where `casa` is real. The build was green, crd-check was green (a namespace is a legal field),
+# and `make dry-run` - the only gate that asks the API server - was not run. The server answered
+# `namespaces "casa" not found` at apply time, and because Flux applies a stage atomically that
+# one line blocked every other manifest in `apps`, including the dashboard the operator was
+# looking for and the exporter shipped in the same commit.
+#
+# It also rejects a namespaced object that omits metadata.namespace, which is the same mistake
+# wearing a hat: it lands in `default`, `default` exists, so nothing downstream ever complains.
+#
+# Honest limit, stated so nobody over-trusts it: this proves a namespace EXISTS, not that it is
+# the right one. `namespace: apps` on a Grafana dashboard passes. Existence is the half that is
+# decidable offline; correctness of intent is still `make dry-run`'s, and that still needs an
+# admin context this repo must never have in CI.
+namespace-check:
+	@command -v python3 >/dev/null 2>&1 \
+	  || { echo "namespace-check: python3 is missing - refusing to report clean"; exit 1; }; \
+	python3 -c 'import yaml' >/dev/null 2>&1 \
+	  || { echo "namespace-check: PyYAML is missing (pip install pyyaml) - refusing to report clean"; exit 1; }; \
+	# The kustomize.yaml half of the same rule, checked here because it is the same failure: a
+	# top-level `namespace:` rewrites every object in the stage, and AGENTS.md forbids it. Flux's
+	# spec.targetNamespace is checked by the python side, on built objects, for the same reason.
+	printf 'kustomize top-level namespace: '; \
+	bad=$$(for f in $(addsuffix /kustomization.yaml,$(KUSTOMIZE_DIRS)); do grep -Hn '^namespace:' "$$f" 2>/dev/null; done); \
+	if [ -n "$$bad" ]; then \
+	  echo "FAIL (a top-level namespace: rewrites every object in the stage; these trees span several)"; \
+	  printf '%s\n' "$$bad"; exit 1; \
+	else echo "none set"; fi; \
+	{ for d in $(KUSTOMIZE_DIRS); do kubectl kustomize "$$d" || exit 1; printf -- '---\n'; done; } \
+	  | python3 tools/namespace-check.py \
 	      vendor/cnpg-crds vendor/flux-crds vendor/cert-manager-crds vendor/traefik-crds
 
 # tesla-forwarder-test: the only hand-written code in the tesla stack lives in a ConfigMap, so nothing
