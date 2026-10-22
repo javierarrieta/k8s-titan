@@ -64,10 +64,21 @@ spec:
           env:
             - name: OCIS_URL
               value: https://files.titan.arrieta.eu
-            # TLS terminates at traefik. This makes the internal service mesh speak plain http to
-            # each other rather than shipping self-signed material between containers in one pod.
+            # TLS terminates at traefik, so the mesh should speak plain http internally.
+            #
+            # OCIS_INSECURE is NOT the switch for that, which is what cost a cycle. It is not a bound
+            # global field at all - it only ever appears as the FIRST name in per-service chains like
+            # PROXY_OIDC_INSECURE (services/proxy/pkg/config/config.go:118). Setting it influences
+            # those chains; on its own it disables nothing. The listener TLS is a different field:
+            # shared.HTTPServiceTLS, bound to OCIS_HTTP_TLS_ENABLED (ocis-pkg/shared/shared_types.go:68).
+            # With that left at its default the proxy served TLS on 9200, the kubelet's plain-http
+            # readiness probe got a 400, and the log filled with
+            #   http: TLS handshake error from 10.62.0.1: client sent an HTTP request to an HTTPS server
+            # Traefik terminates at the edge and talks http to the pod, so http is what we want here.
             - name: OCIS_INSECURE
               value: "true"
+            - name: OCIS_HTTP_TLS_ENABLED
+              value: "false"
             - name: PROXY_HTTP_ADDR
               value: "0.0.0.0:9200"
             - name: OCIS_ADMIN_USER
