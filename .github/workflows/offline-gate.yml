@@ -1,6 +1,16 @@
 name: Offline gate
 
-on: [push, pull_request]
+# Triggers explained in gitguardian-scan.yml: pull_request covers branch work, push is only
+# needed for main. Without the branch filter every push to a PR branch ran this job twice.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 # Least privilege: this job reads the repo and nothing else. The GitGuardian workflow
 # does not set this; a new workflow should not inherit the token's default write scope
