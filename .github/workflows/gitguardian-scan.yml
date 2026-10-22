@@ -1,6 +1,20 @@
 name: GitGuardian scan
 
-on: [push, pull_request]
+# `on: [push, pull_request]` with no branch filter fires both events for the same commit when
+# the branch lives in this repository, so every push to a PR branch produced four runs of two
+# identical jobs. pull_request already covers branch work - it tests the merge ref, which is the
+# thing that will actually land. push is only needed for main, where there is no PR to run for.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# A push that lands while an older run of the same branch is still in flight makes that older run
+# pointless: it is testing a commit that has already been superseded.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   scanning:
