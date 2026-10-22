@@ -114,14 +114,27 @@ spec:
             # hiding in a Secret. Each one is a startup check that fails the pod if it is empty:
             #   OCIS_SYSTEM_USER_ID      - proven by the live crash-loop; sharing + storage-system
             #                              + the supervisor (ocis-pkg/config/parser/parse.go)
-            #   STORAGE_USERS_MOUNT_ID   - storage-users and gateway both refuse to start without
-            #                              it (services/storage-users/pkg/config/parser/parse.go:43)
+            #   STORAGE_USERS_MOUNT_ID   - storage-users refuses to start without it
+            #                              (services/storage-users/pkg/config/parser/parse.go:43), and
+            #                              gateway needs the SAME mount under a DIFFERENT name - see
+            #                              the next entry. That asymmetry is the trap.
             #   OCIS_ADMIN_USER_ID       - idm and settings check it
             #   GRAPH_APPLICATION_ID     - graph checks it; app roles are tied to this ID
             # Changing the mount ID after files exist orphans the storage tree. Do not rotate these.
             - name: OCIS_SYSTEM_USER_ID
               value: "a0f1a4d7-45a2-440e-8892-76c2523427b6"
             - name: STORAGE_USERS_MOUNT_ID
+              value: "d8378cd3-e815-4441-9cd2-87222a555c27"
+            # Same mount, different variable name. storage-users declares the mount under
+            # STORAGE_USERS_MOUNT_ID; gateway resolves it under GATEWAY_STORAGE_USERS_MOUNT_ID
+            # (services/gateway/pkg/config/config.go:86). Setting only the first produced
+            # "The storage users mount ID has not been configured for gateway" on the third
+            # reconcile - the value was present in the pod and still did not reach the service that
+            # needed it. These two must always hold the identical UUID; a divergence means gateway
+            # cannot route to the users storage at all. Other per-service mount variables exist
+            # (STORAGE_SHARES_MOUNT_ID, STORAGE_PUBLICLINK_STORAGE_PROVIDER_MOUNT_ID) but those
+            # services do not gate startup on them.
+            - name: GATEWAY_STORAGE_USERS_MOUNT_ID
               value: "d8378cd3-e815-4441-9cd2-87222a555c27"
             - name: OCIS_ADMIN_USER_ID
               value: "0189c60d-d9fb-451b-9e5b-bd34f433df58"
