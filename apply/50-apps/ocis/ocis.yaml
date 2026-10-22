@@ -31,8 +31,63 @@ spec:
     requests:
       storage: 5Gi
 ---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ocis-csp
+  namespace: files
+data:
+  # The proxy's CSP is a built-in default with no way to append a directive through env; the only
+  # supported override is a whole file (PROXY_CSP_CONFIG_FILE_LOCATION). This is
+  # services/proxy/pkg/config/csp.yaml from the v8.2.2 tag with two origins added, marked below.
+  # Keep it in step with the upstream file when the image moves.
+  csp.yaml: |
+    directives:
+      child-src:
+        - '''self'''
+      connect-src:
+        - '''self'''
+        - 'blob:'
+        - 'https://raw.githubusercontent.com/owncloud/awesome-ocis/'
+        # ADDED. authentik: the SPA fetches the OIDC discovery document from the IdP origin. Without
+        # this the browser refuses the request before it reaches the network, so nothing appears in a
+        # HAR and the UI only says "We're having trouble connecting to the login service".
+        - 'https://auth.titan.arrieta.eu/'
+      default-src:
+        - '''none'''
+      font-src:
+        - '''self'''
+        - 'data:'
+      frame-ancestors:
+        - '''self'''
+      frame-src:
+        - '''self'''
+        - 'blob:'
+        - 'https://embed.diagrams.net/'
+        # ADDED. Collabora's editor loads in an iframe from its own host.
+        - 'https://collabora.titan.arrieta.eu/'
+      img-src:
+        - '''self'''
+        - 'data:'
+        - 'blob:'
+        - 'https://raw.githubusercontent.com/owncloud/awesome-ocis/'
+      manifest-src:
+        - '''self'''
+      media-src:
+        - '''self'''
+      object-src:
+        - '''self'''
+        - 'blob:'
+      script-src:
+        - '''self'''
+        - '''unsafe-inline'''
+      style-src:
+        - '''self'''
+        - '''unsafe-inline'''
+---
 apiVersion: apps/v1
 kind: Deployment
+
 metadata:
   name: ocis
   namespace: files
@@ -94,6 +149,10 @@ spec:
             # internal only: the Service exposes 9200 and 9300, never this port.
             - name: PROXY_DEBUG_ADDR
               value: "0.0.0.0:9205"
+            # Point the proxy at the CSP file above. See the ConfigMap for why the IdP origin has to
+            # be listed there.
+            - name: PROXY_CSP_CONFIG_FILE_LOCATION
+              value: /etc/ocis/csp/csp.yaml
             - name: OCIS_ADMIN_USER
               valueFrom:
                 secretKeyRef:
@@ -333,6 +392,9 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /var/lib/ocis
+            - name: csp
+              mountPath: /etc/ocis/csp
+              readOnly: true
         - name: collaboration
           image: owncloud/ocis:8.2.2
           # The image entrypoint is the `ocis` binary, so these args produce
@@ -398,6 +460,9 @@ spec:
         - name: data
           persistentVolumeClaim:
             claimName: ocis-data
+        - name: csp
+          configMap:
+            name: ocis-csp
 # HONEST LIMITS, read before trusting this file.
 # 1. The blobs live in casa's MinIO, across the WireGuard link. If the mesh drops, the web UI still
 #    renders from the local metadata tree and every file body fails. That is the failure mode, not a
