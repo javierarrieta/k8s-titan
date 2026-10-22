@@ -199,9 +199,9 @@ optionally `?vin=<VIN>`.
 Then the cluster side, which needs an admin context for the last two:
 
 ```fish
-kubectl --context k8s-titan -n apps logs deploy/tesla-fleet-telemetry --tail=20
-kubectl --context k8s-titan -n apps exec deploy/tesla-redis -- redis-cli info commandstats
-kubectl --context k8s-titan -n apps exec deploy/tesla-forwarder -- wget -qO- http://127.0.0.1:8080/metrics
+kubectl --context titan -n apps logs deploy/tesla-fleet-telemetry --tail=20
+kubectl --context titan -n apps exec deploy/tesla-redis -- redis-cli info commandstats
+kubectl --context titan -n apps exec deploy/tesla-forwarder -- wget -qO- http://127.0.0.1:8080/metrics
 ```
 
 `socket_connected` with a `Hermes/*` user agent is the car. `cmdstat_publish` and `forwarded` rising

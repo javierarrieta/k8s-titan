@@ -239,9 +239,9 @@ because the car has not been asked, not because anything is broken.
 After `synced: true`, the proof is a client connection, not a config echo:
 
 ```fish
-kubectl --context k8s-titan -n apps logs deploy/tesla-fleet-telemetry --tail=20
-kubectl --context k8s-titan -n apps exec deploy/tesla-redis -- redis-cli info commandstats
-kubectl --context k8s-titan -n apps exec deploy/tesla-forwarder -- wget -qO- http://127.0.0.1:8080/metrics
+kubectl --context titan -n apps logs deploy/tesla-fleet-telemetry --tail=20
+kubectl --context titan -n apps exec deploy/tesla-redis -- redis-cli info commandstats
+kubectl --context titan -n apps exec deploy/tesla-forwarder -- wget -qO- http://127.0.0.1:8080/metrics
 ```
 
 `socket_connected` with `user_agent=Hermes/*` is the car. `cmdstat_publish` and `forwarded` rising
@@ -337,10 +337,10 @@ Your own account satisfies rule 3 for free: TeslaMate's sign-in created the gran
 car does not, so their account has to authorize the app once:
 
 ```fish
-kubectl --context k8s-titan -n apps scale deploy/tesla-auth-callback --replicas=1
+kubectl --context titan -n apps scale deploy/tesla-auth-callback --replicas=1
 set -x TESLA_CLIENT_ID <client id>
 ./scripts/tesla-auth.sh url          # the OWNER of the vehicle opens this and approves
-kubectl --context k8s-titan -n apps scale deploy/tesla-auth-callback --replicas=0
+kubectl --context titan -n apps scale deploy/tesla-auth-callback --replicas=0
 ```
 
 **Stop there — do not run `exchange`.** The pairing page checks that an authorization exists, and

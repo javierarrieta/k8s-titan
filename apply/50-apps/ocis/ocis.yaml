@@ -263,6 +263,33 @@ spec:
                 secretKeyRef:
                   name: ocis-secrets
                   key: ldap-bind-password
+            # The global above is NOT one bind password for the whole mesh. idm creates three
+            # distinct LDAP users under ou=sysusers and each service binds as a different one, so
+            # each needs its own password; the global only covers the reva user that auth-basic,
+            # users and groups use. services/idm/pkg/command/configsync.go:22-36 is the authority -
+            # it maps each service user to the config keys that must hold its secret:
+            #
+            #   reva        -> idm.service_user_passwords.reva_password  (covered by the global)
+            #   libregraph  -> idm.service_user_passwords.idm_password
+            #   idp         -> idm.service_user_passwords.idp_password
+            #
+            # Both chains are OCIS_LDAP_BIND_PASSWORD;<SERVICE>_LDAP_BIND_PASSWORD and envdecode
+            # takes the LAST set name, so without the per-service override graph and idp silently
+            # bound as uid=libregraph / uid=idp using the reva password. That surfaced as
+            # `LDAP Result Code 49 "Invalid Credentials"` from graph during first login, which the
+            # proxy reported only as "Autoprovisioning user failed / 500" and the UI flattened to
+            # "your account is either inactive or not yet authorized". No new secrets: these are
+            # keys the Secret already had.
+            - name: GRAPH_LDAP_BIND_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: ocis-secrets
+                  key: idm-svc-password
+            - name: IDP_LDAP_BIND_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: ocis-secrets
+                  key: idp-svc-password
             # Graph's service account - a machine identity idm creates in LDAP. The ID is an
             # identifier, so it sits with the other stable IDs above rather than in the Secret.
             - name: OCIS_SERVICE_ACCOUNT_ID
