@@ -140,6 +140,48 @@ spec:
               value: "0189c60d-d9fb-451b-9e5b-bd34f433df58"
             - name: GRAPH_APPLICATION_ID
               value: "d584291e-791e-4a9f-95ec-ef46e52e89ff"
+            # --- the LDAP layer ocis init normally wires --------------------------------------
+            # auth-basic's only supported auth manager is 'ldap'
+            # (services/auth-basic/pkg/config/config.go:23, default "ldap"), and it, users, groups,
+            # graph and idp all bind against the embedded idm LDAP. Nothing in the env-var docs makes
+            # this discoverable; it surfaced as "The ldap bind_password has not been set properly in
+            # your config for auth-basic" on the fourth reconcile.
+            #
+            # The bind DN defaults to uid=reva,ou=sysusers,o=libregraph-idm for auth-basic, users and
+            # groups, so OCIS_LDAP_BIND_PASSWORD MUST equal IDM_REVASVC_PASSWORD - idm provisions that
+            # LDAP user from the second one and the others authenticate with the first. They are two
+            # keys in the Secret holding one value on purpose: rotating one without the other produces
+            # an InvalidCredentials failure that looks like a bad password rather than a mismatch.
+            - name: IDM_SVC_PASSWORD
+              valueFrom: { secretKeyRef: { name: ocis-secrets, key: idm-svc-password } }
+            - name: IDM_REVASVC_PASSWORD
+              valueFrom: { secretKeyRef: { name: ocis-secrets, key: idm-reva-password } }
+            - name: IDM_IDPSVC_PASSWORD
+              valueFrom: { secretKeyRef: { name: ocis-secrets, key: idp-svc-password } }
+            - name: IDM_ADMIN_PASSWORD
+              valueFrom: { secretKeyRef: { name: ocis-secrets, key: idm-admin-password } }
+            - name: OCIS_LDAP_BIND_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: ocis-secrets
+                  key: ldap-bind-password
+            # Graph's service account - a machine identity idm creates in LDAP. The ID is an
+            # identifier, so it sits with the other stable IDs above rather than in the Secret.
+            - name: OCIS_SERVICE_ACCOUNT_ID
+              value: "b7c1f0e2-9d34-4a6f-8c21-5e0b7a4d9c33"
+            - name: OCIS_SERVICE_ACCOUNT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: ocis-secrets
+                  key: service-account-secret
+            # Distinct from OCIS_TRANSFER_SECRET despite the similar name (THUMBNAILS_TRANSFER_TOKEN,
+            # services/thumbnails/pkg/config/config.go).
+            - name: THUMBNAILS_TRANSFER_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: ocis-secrets
+                  key: thumbnails-transfer-token
+
             # --- authentik as the identity provider -------------------------------------------
             # The IdP's TLS verification chains off the global OCIS_INSECURE above
             # (env:"OCIS_INSECURE;PROXY_OIDC_INSECURE"), and envdecode takes the LAST variable in the
