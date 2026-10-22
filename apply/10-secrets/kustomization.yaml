@@ -109,3 +109,10 @@ resources:
   - authentik-mealie-blueprint.yaml
   - mealie-db-credentials.yaml
   - mealie-secrets.yaml
+  # OpenCloud's blob-store credential, staged ahead of the app itself. Two keys only, and they are
+  # the two no script on titan can mint: the pair has to match the MinIO service account and the
+  # policy in docs/opencloud-minio-policy.json, both created on casa with mc. The remaining values
+  # the app will need (jwt secret, WOPI proof key, machine-auth key, transfer secret, IDM passwords)
+  # are minted with the manifests, not here. Namespace `files` is decided, not provisional -
+  # OpenCloud takes over files.titan.arrieta.eu from oCIS rather than running beside it.
+  - opencloud-secrets.yaml
