@@ -123,9 +123,9 @@ handled by the stage graph, not by a human holding `kubectl apply`.
 
 ```bash
 # 1. merge the titan branch, then watch titan's Flux do the work
-kubectl --context k8s-titan -n flux-system get kustomization infra -o wide
-kubectl --context k8s-titan -n monitoring get sa,role,rolebinding | grep prometheus-scrape
-kubectl --context k8s-titan -n monitoring get helmrelease kube-state-metrics
+kubectl --context titan -n flux-system get kustomization infra -o wide
+kubectl --context titan -n monitoring get sa,role,rolebinding | grep prometheus-scrape
+kubectl --context titan -n monitoring get helmrelease kube-state-metrics
 ```
 
 The read-only `k8s-reader` context sees all of that — it is admin-minus-Secrets — but the token
