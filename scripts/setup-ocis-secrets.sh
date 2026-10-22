@@ -51,6 +51,11 @@ ADMIN_PASSWORD=$(openssl rand -base64 24)
 JWT_SECRET=$(openssl rand -hex 32)
 MACHINE_AUTH_API_KEY=$(cat /proc/sys/kernel/random/uuid)
 COLLABORA_ADMIN_PASSWORD=$(openssl rand -base64 24)
+# Three more that oCIS validates at startup and will not boot without - see the env blocks in
+# apply/50-apps/ocis/ocis.yaml for which service checks which.
+TRANSFER_SECRET=$(openssl rand -hex 32)
+WOPI_SECRET=$(openssl rand -hex 32)
+SYSTEM_USER_API_KEY=$(cat /proc/sys/kernel/random/uuid)
 PROOF_KEY=$(openssl genrsa 2048 2>/dev/null)
 
 [ -n "$S3_ACCESS_KEY" ] || { echo "FAIL: empty S3 access key"; exit 1; }
@@ -77,6 +82,9 @@ stringData:
   admin-password: "$ADMIN_PASSWORD"
   jwt-secret: "$JWT_SECRET"
   machine-auth-api-key: "$MACHINE_AUTH_API_KEY"
+  transfer-secret: "$TRANSFER_SECRET"
+  system-user-api-key: "$SYSTEM_USER_API_KEY"
+  wopi-secret: "$WOPI_SECRET"
   s3-access-key: "$S3_ACCESS_KEY"
   s3-secret-key: "$S3_SECRET_KEY"
   collabora-admin-user: "$COLLABORA_ADMIN_USER"
