@@ -81,6 +81,19 @@ spec:
               value: "false"
             - name: PROXY_HTTP_ADDR
               value: "0.0.0.0:9200"
+            # The proxy's own listener flag, and NOT OCIS_HTTP_TLS_ENABLED (which governs the shared
+            # http service and turned out not to be the proxy's switch). Default is true
+            # (services/proxy/pkg/config/defaults/defaultconfig.go:37), and with no cert on disk the
+            # proxy generates a self-signed one at startup, so 9200 answered TLS and every plain-http
+            # probe came back 400. Traefik terminates TLS at the edge.
+            - name: PROXY_TLS
+              value: "false"
+            # /healthz and /readyz live on the debug server, not on 9200 - and it binds 127.0.0.1 by
+            # default (proxy defaults: Addr "127.0.0.1:9205"), which kubelet cannot reach through the
+            # pod IP. Bind it publicly inside the pod so the probes have a real endpoint. Cluster-
+            # internal only: the Service exposes 9200 and 9300, never this port.
+            - name: PROXY_DEBUG_ADDR
+              value: "0.0.0.0:9205"
             - name: OCIS_ADMIN_USER
               valueFrom:
                 secretKeyRef:
@@ -298,10 +311,14 @@ spec:
           ports:
             - name: proxy
               containerPort: 9200
+            - name: proxy-debug
+              containerPort: 9205
+          # /readyz on the debug server. Probing 9200 was wrong twice over: the path does not exist
+          # there, and the listener was TLS.
           readinessProbe:
             httpGet:
-              path: /healthz
-              port: 9200
+              path: /readyz
+              port: 9205
             initialDelaySeconds: 15
             periodSeconds: 20
             timeoutSeconds: 5
