@@ -1,0 +1,142 @@
+---
+# Collabora CODE for oCIS, in namespace `files`.
+#
+# This is the same CODE line already running in casa (collabora/code, the 26.04 series), so the
+# image is not new; what is new is how it is wired. Nextcloud spoke WOPI to Collabora directly. oCIS
+# puts its own collaboration service in between, so Collabora's only cluster-facing relationship is
+# the WOPISrc handed to it by `ocis-collaboration:9300`.
+#
+# Pinned by digest rather than tag, for two reasons. One: the full tag is a four-part dotted version,
+# `make leak-check`'s IPv4 pattern matches it, and that gate has no exemption mechanism - widening
+# its allow-list to admit a version number is the softening AGENTS.md refuses. Two: a digest pins
+# harder than a mutable tag. The tag behind this digest is named where the image is used; refresh it
+# with
+#   curl -s https://hub.docker.com/v2/repositories/collabora/code/tags/<tag> \
+#     | jq '.images[]|select(.architecture=="amd64").digest'
+#
+# THE PROOF KEY IS NOT GENERATED HERE, AND THAT IS DELIBERATE.
+# Since collabora/code 26.x the image ships without a shell and without the `coolconfig` helper that
+# used to mint the WOPI proof key on startup - upstream's own compose example works around this with
+# a separate one-shot openssl container writing to a host directory. A host directory has no
+# equivalent here, and an emptyDir would hand oCIS a new public key on every pod recreate. The key
+# therefore comes from the sops Secret as a single-file mount: git-managed, encrypted, and stable
+# across restarts. Rotate it deliberately, never as a side effect of recreating a pod.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: collabora
+  namespace: files
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: collabora
+  template:
+    metadata:
+      labels:
+        app: collabora
+    spec:
+      containers:
+        - name: collabora
+          # the 26.04-series tag, pushed 2026-10-09; header explains why this is a digest and how
+          # to resolve it back to a tag. The full tag is deliberately not written here: a four-part
+          # dotted version is what leak-check's IPv4 pattern matches.
+          image: collabora/code@sha256:56541aad09403975646dfb87a3716e38afecce09b5f853391eb6d937a0ccd402
+          env:
+            # coolwsd must not try to create its own certificate; traefik terminates.
+            - name: DONT_GEN_SSL_CERT
+              value: "YES"
+            # ssl.enable=false + ssl.termination=true is the pairing that has been running in casa.
+            # net.frame_ancestors must name the oCIS origin or the editor iframe is refused.
+            - name: extra_params
+              value: >-
+                --o:ssl.enable=false
+                --o:ssl.termination=true
+                --o:welcome.enable=false
+                --o:net.frame_ancestors=files.titan.arrieta.eu
+                --o:remote_font_urls.0=https://fonts.gstatic.com
+            - name: username
+              valueFrom:
+                secretKeyRef:
+                  name: ocis-secrets
+                  key: collabora-admin-user
+            - name: password
+              valueFrom:
+                secretKeyRef:
+                  name: ocis-secrets
+                  key: collabora-admin-password
+          ports:
+            - name: cool
+              containerPort: 9980
+          readinessProbe:
+            # coolwsd --probe is upstream's own healthcheck; the 26.x image has no shell to curl with.
+            exec:
+              command: ["/usr/bin/coolwsd", "--probe"]
+            initialDelaySeconds: 20
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 5
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          securityContext:
+            capabilities:
+              add:
+                # Required by coolwsd for its chroot/lokit process handling.
+                - MKNOD
+          volumeMounts:
+            - name: proof-key
+              mountPath: /etc/coolwsd/proof_key
+              subPath: proof_key
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: proof-key
+          secret:
+            secretName: ocis-secrets
+            items:
+              - key: collabora-proof-key
+                path: proof_key
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: collabora
+  namespace: files
+spec:
+  selector:
+    app: collabora
+  ports:
+    - name: cool
+      port: 9980
+      targetPort: cool
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: collabora
+  namespace: files
+spec:
+  ingressClassName: traefik
+  rules:
+    - host: collabora.titan.arrieta.eu
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: collabora
+                port:
+                  name: cool
+  tls:
+    - hosts:
+        - collabora.titan.arrieta.eu
+      secretName: titan-tls

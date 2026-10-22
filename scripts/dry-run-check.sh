@@ -41,6 +41,16 @@ CTX="$1"
 
 command -v kubectl >/dev/null || { echo "FAIL: kubectl not on PATH" >&2; exit 1; }
 command -v python3 >/dev/null || { echo "FAIL: python3 not on PATH (the stripper needs it, and PyYAML — see make py-deps)" >&2; exit 1; }
+# Existence of the interpreter is not the same as the import working, and the difference is invisible.
+# Both the stripper and count_objects send their tracebacks into $err, and the EXIT trap below
+# deletes that file - so under `set -e` a missing PyYAML made this gate print one stage label, exit
+# 1, and destroy its own evidence. Measured 2026-10-28 in a nix-shell that had python3 but not
+# python3Packages.pyyaml: `00-bootstrap` and nothing else. Same probe `make py-deps` already uses,
+# run before any work so the failure names the missing package instead of a stage name.
+python3 -c 'import yaml' 2>/dev/null || { \
+  echo "FAIL: python3 has no PyYAML - the sops stripper cannot run, and a partial validation is worse than none." >&2; \
+  echo "FAIL:   install it:  nix-shell -p python3 python3Packages.pyyaml   (see also: make py-deps)" >&2; \
+  exit 1; }
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 err=$(mktemp); trap 'rm -f "$err"' EXIT

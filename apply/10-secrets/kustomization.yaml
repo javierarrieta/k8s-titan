@@ -91,3 +91,11 @@ resources:
   - authentik-observability-blueprint.yaml
   - observability-grafana-oidc.yaml
   - observability-grafana-admin.yaml
+  # Infinite Scale. One file, nine values, all minted by scripts/setup-ocis-secrets.sh in one process.
+  # Two of the nine are not ours to mint and are prompted rather than generated: the S3 pair has to
+  # match the IAM user and bucket policy created on casa's MinIO with mc, so no script on titan can
+  # author both halves. The ninth is the Collabora WOPI proof key, which lives here rather than being
+  # generated at startup because collabora/code 26.x has no shell to generate it with - see the
+  # header of apply/50-apps/ocis/collabora.yaml. An unlisted file here builds green and is silently
+  # never applied, which is the lie `make secrets-placement` exists to catch.
+  - ocis-secrets.yaml

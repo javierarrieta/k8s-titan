@@ -1,0 +1,124 @@
+---
+# authentik blueprint: ownCloud Infinite Scale's OIDC application and provider, for
+# files.titan.arrieta.eu.
+#
+# WHY A BLUEPRINT
+# authentik ships no CRDs, so this is the only declarative path: a rebuilt authentik gets oCIS's
+# client back from git instead of from someone's memory. Same argument as
+# authentik/blueprints-open-webui.yaml, and docs/authentik-runbook.md §5 is the record of what a
+# blueprint that is never mounted looks like (nothing - it is indistinguishable from one never
+# written).
+#
+# A ConfigMap, not a Secret - and that is forced, not a shortcut
+# oCIS has no client_secret anywhere in its configuration. The web service's OIDC block is
+# ClientID / ResponseType / Scope / MetadataURL and nothing else
+# (services/web/pkg/config/config.go:71-76), and the proxy's OIDC block has no client credential
+# either (services/proxy/pkg/config/config.go:116-127) - it only validates tokens against the IdP's
+# JWKS and userinfo endpoints. ownCloud Web is a browser SPA, so the one client oCIS can use is a
+# public one doing authorization code + PKCE. There is no secret to encrypt, so this gets the
+# exposure that matches: readable by anyone who can read the namespace.
+#
+# WHY IT IS NOT IN THE OUTPOST'S PROVIDER LIST
+# Same reason as open-webui and Grafana: that list is proxy-only, validate_providers dispatches on
+# provider type (outposts/api/outposts.py:69-88), and tesla-outpost-blueprint.yaml OWNS the list -
+# it sets it rather than appending. oCIS does its own OIDC redirect; it is not behind the outpost.
+#
+# THE CLAIMS ARE UPSTREAM'S, NOT INVENTED HERE
+# deployments/examples/ocis_keycloak/docker-compose.yml - upstream's own external-IdP reference -
+# sets PROXY_USER_OIDC_CLAIM=preferred_username and PROXY_USER_CS3_CLAIM=username, which are also
+# the compiled defaults (services/proxy/pkg/config/defaults/defaultconfig.go:86-87). The cost of
+# keying identity on the username rather than on `sub`: renaming a user in authentik makes oCIS see
+# a brand new account, and the old one keeps its files. Switching PROXY_USER_OIDC_CLAIM to `sub`
+# fixes that, but it is a combination upstream's example does not exercise, so it is not the default
+# here. Renaming an oCIS user after they have data is the thing to avoid.
+# NOT DONE HERE, ON PURPOSE
+# Group-to-role mapping. PROXY_ROLE_ASSIGNMENT_DRIVER=oidc would map an authentik group onto the
+# oCIS admin role, but its role_mapping list is config-file-only: "This setting can only be
+# configured in the configuration file and not via environment variables"
+# (services/proxy/pkg/config/config.go:164). Doing it declaratively therefore means mounting a
+# proxy config.yaml, which is a second configuration surface for a single admin grant. So the first
+# administrator is promoted once, by hand, after their first login:
+#
+#   kubectl -n files exec deploy/ocis -c ocis -- ocis user role set <user-id> admin
+#
+# Exact CLI syntax unverified; `ocis user role --help` inside the pod is the authority.
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: authentik-ocis-blueprint
+  namespace: auth
+data:
+  ocis.yaml: |
+    version: 1
+    metadata:
+      name: titan-ocis
+    entries:
+      - model: authentik_providers_oauth2.oauth2provider
+        id: ocis-provider
+        identifiers:
+          name: ocis
+        state: present
+        attrs:
+          name: ocis
+          # public, because oCIS cannot carry a secret (see header). PKCE is not an assumption:
+          # ownCloud Web sets response_type 'code' and passes no disablePKCE
+          # (packages/web-runtime/src/services/auth/userManager.ts:62-68), and oidc-client-ts sets
+          # code_verifier unless disablePKCE (src/SigninRequest.ts:110). The authorization request
+          # therefore carries an S256 challenge, which is what a public client requires.
+          client_type: public
+          client_id: ocis
+          # Read from source, not guessed. ownCloud Web builds these client-side (userManager.ts:
+          # 64-69): redirect_uri /oidc-callback.html, silent_redirect_uri
+          # /oidc-silent-redirect.html, post_logout_redirect_uri /. The first two are authorization
+          # redirects and the third is a logout redirect - and in current authentik logout URIs live
+          # in this same list tagged by type rather than in a field of their own
+          # (providers/oauth2/models.py:417-419: post_logout_redirect_uris is a property filtered off
+          # redirect_uris by redirect_uri_type). Strict on all three; a prefix match would be a
+          # redirect bypass.
+          redirect_uris:
+            - url: https://files.titan.arrieta.eu/oidc-callback.html
+              matching_mode: strict
+              redirect_uri_type: authorization
+            - url: https://files.titan.arrieta.eu/oidc-silent-redirect.html
+              matching_mode: strict
+              redirect_uri_type: authorization
+            - url: https://files.titan.arrieta.eu/
+              matching_mode: strict
+              redirect_uri_type: logout
+          grant_types:
+            - authorization_code
+            - refresh_token
+          # offline_access is load-bearing, not decoration. WEB_OIDC_SCOPE defaults to
+          # "openid profile email" (services/web/pkg/config/defaults/defaultconfig.go:99) - no refresh
+          # token in sight - so the browser would be silently logged out every time an access token
+          # expires. The app side therefore asks for offline_access explicitly; this mapping is what
+          # makes authentik honour it.
+          property_mappings:
+            - !Find [authentik_providers_oauth2.scopemapping, [managed, goauthentik.io/providers/oauth2/scope-openid]]
+            - !Find [authentik_providers_oauth2.scopemapping, [managed, goauthentik.io/providers/oauth2/scope-email]]
+            - !Find [authentik_providers_oauth2.scopemapping, [managed, goauthentik.io/providers/oauth2/scope-profile]]
+            - !Find [authentik_providers_oauth2.scopemapping, [managed, goauthentik.io/providers/oauth2/scope-offline_access]]
+          # implicit consent: an app this cluster owns and configures does not need a click that adds no
+          # security. Same reasoning as coder's, Grafana's and open-webui's providers.
+          authorization_flow: !Find [authentik_flows.flow, [slug, default-provider-authorization-implicit-consent]]
+          invalidation_flow: !Find [authentik_flows.flow, [slug, default-invalidation-flow]]
+          signing_key: !Find [authentik_crypto.certificatekeypair, [managed, goauthentik.io/crypto/jwt-managed]]
+          # per_provider makes the issuer https://auth.titan.arrieta.eu/application/o/ocis/, which is
+          # exactly what OCIS_OIDC_ISSUER in apply/50-apps/ocis/ocis.yaml names. If the slug moves and
+          # that value does not, the two disagree and every failure looks like a bad token.
+          issuer_mode: per_provider
+          sub_mode: hashed_user_id
+
+      - model: authentik_core.application
+        identifiers:
+          slug: ocis
+        state: present
+        attrs:
+          name: ownCloud Infinite Scale
+          slug: ocis
+          provider: !KeyOf ocis-provider
+          meta_launch_url: https://files.titan.arrieta.eu/
+          # The Application is not decoration - see blueprints-open-webui.yaml for the recorded lesson:
+          # a provider with no owning Application is invisible to the consumer that needs it, and it is
+          # also what puts oCIS in the authentik user dashboard.
