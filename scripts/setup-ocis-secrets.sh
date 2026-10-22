@@ -56,6 +56,17 @@ COLLABORA_ADMIN_PASSWORD=$(openssl rand -base64 24)
 TRANSFER_SECRET=$(openssl rand -hex 32)
 WOPI_SECRET=$(openssl rand -hex 32)
 SYSTEM_USER_API_KEY=$(cat /proc/sys/kernel/random/uuid)
+# The embedded idm LDAP layer, which auth-basic, users, groups, graph and idp bind against.
+# LDAP_BIND_PASSWORD is deliberately the same value as IDM_REVA_PASSWORD: the default bind DN is
+# uid=reva,ou=sysusers,o=libregraph-idm, so idm provisions that user from one and the others
+# authenticate with the other. See the env block in apply/50-apps/ocis/ocis.yaml.
+IDM_SVC_PASSWORD=$(openssl rand -hex 24)
+IDM_REVA_PASSWORD=$(openssl rand -hex 24)
+IDP_SVC_PASSWORD=$(openssl rand -hex 24)
+IDM_ADMIN_PASSWORD=$(openssl rand -hex 24)
+LDAP_BIND_PASSWORD="$IDM_REVA_PASSWORD"
+SERVICE_ACCOUNT_SECRET=$(openssl rand -hex 24)
+THUMBNAILS_TRANSFER_TOKEN=$(openssl rand -hex 32)
 PROOF_KEY=$(openssl genrsa 2048 2>/dev/null)
 
 [ -n "$S3_ACCESS_KEY" ] || { echo "FAIL: empty S3 access key"; exit 1; }
@@ -84,6 +95,13 @@ stringData:
   machine-auth-api-key: "$MACHINE_AUTH_API_KEY"
   transfer-secret: "$TRANSFER_SECRET"
   system-user-api-key: "$SYSTEM_USER_API_KEY"
+  ldap-bind-password: "$LDAP_BIND_PASSWORD"
+  idm-svc-password: "$IDM_SVC_PASSWORD"
+  idm-reva-password: "$IDM_REVA_PASSWORD"
+  idp-svc-password: "$IDP_SVC_PASSWORD"
+  idm-admin-password: "$IDM_ADMIN_PASSWORD"
+  service-account-secret: "$SERVICE_ACCOUNT_SECRET"
+  thumbnails-transfer-token: "$THUMBNAILS_TRANSFER_TOKEN"
   wopi-secret: "$WOPI_SECRET"
   s3-access-key: "$S3_ACCESS_KEY"
   s3-secret-key: "$S3_SECRET_KEY"
