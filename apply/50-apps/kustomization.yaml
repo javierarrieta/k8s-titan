@@ -40,6 +40,7 @@ resources:
   # sits Pending rather than converging. It is a ConfigMap and not a Secret because it carries no
   # credential — see the file's own header for why that distinction is the whole point.
   - auth/tesla-outpost-blueprint.yaml
+  - auth/ocis-blueprint.yaml
   - auth/authentik.yaml
   # Quota, limit range and the provisioner Role, all in coder-workspaces. The quota is the only
   # thing standing between a third workspace and the Postgres every other app here depends on.

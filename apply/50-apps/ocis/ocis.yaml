@@ -90,6 +90,57 @@ spec:
                 secretKeyRef:
                   name: ocis-secrets
                   key: machine-auth-api-key
+            # --- authentik as the identity provider -------------------------------------------
+            # The IdP's TLS verification chains off the global OCIS_INSECURE above
+            # (env:"OCIS_INSECURE;PROXY_OIDC_INSECURE"), and envdecode takes the LAST variable in the
+            # chain that is set, not the first (ocis-pkg/config/envdecode/envdecode.go:153-158). So
+            # OCIS_INSECURE=true, which is correct for the loopback mesh and wrong for a public
+            # IdP, would silently disable certificate checking on the connection to authentik.
+            # Pinning the local name is the only thing keeping that verification on.
+            - name: PROXY_OIDC_INSECURE
+              value: "false"
+            # per_provider issuer for the `ocis` client declared in
+            # apply/50-apps/auth/ocis-blueprint.yaml. This one var moves both halves off the built-in
+            # idp: the proxy reads OCIS_URL;OCIS_OIDC_ISSUER;PROXY_OIDC_ISSUER
+            # (services/proxy/pkg/config/config.go:117) and the web front-end reads
+            # OCIS_URL;OCIS_OIDC_ISSUER;WEB_OIDC_AUTHORITY (services/web/pkg/config/config.go:72).
+            # Set neither and login silently stays local, because OCIS_URL wins the chain.
+            - name: OCIS_OIDC_ISSUER
+              value: https://auth.titan.arrieta.eu/application/o/ocis/
+            - name: OCIS_OIDC_CLIENT_ID
+              value: ocis
+            # WEB_OIDC_SCOPE defaults to "openid profile email"
+            # (services/web/pkg/config/defaults/defaultconfig.go:99) - no refresh token in sight, so
+            # the browser gets logged out on every access-token expiry and it looks like the session
+            # is broken. offline_access is matched by the scope mapping in the blueprint.
+            - name: WEB_OIDC_SCOPE
+              value: openid profile email offline_access
+            # Users arrive in oCIS on their first successful authentik login instead of being created
+            # by hand. PROXY_AUTOPROVISION_CLAIM_* default to preferred_username / email / name, which
+            # is what authentik's email + profile scope mappings emit.
+            - name: PROXY_AUTOPROVISION_ACCOUNTS
+              value: "true"
+            - name: PROXY_AUTOPROVISION_CLAIM_GROUPS
+              value: groups
+            # Desktop/Android/iOS discover the IdP through /.well-known; without this they are
+            # pointed at oCIS's own built-in issuer, which no longer has their credentials.
+            - name: PROXY_OIDC_REWRITE_WELLKNOWN
+              value: "true"
+            # Upstream's own external-IdP reference sets exactly this pair
+            # (deployments/examples/ocis_keycloak/docker-compose.yml) and they are the compiled
+            # defaults (services/proxy/pkg/config/defaults/defaultconfig.go:86-87). Spelled out so
+            # the identity key is visible in git. Cost: renaming someone in authentik makes oCIS see
+            # a new account and the old one keeps its files - see the blueprint header.
+            - name: PROXY_USER_OIDC_CLAIM
+              value: preferred_username
+            - name: PROXY_USER_CS3_CLAIM
+              value: username
+            # authentik mints JWT access tokens and the proxy verifies them by default
+            # (services/proxy/pkg/config/defaults/defaultconfig.go:45). Pinning the audience means a
+            # token issued to coder or Grafana on this same authentik cannot unlock oCIS. Exists from
+            # 8.2.0; the image here is 8.2.2.
+            - name: PROXY_OIDC_ACCESS_TOKEN_VERIFY_AUD
+              value: ocis
             # --- S3 as primary storage -------------------------------------------------
             - name: STORAGE_USERS_DRIVER
               value: s3ng
@@ -221,7 +272,15 @@ spec:
 #    Which means the backup unit is {this PVC} + {the bucket}, and they have to be taken together:
 #    the metadata tree addresses blobs by UUID, so restoring a newer tree onto an older bucket (or
 #    the reverse) yields a tree full of nodes whose content is gone, and the UI will render it
-#    happily. A restore that is internally inconsistent is worse than no restore.
+#    happily.
+# 4. With authentik as the IdP, the local OCIS_ADMIN_USER above can no longer sign in through the web
+#    UI - login redirects to authentik and authentik has no account by that name. The account still
+#    exists and the CLI still works, so the first authentik user gets promoted by hand:
+#      kubectl -n files exec deploy/ocis -c ocis -- ocis user role set <user-id> admin
+#    Doing it declaratively from a group is possible but not via env: PROXY_ROLE_ASSIGNMENT's
+#    role_mapping is config-file-only (services/proxy/pkg/config/config.go:164), so it would need a
+#    mounted proxy config.yaml for one grant. Not worth a second config surface until there is a
+#    second admin. A restore that is internally inconsistent is worse than no restore.
 ---
 apiVersion: v1
 kind: Service
