@@ -73,3 +73,14 @@ resources:
   - grafana/grafana.yaml
   # Gatus probes casa through public DNS from titan and sends alerts directly to Telegram.
   - gatus/gatus.yaml
+  # Infinite Scale, replacing the PHP Nextcloud that runs in casa. Two files, and the split is the
+  # failure domain: `ocis.yaml` is the app plus its WOPI collaboration sidecar, `collabora.yaml` is
+  # the editor. A bad field in the editor takes down document opening and nothing else; a bad field in
+  # the app takes down the file service. Both freeze coder's and authentik's updates for the length of
+  # the failure, which is the accepted cost recorded at the top of this file.
+  #
+  # Ordering here is intent, not mechanism (see the note at the top of this file): the app reads
+  # ocis-secrets from namespace `files` and titan-tls reflected into it, and a pod that starts before
+  # either exists crash-loops rather than converging.
+  - ocis/ocis.yaml
+  - ocis/collabora.yaml

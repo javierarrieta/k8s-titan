@@ -1,0 +1,276 @@
+---
+# Infinite Scale (oCIS) on titan: the app server and the WOPI collaboration service.
+#
+# WHY TWO CONTAINERS IN ONE POD
+# `ocis server` supervises every microservice in one process, which is the right shape for a
+# single-node cluster. The collaboration service is deliberately NOT part of that set: upstream
+# documents that it "won't start by default when using `ocis server` (supervised mode). You must
+# start it manually with the `ocis collaboration server` command", because it is only useful with an
+# external document server. So it is a second container in the same pod, reaching the supervised
+# services' embedded NATS registry on loopback.
+#
+# WHY THE BLOBS ARE NOT IN THIS POD
+# STORAGE_USERS_DRIVER=s3ng puts file contents in an S3 bucket and keeps only the metadata tree on
+# the PVC mounted here. That split is the whole reason this app fits on titan at all: the VPS has no
+# room for the data, so only the index lives locally. See §HONEST LIMITS at the bottom.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ocis-data
+  namespace: files
+  labels:
+    app: ocis
+spec:
+  accessModes:
+    - ReadWriteOnce
+  # Retain, not the default `local-path`: this PVC holds the metadata tree and the SQLite databases
+  # that describe every file in the bucket. Delete-reclaim on it means deleting the app's knowledge
+  # of its own contents.
+  storageClassName: local-path-retain
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ocis
+  namespace: files
+spec:
+  replicas: 1
+  strategy:
+    # RWO PVC; a rolling update would schedule a second pod that can never attach it.
+    type: Recreate
+  selector:
+    matchLabels:
+      app: ocis
+  template:
+    metadata:
+      labels:
+        app: ocis
+    spec:
+      # Upstream warns that a hard stop (SIGKILL) leaves the decomposedfs metadata inconsistent -
+      # "it is possible and likely that not all data from the decomposedfs (metadata) has been
+      # written to the storage" - and that SIGTERM plus STORAGE_USERS_GRACEFUL_SHUTDOWN_TIMEOUT is
+      # the mitigation. Kubernetes' 30s default grace period is not a graceful shutdown for a
+      # process with open write requests, and until the PVC has a restore point an inconsistent tree
+      # is unrecoverable rather than merely annoying. Revisit alongside the restic work.
+      terminationGracePeriodSeconds: 120
+      containers:
+        - name: ocis
+          # Pinned to the newest stable 8.2 line at the time of writing (owncloud/ocis on Docker Hub
+          # also publishes `8`, `8.2` and dated rolling tags; none of those are acceptable here).
+          image: owncloud/ocis:8.2.2
+          env:
+            - name: OCIS_URL
+              value: https://files.titan.arrieta.eu
+            # TLS terminates at traefik. This makes the internal service mesh speak plain http to
+            # each other rather than shipping self-signed material between containers in one pod.
+            - name: OCIS_INSECURE
+              value: "true"
+            - name: PROXY_HTTP_ADDR
+              value: "0.0.0.0:9200"
+            - name: OCIS_ADMIN_USER
+              valueFrom:
+                secretKeyRef:
+                  name: ocis-secrets
+                  key: admin-user
+            - name: OCIS_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: ocis-secrets
+                  key: admin-password
+            - name: OCIS_JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: ocis-secrets
+                  key: jwt-secret
+            - name: OCIS_MACHINE_AUTH_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: ocis-secrets
+                  key: machine-auth-api-key
+            # --- S3 as primary storage -------------------------------------------------
+            - name: STORAGE_USERS_DRIVER
+              value: s3ng
+            - name: STORAGE_SYSTEM_DRIVER
+              value: ocis
+            # Metadata tree only. Everything under here is index and node metadata; the bytes are
+            # in the bucket.
+            - name: STORAGE_USERS_S3NG_ROOT
+              value: /var/lib/ocis/shares
+            - name: STORAGE_USERS_S3NG_ENDPOINT
+              # Casa's MinIO, reached over the WireGuard mesh. Deliberately http, not https: the
+              # listener at 192.168.0.6:9000 serves plain HTTP (verified: /minio/health/live -> 200,
+              # Server: MinIO), and the transport is already encrypted by WireGuard. Do not "fix"
+              # this to https without checking the listener first.
+              value: http://192.168.0.6:9000
+            - name: STORAGE_USERS_S3NG_REGION
+              # Matches what the server reports in X-Amz-Bucket-Region.
+              value: eu-west-1
+            - name: STORAGE_USERS_S3NG_BUCKET
+              value: ocis-blobs
+            - name: STORAGE_USERS_S3NG_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: ocis-secrets
+                  key: s3-access-key
+            - name: STORAGE_USERS_S3NG_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: ocis-secrets
+                  key: s3-secret-key
+            # --- WOPI / Collabora ------------------------------------------------------
+            # Makes Collabora the default handler for office documents in the web UI.
+            - name: FRONTEND_APP_HANDLER_SECURE_VIEW_APP_ADDR
+              value: com.owncloud.api.collaboration.CollaboraOnline
+            - name: GRAPH_AVAILABLE_ROLES
+              value: "b1e2218d-eef8-4d4c-b82d-0f1a1b48f3b5,a8d5fe5e-96e3-418d-825b-534dbdf22b99,fb6c3e19-e378-47e5-b277-9732f9de6e21,58c63c02-1d89-4572-916a-870abc5a1b7d,2d00ce52-1fc2-4dbc-8b95-a73b73395f5a,1c996275-f1c9-4e71-abdf-a42f6495e960,312c0871-5ef7-4b3a-85b6-0e4074c64049,aa97fe03-7980-45ac-9e50-b325749fd7e6"
+          ports:
+            - name: proxy
+              containerPort: 9200
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 9200
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 10
+          resources:
+            requests:
+              cpu: 200m
+              memory: 512Mi
+            limits:
+              cpu: "2"
+              memory: 2Gi
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/ocis
+        - name: collaboration
+          image: owncloud/ocis:8.2.2
+          # The image entrypoint is the `ocis` binary, so these args produce
+          # `ocis collaboration server`.
+          args:
+            - collaboration
+            - server
+          env:
+            - name: COLLABORATION_GRPC_ADDR
+              value: "127.0.0.1:9301"
+            - name: COLLABORATION_HTTP_ADDR
+              value: "0.0.0.0:9300"
+            # The supervised `ocis server` in this same pod embeds NATS and holds the registry.
+            - name: MICRO_REGISTRY
+              value: nats-js-kv
+            - name: MICRO_REGISTRY_ADDRESS
+              value: "127.0.0.1:9233"
+            # WOPISrc, i.e. the URL Collabora calls back into. It stays inside the cluster: the
+            # browser only ever talks to collabora.titan.arrieta.eu, and Collabora reaches this
+            # service over cluster DNS. No ingress is published for it on purpose.
+            - name: COLLABORATION_WOPI_SRC
+              value: http://ocis-collaboration:9300
+            - name: COLLABORATION_APP_NAME
+              value: CollaboraOnline
+            - name: COLLABORATION_APP_PRODUCT
+              value: Collabora
+            - name: COLLABORATION_APP_ADDR
+              value: https://collabora.titan.arrieta.eu
+            - name: COLLABORATION_APP_ICON
+              value: https://collabora.titan.arrieta.eu/favicon.ico
+            - name: COLLABORATION_APP_INSECURE
+              value: "false"
+            - name: COLLABORATION_CS3API_DATAGATEWAY_INSECURE
+              value: "true"
+            - name: COLLABORATION_LOG_LEVEL
+              value: info
+            - name: OCIS_URL
+              value: https://files.titan.arrieta.eu
+            - name: OCIS_JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: ocis-secrets
+                  key: jwt-secret
+          ports:
+            - name: wopi
+              containerPort: 9300
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: ocis-data
+# HONEST LIMITS, read before trusting this file.
+# 1. The blobs live in casa's MinIO, across the WireGuard link. If the mesh drops, the web UI still
+#    renders from the local metadata tree and every file body fails. That is the failure mode, not a
+#    crash loop, so nothing here will look unhealthy.
+# 2. Nothing in this repo backs up either half. titan backs up the CNPG Postgres and nothing else -
+#    the generic PV stream is still deferred - so this PVC has no restore point, and casa has no
+#    MinIO runbook. Before this holds anything you care about, one of those has to change.
+# 3. THERE IS NO CNPG OPTION HERE, and this was checked rather than assumed. oCIS vendors only
+#    go-sql-driver/mysql and mattn/go-sqlite3 - no lib/pq, no pgx - so it cannot connect to Postgres
+#    at any configuration. Verified against owncloud/ocis master and the 8.2 service env-var docs,
+#    where postgres/sql/dsn appear zero times. Persistent state is instead:
+#      - decomposedfs metadata + SQLite stores, on the PVC mounted here (STORAGE_USERS_S3NG_ROOT)
+#      - NATS JetStream KV, embedded in `ocis server`, also on that PVC (OCIS_PERSISTENT_STORE_*)
+#      - the idp keys, also on that PVC
+#    Which means the backup unit is {this PVC} + {the bucket}, and they have to be taken together:
+#    the metadata tree addresses blobs by UUID, so restoring a newer tree onto an older bucket (or
+#    the reverse) yields a tree full of nodes whose content is gone, and the UI will render it
+#    happily. A restore that is internally inconsistent is worse than no restore.
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ocis
+  namespace: files
+spec:
+  selector:
+    app: ocis
+  ports:
+    - name: proxy
+      port: 9200
+      targetPort: proxy
+---
+# Internal only: this is the WOPI endpoint Collabora calls. It is deliberately not exposed.
+apiVersion: v1
+kind: Service
+metadata:
+  name: ocis-collaboration
+  namespace: files
+spec:
+  selector:
+    app: ocis
+  ports:
+    - name: wopi
+      port: 9300
+      targetPort: wopi
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: ocis
+  namespace: files
+spec:
+  ingressClassName: traefik
+  rules:
+    - host: files.titan.arrieta.eu
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: ocis
+                port:
+                  name: proxy
+  tls:
+    - hosts:
+        - files.titan.arrieta.eu
+      # Reflected into `files` by Reflector; the allow-list lives in
+      # apply/40-certificates/titan-wildcard.yaml and has to name this namespace.
+      secretName: titan-tls
