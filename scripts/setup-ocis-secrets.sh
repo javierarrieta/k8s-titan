@@ -38,8 +38,6 @@ done
 export SOPS_AGE_KEY_FILE="$KEY"
 [ -f "$TARGET" ] && { echo "FAIL: $TARGET already exists - edit it with sops rather than overwriting"; exit 1; }
 
-b64() { printf '%s' "$1" | base64 | tr -d '\n'; }
-
 echo "MinIO credentials for the oCIS user on casa (created with mc, not by this script)."
 printf 'S3 access key: '
 read -r S3_ACCESS_KEY
@@ -66,16 +64,25 @@ metadata:
   name: ocis-secrets
   namespace: files
 type: Opaque
-data:
-  admin-user: $(b64 "$ADMIN_USER")
-  admin-password: $(b64 "$ADMIN_PASSWORD")
-  jwt-secret: $(b64 "$JWT_SECRET")
-  machine-auth-api-key: $(b64 "$MACHINE_AUTH_API_KEY")
-  s3-access-key: $(b64 "$S3_ACCESS_KEY")
-  s3-secret-key: $(b64 "$S3_SECRET_KEY")
-  collabora-admin-user: $(b64 "$COLLABORA_ADMIN_USER")
-  collabora-admin-password: $(b64 "$COLLABORA_ADMIN_PASSWORD")
-  collabora-proof-key: $(printf '%s\n' "$PROOF_KEY" | base64 | tr -d '\n')
+# stringData, not data - and that is a repo convention with a gate behind it, not a style preference.
+# Every other Secret in apply/10-secrets uses stringData. `make dry-run` strips the sops envelope and
+# submits the ciphertext as-is to mimic what kustomize-controller sends, and the API server
+# base64-decodes `data` but never `stringData`. Measured: with `data:` the run died on
+#   Error from server: failed to convert new object (files/ocis-secrets; /v1, Kind=Secret):
+#     error decoding from json: illegal base64 data at input byte 3
+# while the 24 existing stringData Secrets in the same stage passed. Values are plaintext here
+# because sops encrypts this whole document on the next line.
+stringData:
+  admin-user: "$ADMIN_USER"
+  admin-password: "$ADMIN_PASSWORD"
+  jwt-secret: "$JWT_SECRET"
+  machine-auth-api-key: "$MACHINE_AUTH_API_KEY"
+  s3-access-key: "$S3_ACCESS_KEY"
+  s3-secret-key: "$S3_SECRET_KEY"
+  collabora-admin-user: "$COLLABORA_ADMIN_USER"
+  collabora-admin-password: "$COLLABORA_ADMIN_PASSWORD"
+  collabora-proof-key: |
+$(printf '%s\n' "$PROOF_KEY" | sed 's/^/    /')
 EOF
 
 sops --encrypt --in-place "$STAGE"
