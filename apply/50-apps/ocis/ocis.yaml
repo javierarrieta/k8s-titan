@@ -108,6 +108,25 @@ spec:
                 secretKeyRef:
                   name: ocis-secrets
                   key: system-user-api-key
+            # --- stable instance identifiers ----------------------------------------------
+            # Not credentials. These are identifiers that must simply be non-empty and never change
+            # once data exists, so they live in git where a rotation shows up as a diff rather than
+            # hiding in a Secret. Each one is a startup check that fails the pod if it is empty:
+            #   OCIS_SYSTEM_USER_ID      - proven by the live crash-loop; sharing + storage-system
+            #                              + the supervisor (ocis-pkg/config/parser/parse.go)
+            #   STORAGE_USERS_MOUNT_ID   - storage-users and gateway both refuse to start without
+            #                              it (services/storage-users/pkg/config/parser/parse.go:43)
+            #   OCIS_ADMIN_USER_ID       - idm and settings check it
+            #   GRAPH_APPLICATION_ID     - graph checks it; app roles are tied to this ID
+            # Changing the mount ID after files exist orphans the storage tree. Do not rotate these.
+            - name: OCIS_SYSTEM_USER_ID
+              value: "a0f1a4d7-45a2-440e-8892-76c2523427b6"
+            - name: STORAGE_USERS_MOUNT_ID
+              value: "d8378cd3-e815-4441-9cd2-87222a555c27"
+            - name: OCIS_ADMIN_USER_ID
+              value: "0189c60d-d9fb-451b-9e5b-bd34f433df58"
+            - name: GRAPH_APPLICATION_ID
+              value: "d584291e-791e-4a9f-95ec-ef46e52e89ff"
             # --- authentik as the identity provider -------------------------------------------
             # The IdP's TLS verification chains off the global OCIS_INSECURE above
             # (env:"OCIS_INSECURE;PROXY_OIDC_INSECURE"), and envdecode takes the LAST variable in the
