@@ -108,6 +108,21 @@ spec:
                 secretKeyRef:
                   name: ocis-secrets
                   key: system-user-api-key
+            # Same value, second name - the third instance of this trap (gateway's mount ID, the
+            # LDAP bind pair, now this). settings and storage-system declare the key as
+            # env:"OCIS_SYSTEM_USER_API_KEY" with NO alternative in the chain, so the unprefixed
+            # SYSTEM_USER_API_KEY above - which is real, it is the reva shared section in
+            # ocis-pkg/shared/shared_types.go:104 - never reaches them. Fifth reconcile died on
+            # "The SystemUser API key has not been configured for settings".
+            #
+            # Swept every service config for SYSTEM_USER / ADMIN_USER / SERVICE_ACCOUNT while in
+            # here: those are the only two variables with no OCIS_ alternative. Everything else
+            # chains OCIS_X;SERVICE_X, so the globals set above cover all of them.
+            - name: OCIS_SYSTEM_USER_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: ocis-secrets
+                  key: system-user-api-key
             # --- stable instance identifiers ----------------------------------------------
             # Not credentials. These are identifiers that must simply be non-empty and never change
             # once data exists, so they live in git where a rotation shows up as a diff rather than
