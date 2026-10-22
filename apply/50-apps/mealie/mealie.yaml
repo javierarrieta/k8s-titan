@@ -222,6 +222,7 @@ metadata:
   # and putting a proxy provider in front would mean editing the Tesla-owned outpost blueprint that OWNS
   # that provider list (see authentik/blueprints-open-webui.yaml for the same argument). The host is
   # reachable from the public internet either way, exactly like coder, auth and open-webui.
+spec:
   ingressClassName: traefik
   rules:
   - host: meals.titan.arrieta.eu

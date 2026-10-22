@@ -210,6 +210,30 @@ def main():
                     fail(f"mealie-db-credentials username {cnpg_user!r} is not the Deployment's "
                          f"POSTGRES_USER {env_of(dep, 'POSTGRES_USER')!r}")
 
+    ing = find(docs, "Ingress", "mealie", "mealie")
+    if ing is None:
+        fail("no Ingress mealie/mealie")
+    else:
+        # Why the Ingress gets its own structural check and the Deployment does not: a mis-nested
+        # Ingress key is a CORE-type violation, and no offline gate here can see core types.
+        # crd-check walks vendored CRDs only, namespace-check walks namespaces only, and
+        # `make dry-run` — the one gate that asks the API server — needs an admin context this
+        # identity does not have. On 2026-10-22 a comment block was written where `spec:` should
+        # have been, `rules` landed under `metadata`, every offline gate stayed green, and the apps
+        # stage went red on merge with "either defaultBackend or rules must be specified".
+        leaked = sorted(k for k in ("rules", "tls", "ingressClassName", "defaultBackend")
+                        if k in (ing.get("metadata") or {}))
+        if leaked:
+            fail(f"Ingress mealie/mealie carries {leaked} under metadata instead of spec - the API "
+                 "server rejects it and no offline gate but make dry-run will tell you")
+        spec = ing.get("spec") or {}
+        hosts = [r.get("host") for r in (spec.get("rules") or [])]
+        if hosts != [HOST]:
+            fail(f"Ingress mealie/mealie serves {hosts}, expected ['{HOST}'] - BASE_URL, the blueprint "
+                 "redirect URIs and the wildcard certificate all key off this host")
+        if not spec.get("tls"):
+            fail("Ingress mealie/mealie has no tls block - titan-tls has to terminate TLS for this host")
+
     db = find(docs, "Database", "mealie", "databases")
     if db is None:
         fail("no Database mealie in namespace databases")
