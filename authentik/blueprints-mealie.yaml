@@ -1,0 +1,105 @@
+# authentik blueprint: Mealie's OIDC application and provider, for meals.titan.arrieta.eu.
+#
+# WHY A BLUEPRINT
+# authentik ships no CRDs, so this is the only declarative path: a rebuilt authentik gets Mealie's
+# client back from git instead of from someone's memory. Same argument as blueprints-open-webui.yaml
+# and blueprints-coder.yaml, and docs/authentik-runbook.md §5 is the record of what a blueprint that
+# is never mounted looks like (nothing — it is indistinguishable from one never written).
+#
+# HOW THIS FILE BECOMES A SECRET
+# Nothing here is applied directly. scripts/setup-mealie-secrets.sh substitutes the two `${...}`
+# placeholders and writes the result, sops-encrypted, to
+# apply/10-secrets/authentik-mealie-blueprint.yaml. `make mealie-check` proves the rendered artifact,
+# this template, Mealie's own copy of the client, the host it is for, and the mount all still agree.
+#
+# WHY MEALIE NEEDED A BLUEPRINT AT ALL AND K8S-CASA DID NOT
+# Casa runs Mealie with OIDC turned on in its ConfigMap and has never had a client secret:
+# `git log --all -p -- apply/01-secrets/casa/mealie-secrets.yaml | grep -c OIDC_CLIENT_SECRET` is 0
+# across the whole history, and the pod logs `OIDC Enabled: False / Reason: Missing required values
+# for ['OIDC_CLIENT_SECRET']`. So the casa instance has only ever authenticated against its own
+# password table. That is the state this app exists to stop repeating.
+#
+# THE ENDPOINTS ARE NOT COMPOSED, THEY ARE READ
+# authorize/token/userinfo are GLOBAL paths with no slug; issuer and jwks are per-provider — see
+# blueprints-grafana.yaml. Building `.../o/<slug>/authorize/` returns 404, measured.
+version: 1
+metadata:
+  name: titan-mealie
+entries:
+  - model: authentik_providers_oauth2.oauth2provider
+    id: mealie-provider
+    identifiers:
+      name: mealie
+    state: present
+    attrs:
+      name: mealie
+      # confidential, not public. Mealie v2 changed this from v1: the docs are explicit that a client
+      # secret is now required, and Mealie refuses to enable OIDC without OIDC_CLIENT_SECRET at all.
+      # Authorization Code + PKCE is still what it speaks.
+      client_type: confidential
+      client_id: "${MEALIE_OIDC_CLIENT_ID}"
+      client_secret: "${MEALIE_OIDC_CLIENT_SECRET}"
+      # BOTH documented URIs, each strict. Mealie's own OIDC docs list
+      #   https://DOMAIN/login
+      #   https://DOMAIN/login?direct=1
+      # (the second only matters for RP-Initiated Logout, which authentik does support), and Mealie
+      # builds the URI it sends from BASE_URL rather than from a configured callback — so the query
+      # string is part of the registered value and a prefix match would be a redirect bypass.
+      # Unlike open-webui there is no handler-name inference to make here: the path is the frontend
+      # route, documented, not derived from framework internals.
+      redirect_uris:
+        - url: https://meals.titan.arrieta.eu/login
+          matching_mode: strict
+        - url: https://meals.titan.arrieta.eu/login?direct=1
+          matching_mode: strict
+      grant_types:
+        - authorization_code
+        - refresh_token
+      # openid + email + profile, which is exactly what Mealie's docs ask for, plus offline_access
+      # because refresh_token is in grant_types and a scope with no mapping is a scope that cannot be
+      # granted (the coder note on the same trap is blueprints-coder.yaml).
+      #
+      # `profile` is what puts the `groups` claim in the token, and Mealie reads that claim for
+      # OIDC_ADMIN_GROUP / OIDC_USER_GROUP (OIDC_GROUPS_CLAIM defaults to `groups`). Drop the profile
+      # mapping and the group checks read a claim that is not there: with OIDC_ADMIN_GROUP set, that
+      # is a login that succeeds and lands you in the ordinary-user seat, silently.
+      #
+      # READ THIS BEFORE TRUSTING A LOGIN: the managed email mapping's own expression returns
+      # `"email_verified": False` — recorded in blueprints-coder.yaml and docs/authentik-runbook.md,
+      # and the reason coder sets CODER_OIDC_IGNORE_EMAIL_VERIFIED. Mealie v3.21.0 added the same
+      # requirement ON BY DEFAULT (OIDC_REQUIRES_EMAIL_VERIFICATION: bool = True in
+      # mealie/core/settings/settings.py), so without the matching opt-out on the app side every
+      # authentik login is refused with `[OIDC] email_verified claim is missing or false`. The opt-out
+      # lives in apply/50-apps/mealie/mealie.yaml and `make mealie-check` fails if it goes missing.
+      property_mappings:
+        - !Find [authentik_providers_oauth2.scopemapping, [managed, goauthentik.io/providers/oauth2/scope-openid]]
+        - !Find [authentik_providers_oauth2.scopemapping, [managed, goauthentik.io/providers/oauth2/scope-email]]
+        - !Find [authentik_providers_oauth2.scopemapping, [managed, goauthentik.io/providers/oauth2/scope-profile]]
+        - !Find [authentik_providers_oauth2.scopemapping, [managed, goauthentik.io/providers/oauth2/scope-offline_access]]
+      # implicit consent: an app this cluster owns and configures does not need a click that adds no
+      # security. Same reasoning as coder's, Grafana's and open-webui's providers.
+      authorization_flow: !Find [authentik_flows.flow, [slug, default-provider-authorization-implicit-consent]]
+      invalidation_flow: !Find [authentik_flows.flow, [slug, default-invalidation-flow]]
+      signing_key: !Find [authentik_crypto.certificatekeypair, [managed, goauthentik.io/crypto/jwt-managed]]
+      # per_provider makes the issuer https://auth.titan.arrieta.eu/application/o/mealie/, which is
+      # what mealie.yaml's OIDC_CONFIGURATION_URL names. If the slug moves and that URL does not, the
+      # two disagree and the failure looks like a bad token.
+      issuer_mode: per_provider
+      # hashed_user_id: stable across renames and it does not leak the username into every token.
+      # Note Mealie does NOT key identity on `sub` — OIDC_USER_CLAIM defaults to `email`, so the email
+      # address is the account link. That is why the email_verified question above is load-bearing and
+      # why this cluster's own IdP is the only acceptable issuer here.
+      sub_mode: hashed_user_id
+
+  - model: authentik_core.application
+    identifiers:
+      slug: mealie
+    state: present
+    attrs:
+      name: Mealie
+      slug: mealie
+      provider: !KeyOf mealie-provider
+      meta_launch_url: https://meals.titan.arrieta.eu/
+      # The Application is not decoration. A provider with no owning Application is invisible to the
+      # consumer that needs it — the recorded 404-for-every-host lesson in tesla-outpost-blueprint.yaml
+      # — and it is also what makes Mealie appear in the authentik user dashboard.

@@ -1,0 +1,243 @@
+# Mealie on titan: fresh instance, data in the shared CNPG cluster, sign-in through authentik.
+# Design and evidence: docs/superpowers/specs/2026-10-22-titan-mealie-design.md.
+#
+# WHAT IS IN POSTGRES AND WHAT IS ON THE PVC, because it decides what a backup covers.
+# Postgres (`mealie`, in the cluster that ships base backups and WAL to S3) holds users, groups,
+# recipes, the AI provider rows, and the OIDC-linked identities. The PVC holds recipe images, uploads,
+# backups Mealie makes itself, and the model-uploaded site assets. Only the Postgres half is backed up:
+# the generic PV stream is still deferred (AGENTS.md, "Backups"), so a recipe's photo is not protected
+# and its text is. Named exposure, not a surprise.
+#
+# THE AI PROVIDER IS NOT IN THIS FILE AND CANNOT BE.
+# Mealie's AI recipe importer reads its provider (base_url, api_key, model) from rows in its own
+# Postgres, created in Group Settings -> AI. `grep -in "openai\|ai_provider" mealie/core/settings/
+# settings.py` on mealie-next returns nothing, so there is no env var to set and no Secret to mount.
+# The values to type after the first login are in the spec §5; the endpoint itself is reachable from
+# titan pods for the reason recorded there.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: mealie-data
+  namespace: mealie
+spec:
+  accessModes:
+  - ReadWriteOnce
+  # local-path-retain, not the default local-path: Retain is the only deletion mitigation this cluster
+  # has for a PVC (see apply/20-infra/storage-retain.yaml). It is a deletion mitigation and NOT a
+  # backup — a Retain PV that survives `kubectl delete pvc` does not survive the disk.
+  storageClassName: local-path-retain
+  resources:
+    requests:
+      # 5Gi, and the number is not a guess at Mealie's own footprint. Casa's instance holds its entire
+      # recipe database in ~116 KiB and oscillates between 29 and 38 MiB, all of it log rotation:
+      # mealie.log plus .1/.2/.3 at ~9.6 MiB each is a ~38 MiB ceiling (the whole story, including a
+      # predict_linear false alarm, is in apply/50-apps/casa/mealie.yaml in k8s-casa). What actually
+      # grows here is recipe photos. 5Gi is headroom for a few thousand of them, and local-path is
+      # thin — it reserves a directory, not disk.
+      storage: 5Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mealie
+  namespace: mealie
+  # Meaningless without the namespace also being in reloader.namespaces in
+  # apply/20-infra/reloader/reloader.yaml — watchGlobally is false, so Reloader does not look here at
+  # all. Both halves are in this change for exactly that reason: Mealie takes OIDC_CLIENT_SECRET and
+  # POSTGRES_PASSWORD through envFrom, so a rotation would otherwise sit unread in a running pod.
+  annotations:
+    reloader.stakater.com/auto: "true"
+spec:
+  replicas: 1
+  # RWO PVC: a RollingUpdate schedules pod 2 while pod 1 still holds the volume and the new pod sits
+  # Pending on a volume conflict forever. Recreate also avoids two pods running Alembic at once.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: mealie
+  template:
+    metadata:
+      labels:
+        app: mealie
+    spec:
+      securityContext:
+        # uid/gid 911 is the user the Mealie image is built with, and casa runs the same image with
+        # exactly these four values on the same major version, at replicas 1, Ready, zero restarts —
+        # so this is copied from something that works rather than guessed. fsGroup is what makes the
+        # mounted PVC writable by that uid; grafana (apply/50-apps/grafana/grafana.yaml) is the live
+        # proof that fsGroup is honoured against local-path-retain on this cluster.
+        runAsNonRoot: true
+        runAsUser: 911
+        runAsGroup: 911
+        fsGroup: 911
+      containers:
+      - name: mealie
+        # Pinned to a specific release, never :latest (the fleet rule). v3.29.0 is the current upstream
+        # release; the Import with AI page this app exists for landed in v3.23.0, and v3.21.0 is the
+        # release that turned on the email_verified requirement the OIDC block below has to answer.
+        image: ghcr.io/mealie-recipes/mealie:v3.29.0
+        ports:
+        - name: http
+          containerPort: 9000
+        envFrom:
+        # POSTGRES_PASSWORD, OIDC_CLIENT_ID, OIDC_CLIENT_SECRET. The key names are the names Mealie
+        # reads, so envFrom needs no aliasing and there is no typo'd mapping between Secret and
+        # Deployment.
+        - secretRef:
+            name: mealie-secrets
+        env:
+        - name: TZ
+          value: "UTC"
+        # BASE_URL is load-bearing twice over: it is what Mealie puts in generated links, and it is
+        # what Mealie builds its OIDC redirect URI from. Change the host here and the URI Mealie sends
+        # stops matching the strict entries in authentik/blueprints-mealie.yaml, which reads as an
+        # authentik error rather than a Mealie one. `make mealie-check` ties the two together.
+        - name: BASE_URL
+          value: https://meals.titan.arrieta.eu
+        # One worker: this is a single node shared with authentik, coder and open-webui, and Mealie's
+        # own Next.js server is the memory floor. Casa runs WEB_CONCURRENCY "1" on the same image.
+        - name: WEB_CONCURRENCY
+          value: "1"
+        - name: LOG_LEVEL
+          value: "info"
+        # --- database: the shared CNPG cluster, not a database of its own -----------------------
+        - name: DB_ENGINE
+          value: postgres
+        - name: POSTGRES_SERVER
+          value: postgres-rw.databases.svc.cluster.local
+        - name: POSTGRES_PORT
+          value: "5432"
+        - name: POSTGRES_DB
+          value: mealie
+        - name: POSTGRES_USER
+          value: mealie
+        # --- single sign-on: authentik decides who you are; there is no local password door ------
+        # ALLOW_PASSWORD_LOGIN=false is the Mealie equivalent of open-webui's ENABLE_LOGIN_FORM=false:
+        # a local password form next to SSO is a second, unbacked door. ALLOW_SIGNUP stays false so
+        # nobody self-registers; OIDC_SIGNUP_ENABLED=true is what still lets an authentik user through,
+        # and the FIRST one to sign in becomes Mealie's owner.
+        - name: ALLOW_SIGNUP
+          value: "false"
+        - name: ALLOW_PASSWORD_LOGIN
+          value: "false"
+        - name: OIDC_AUTH_ENABLED
+          value: "true"
+        - name: OIDC_SIGNUP_ENABLED
+          value: "true"
+        - name: OIDC_PROVIDER_NAME
+          value: authentik
+        - name: OIDC_CONFIGURATION_URL
+          value: https://auth.titan.arrieta.eu/application/o/mealie/.well-known/openid-configuration
+        # THE ONE LINE THAT MAKES THIS LOGIN WORK AT ALL.
+        # Mealie v3.21.0 requires the IdP to assert email_verified, ON BY DEFAULT
+        # (OIDC_REQUIRES_EMAIL_VERIFICATION: bool = True, mealie/core/settings/settings.py). authentik's
+        # managed email scope mapping returns `"email_verified": False` — recorded in
+        # authentik/blueprints-coder.yaml and docs/authentik-runbook.md, and the reason coder carries
+        # CODER_OIDC_IGNORE_EMAIL_VERIFIED. Without this line every authentik login is refused with
+        # `[OIDC] email_verified claim is missing or false; refusing to authenticate`, and the failure
+        # is in the app log, not in authentik's.
+        #
+        # Turning the check off is defensible HERE and only here: the issuer is this cluster's own
+        # authentik, whose email addresses are set by an admin rather than self-asserted by the user,
+        # which is the exact attack Mealie added the check to close. Do not copy this line to an app
+        # federating against an external IdP.
+        - name: OIDC_REQUIRES_EMAIL_VERIFICATION
+          value: "false"
+        # Identity is the email address (OIDC_USER_CLAIM defaults to `email`), so the address is the
+        # account link — another reason the line above is not cosmetic.
+        - name: OIDC_USER_CLAIM
+          value: email
+        # Groups come from the `groups` claim (OIDC_GROUPS_CLAIM default), which exists in the token
+        # only because the blueprint attaches the profile scope mapping. OIDC_ADMIN_GROUP matches an
+        # existing authentik group — the same one grafana (apply/50-apps/grafana/grafana.yaml) and
+        # open-webui use. OIDC_USER_GROUP is deliberately UNSET: Mealie then admits any authenticated
+        # authentik user, which is the fleet's existing posture (open-webui sets OAUTH_ALLOWED_ROLES="*"
+        # for the same reason). Setting it to a group that does not exist in authentik locks everyone
+        # out while the login page still looks healthy.
+        - name: OIDC_ADMIN_GROUP
+          value: authentik Admins
+        # Skip Mealie's own login page and go straight to authentik. With ALLOW_PASSWORD_LOGIN=false
+        # the page would offer exactly one button anyway.
+        - name: OIDC_AUTO_REDIRECT
+          value: "true"
+        # --- probes ---------------------------------------------------------------------------
+        # /g/home is the path casa's Mealie has been liveness-probing on the same major version with
+        # zero restarts, so it is a known-good unauthenticated 200 rather than a guessed one. Mealie
+        # starts by running Alembic against Postgres, which is slow cold and unbounded on a slow node,
+        # so the budget is a startupProbe rather than a big initialDelaySeconds.
+        startupProbe:
+          httpGet:
+            path: /g/home
+            port: http
+          periodSeconds: 10
+          failureThreshold: 30
+        livenessProbe:
+          httpGet:
+            path: /g/home
+            port: http
+          periodSeconds: 30
+        readinessProbe:
+          httpGet:
+            path: /g/home
+            port: http
+          periodSeconds: 10
+        resources:
+          requests:
+            cpu: 100m
+            memory: 384Mi
+          limits:
+            cpu: "1"
+            memory: 1Gi
+        volumeMounts:
+        - name: data
+          mountPath: /app/data
+      volumes:
+      - name: data
+        persistentVolumeClaim:
+          claimName: mealie-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mealie
+  namespace: mealie
+spec:
+  type: ClusterIP
+  selector:
+    app: mealie
+  ports:
+  - name: http
+    port: 80
+    targetPort: http
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: mealie
+  namespace: mealie
+  # No forward-auth middleware on this host: Mealie decides who may in, through its own OIDC client.
+  # That is a real difference from a proxy-outposted app rather than an omission — Mealie needs the
+  # Authorization Code exchange to complete inside its own process because it holds the client secret,
+  # and putting a proxy provider in front would mean editing the Tesla-owned outpost blueprint that OWNS
+  # that provider list (see authentik/blueprints-open-webui.yaml for the same argument). The host is
+  # reachable from the public internet either way, exactly like coder, auth and open-webui.
+  ingressClassName: traefik
+  rules:
+  - host: meals.titan.arrieta.eu
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: mealie
+            port:
+              number: 80
+  tls:
+  - hosts:
+    - meals.titan.arrieta.eu
+    # Reflected from `certificates` by the wildcard. Reaching THIS namespace required adding `mealie`
+    # to BOTH reflector annotations on apply/40-certificates/titan-wildcard.yaml; with only one of the
+    # two edited, the Certificate stays Ready and the Secret never appears.
+    secretName: titan-tls

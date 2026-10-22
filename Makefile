@@ -13,12 +13,12 @@ KUSTOMIZE_DIRS := $(shell find apply -name kustomization.yaml 2>/dev/null | sed 
 # not be able to slip between the encryption rule and the validation glob.
 SECRET_FIND := find apply/10-secrets \( -name '*.yaml' -o -name '*.yml' \) ! -name kustomization.yaml
 
-.PHONY: check check-ci kustomize-check kustomize-listing dry-run py-deps validate update-keys scan leak-check secrets-placement secrets-list secrets-present release-secrets db-url-check oidc-check grafana-oidc-check observability-oidc-check open-webui-oidc-check crd-check namespace-check tesla-forwarder-test update-cnpg-crds update-crds
+.PHONY: check check-ci kustomize-check kustomize-listing dry-run py-deps validate update-keys scan leak-check secrets-placement secrets-list secrets-present release-secrets db-url-check oidc-check grafana-oidc-check observability-oidc-check open-webui-oidc-check mealie-check crd-check namespace-check tesla-forwarder-test update-cnpg-crds update-crds
 
 # leak-check runs FIRST: make has no -k, so it stops at the first failing prerequisite.
 # validate needs the age key, so an operator who forgot SOPS_AGE_KEY_FILE would never
 # reach a leak gate placed behind it.
-check: py-deps leak-check kustomize-check kustomize-listing validate secrets-placement release-secrets db-url-check oidc-check grafana-oidc-check observability-oidc-check open-webui-oidc-check crd-check namespace-check tesla-forwarder-test
+check: py-deps leak-check kustomize-check kustomize-listing validate secrets-placement release-secrets db-url-check oidc-check grafana-oidc-check observability-oidc-check open-webui-oidc-check mealie-check crd-check namespace-check tesla-forwarder-test
 	@echo "check: all offline gates passed"
 
 # The subset provable from the tree alone - no age key, no cluster, no network.
@@ -560,3 +560,14 @@ observability-oidc-check:
 # no authentik group name. Reads Secrets, so a local gate, not a CI one.
 open-webui-oidc-check:
 	@python3 tools/open-webui-oidc-check.py --root apply
+
+# mealie-check: Mealie's OIDC client lives in the reviewed template, the rendered blueprint and the
+# app's own Secret, the HelmRelease must mount it, and the redirect URI Mealie sends is derived from
+# its BASE_URL rather than configured — so a host edit on one side silently breaks the other. On top of
+# the OIDC half this gate also compares the database password across two namespaces, which no existing
+# gate does: `db-url-check` is reference-driven and looks for DATABASE_URL / PG_CONNECTION_URL, and
+# Mealie takes POSTGRES_* instead, so the generic gate never sees this app at all. It also rejects
+# OIDC_REQUIRES_EMAIL_VERIFICATION's v3.21.0 default, which authentik's own email scope mapping
+# contradicts (see authentik/blueprints-coder.yaml). Reads Secrets, so a local gate, not a CI one.
+mealie-check:
+	@python3 tools/mealie-check.py --root apply

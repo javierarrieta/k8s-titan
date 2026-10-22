@@ -165,3 +165,18 @@ metadata:
   annotations:
     kubernetes.io/metadata.name: files
     kubernetes.io/description: "Infinite Scale file sync and share, with Collabora as the editor"
+---
+# Mealie, the recipe manager. Fails the admission test in
+# docs/superpowers/specs/2026-10-19-titan-app-scale-out-design.md §3.1 on three counts at once — own
+# public hostname, own Secret set, and a database of its own — so it gets a namespace, and it stays in
+# the shared `apps` stage per §3.2: two hand-written manifests, no bulk authored here, so freezing its
+# neighbours on a malformed field is the accepted cost rather than a new one.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: mealie
+  labels:
+    name: mealie
+  annotations:
+    kubernetes.io/metadata.name: mealie
+    kubernetes.io/description: "Mealie recipe manager, authenticated by authentik, data in the shared CNPG cluster"

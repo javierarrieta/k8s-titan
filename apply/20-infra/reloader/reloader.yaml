@@ -100,3 +100,8 @@ spec:
         # bitten (promtail, then open-webui, both recorded above), which is why the comment is here
         # rather than in a commit message nobody will read.
         - observability
+        # Mealie. Fourth time this list has bitten. Mealie reads OIDC_CLIENT_SECRET and
+        # POSTGRES_PASSWORD through envFrom, so without this line a rotated client secret or database
+        # password sits unread in a running pod: authentik answers invalid_client and the pod reports
+        # Ready the whole time. `watchGlobally: false` means this list is the whole scope.
+        - mealie
