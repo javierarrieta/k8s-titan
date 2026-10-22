@@ -99,3 +99,13 @@ resources:
   # header of apply/50-apps/ocis/collabora.yaml. An unlisted file here builds green and is silently
   # never applied, which is the lie `make secrets-placement` exists to catch.
   - ocis-secrets.yaml
+  # Mealie. Three files, three values, all minted by scripts/setup-mealie-secrets.sh in one process so
+  # the duplicated halves cannot be authored apart: the DB password exists in CNPG's DatabaseRole
+  # (namespace databases) and in Mealie's env (namespace mealie), and the OIDC client exists in
+  # authentik's blueprint (namespace auth) and in Mealie's env. `make mealie-check` is what proves the
+  # pairs agree — and it has to, because Mealie takes POSTGRES_* rather than a DATABASE_URL, so the
+  # generic `make db-url-check` never looks at this app. An unlisted file here builds green and is
+  # silently never applied, which is the lie `make secrets-placement` exists to catch.
+  - authentik-mealie-blueprint.yaml
+  - mealie-db-credentials.yaml
+  - mealie-secrets.yaml

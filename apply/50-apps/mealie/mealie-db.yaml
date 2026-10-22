@@ -1,0 +1,43 @@
+# Mealie's database and role, authored beside the app that owns them and living in `databases`,
+# because a CNPG Database must share a namespace with its Cluster. Read auth/authentik-db.yaml,
+# coder/coder-db.yaml and open-webui/open-webui-db.yaml first; everything they record about
+# DatabaseRole applies here verbatim.
+#
+# THE NAMING
+# Kubernetes object names and the Postgres identifiers are both `mealie`. open-webui had to translate
+# `open-webui` to `open_webui` because a hyphenated identifier is a QUOTED identifier in Postgres, so
+# every place that interpolates it becomes a quoting bug waiting to be found during an incident. Mealie
+# has no such translation to get wrong — which is worth stating, because a future rename to
+# `mealie-recipes` would introduce exactly the problem open-webui's comment describes.
+apiVersion: postgresql.cnpg.io/v1
+kind: Database
+metadata:
+  name: mealie
+  namespace: databases
+spec:
+  name: mealie
+  owner: mealie
+  cluster:
+    name: postgres
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: DatabaseRole
+metadata:
+  name: mealie
+  namespace: databases
+spec:
+  name: mealie
+  cluster:
+    name: postgres
+  # Required and silent when missing: CNPG creates the role NOLOGIN by default, so without this the
+  # Database reports Ready and every connection fails with a message pointing somewhere else.
+  # Observed live with the authentik role before it was understood.
+  login: true
+  # NOT superuser. Mealie's migrations are ordinary DDL against its own schema and it has no
+  # extension to create — the sqlite/postgres switch is done with SQLAlchemy, and the recipe search is
+  # Postgres ILIKE over its own tables, not pg_trgm. That is an argument from absence, so the first
+  # startup is the proof: if an Alembic migration needs more, the pod fails loudly and the fix is a
+  # deliberate `superuser: true` with its own note, not a silent widening. Same reasoning and same
+  # caveat as open-webui's role.
+  passwordSecret:
+    name: mealie-db-credentials

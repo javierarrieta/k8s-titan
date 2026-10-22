@@ -85,3 +85,13 @@ resources:
   # either exists crash-loops rather than converging.
   - ocis/ocis.yaml
   - ocis/collabora.yaml
+  # Mealie, the recipe manager. Two files and the split is the same one open-webui has: the CNPG
+  # Database and DatabaseRole live in namespace `databases` because that is where their Cluster is,
+  # while the app lives in `mealie`. Listed DB-first for intent, not mechanism — Flux sorts by kind
+  # and applies concurrently, and the pod retries until the role exists.
+  #
+  # The third Mealie artifact is not here: authentik/blueprints-mealie.yaml becomes a Secret in
+  # 10-secrets and is mounted by the authentik HelmRelease below, because authentik applies blueprints
+  # and Mealie does not.
+  - mealie/mealie-db.yaml
+  - mealie/mealie.yaml
