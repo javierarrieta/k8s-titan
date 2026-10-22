@@ -158,7 +158,8 @@ a skip. CI runs GitGuardian on every push and warns, rather than failing, when
 `GITGUARDIAN_API_KEY` is absent from the repo.
 
 What runs automatically is `make check-ci` — leak-check, kustomize-check, kustomize-listing,
-secrets-placement, release-secrets and crd-check, the gates provable from the tree alone,
+secrets-placement, release-secrets, crd-check and namespace-check, the gates provable from the
+tree alone,
 and the only control here that `--no-verify` cannot skip. `release-secrets` fails when a
 `HelmRelease` reaches for a Secret that is not in `apply/10-secrets` with a matching
 namespace, so a typo'd name surfaces on the laptop instead of as a red release three
@@ -168,7 +169,16 @@ object against the CRDs vendored in `vendor/cnpg-crds/` and rejects any field th
 does not declare at that position — which is the class of error a normal schema validator
 waves through, because the CNPG CRDs set no `additionalProperties: false` anywhere, and
 the reason a mis-nested `retentionPolicy` once blocked the whole `apps` stage on the live
-cluster after a green build. Refresh those CRDs with `make update-cnpg-crds CNPG=vX.Y.Z`
+cluster after a green build. `namespace-check` rejects any built object naming a namespace no
+`Namespace` object in this tree declares, and any namespaced object that omits
+`metadata.namespace` and would land in `default`, which exists, so nothing downstream ever
+notices. It was written because a dashboard ConfigMap copied from k8s-casa carried
+`namespace: casa` into the `apps` stage on 2026-10-21: the build and `crd-check` were both
+green, the API server answered `namespaces "casa" not found` at apply time, and since Flux
+applies a stage atomically that one line held the whole stage red for three hours and took an
+exporter down with it. Its honest limit is existence, not intent — `namespace: apps` on a
+Grafana dashboard passes, because `apps` exists. It also enforces the Flux-side half of the
+no-top-level-`namespace` rule: no `Kustomization` may set `spec.targetNamespace`. Refresh those CRDs with `make update-cnpg-crds CNPG=vX.Y.Z`
 whenever the operator pin moves: a stale schema answers confidently and wrongly. It
 deliberately excludes
 `validate`, which needs the age private key; that key must never be placed in CI. So
