@@ -102,8 +102,14 @@ endpoint answered correctly for `response_format: json_object` **and** for `json
 
 ## 6. Post-merge, in order
 
-1. Force the blueprint (authentik UI, or `ak apply_blueprint` in the worker) rather than waiting for
-   the worker's hourly discovery. Mounting is not applying — `docs/authentik-runbook.md` §5.
+1. Do **not** expect to force the blueprint. Measured on merge: the worker's startup discovery enqueued
+   and lost the pass ten seconds after its restart, and the next beat pass created the instance and
+   applied it 21 minutes later with no intervention. Mounting is not applying, but it does apply itself
+   — `docs/authentik-runbook.md` §5. Proof it landed, no credentials needed: the discovery document
+   answers `200` with issuer `https://auth.titan.arrieta.eu/application/o/mealie/`, and Mealie's own
+   unauthenticated `/api/app/about` reports `enableOidc=true, oidcRedirect=true,
+   oidcProviderName=authentik`. Do not probe `/application/o/authorize/` with `client_id=mealie` — the
+   real id is a UUID in the Secret and the probe reports a live client as missing.
 2. Confirm `titan-tls` was reflected into the `mealie` namespace. Both wildcard annotations were
    edited; with only one of the two changed, the Certificate stays Ready and the Secret never appears.
 3. Sign in as the first authentik user. That user becomes Mealie's owner — do it deliberately.
