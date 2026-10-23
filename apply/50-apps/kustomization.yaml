@@ -40,7 +40,7 @@ resources:
   # sits Pending rather than converging. It is a ConfigMap and not a Secret because it carries no
   # credential — see the file's own header for why that distinction is the whole point.
   - auth/tesla-outpost-blueprint.yaml
-  - auth/ocis-blueprint.yaml
+  - auth/opencloud-blueprint.yaml
   - auth/authentik.yaml
   # Quota, limit range and the provisioner Role, all in coder-workspaces. The quota is the only
   # thing standing between a third workspace and the Postgres every other app here depends on.
@@ -74,17 +74,18 @@ resources:
   - grafana/grafana.yaml
   # Gatus probes casa through public DNS from titan and sends alerts directly to Telegram.
   - gatus/gatus.yaml
-  # Infinite Scale, replacing the PHP Nextcloud that runs in casa. Two files, and the split is the
-  # failure domain: `ocis.yaml` is the app plus its WOPI collaboration sidecar, `collabora.yaml` is
-  # the editor. A bad field in the editor takes down document opening and nothing else; a bad field in
-  # the app takes down the file service. Both freeze coder's and authentik's updates for the length of
-  # the failure, which is the accepted cost recorded at the top of this file.
+  # OpenCloud, the Infinite Scale fork, replacing the PHP Nextcloud that runs in casa. Two files, and
+  # the split is the failure domain: `opencloud.yaml` is the app (including its WOPI collaboration
+  # service, which since 8.1.0 runs inside the same process rather than in a sidecar), `collabora.yaml`
+  # is the editor. A bad field in the editor takes down document opening and nothing else; a bad field
+  # in the app takes down the file service. Both freeze coder's and authentik's updates for the length
+  # of the failure, which is the accepted cost recorded at the top of this file.
   #
   # Ordering here is intent, not mechanism (see the note at the top of this file): the app reads
-  # ocis-secrets from namespace `files` and titan-tls reflected into it, and a pod that starts before
-  # either exists crash-loops rather than converging.
-  - ocis/ocis.yaml
-  - ocis/collabora.yaml
+  # opencloud-secrets from namespace `files` and titan-tls reflected into it, and a pod that starts
+  # before either exists crash-loops rather than converging.
+  - opencloud/opencloud.yaml
+  - opencloud/collabora.yaml
   # Mealie, the recipe manager. Two files and the split is the same one open-webui has: the CNPG
   # Database and DatabaseRole live in namespace `databases` because that is where their Cluster is,
   # while the app lives in `mealie`. Listed DB-first for intent, not mechanism — Flux sorts by kind

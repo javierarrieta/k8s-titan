@@ -91,14 +91,6 @@ resources:
   - authentik-observability-blueprint.yaml
   - observability-grafana-oidc.yaml
   - observability-grafana-admin.yaml
-  # Infinite Scale. One file, nine values, all minted by scripts/setup-ocis-secrets.sh in one process.
-  # Two of the nine are not ours to mint and are prompted rather than generated: the S3 pair has to
-  # match the IAM user and bucket policy created on casa's MinIO with mc, so no script on titan can
-  # author both halves. The ninth is the Collabora WOPI proof key, which lives here rather than being
-  # generated at startup because collabora/code 26.x has no shell to generate it with - see the
-  # header of apply/50-apps/ocis/collabora.yaml. An unlisted file here builds green and is silently
-  # never applied, which is the lie `make secrets-placement` exists to catch.
-  - ocis-secrets.yaml
   # Mealie. Three files, three values, all minted by scripts/setup-mealie-secrets.sh in one process so
   # the duplicated halves cannot be authored apart: the DB password exists in CNPG's DatabaseRole
   # (namespace databases) and in Mealie's env (namespace mealie), and the OIDC client exists in
@@ -109,10 +101,6 @@ resources:
   - authentik-mealie-blueprint.yaml
   - mealie-db-credentials.yaml
   - mealie-secrets.yaml
-  # OpenCloud's blob-store credential, staged ahead of the app itself. Two keys only, and they are
-  # the two no script on titan can mint: the pair has to match the MinIO service account and the
-  # policy in docs/opencloud-minio-policy.json, both created on casa with mc. The remaining values
-  # the app will need (jwt secret, WOPI proof key, machine-auth key, transfer secret, IDM passwords)
-  # are minted with the manifests, not here. Namespace `files` is decided, not provisional -
-  # OpenCloud takes over files.titan.arrieta.eu from oCIS rather than running beside it.
+  # OpenCloud's own Secret. Namespace `files` is the namespace OpenCloud takes over from oCIS rather
+  # than a new one, because the hostname and the reflected certificate moved with it.
   - opencloud-secrets.yaml

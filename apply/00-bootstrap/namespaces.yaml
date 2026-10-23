@@ -144,16 +144,18 @@ metadata:
     kubernetes.io/metadata.name: observability
     kubernetes.io/description: "Grafana, reading casa's Prometheus and Loki over the mesh"
 ---
-# Infinite Scale (oCIS) and its Collabora editor. It fails the admission test in
+# OpenCloud (the Infinite Scale fork) and its Collabora editor. It fails the admission test in
 # docs/superpowers/specs/2026-10-19-titan-app-scale-out-design.md §3.1 on three counts at once - own
 # public hostname, own Secret set, and a store of its own - so it gets a namespace, and it stays in
 # the shared `apps` stage per §3.2.
 #
-# The name is `files`, not `ocis`, because the namespace is the domain rather than the product: the
-# WOPI collaboration service, the editor and the object-store client config all live here, and none
-# of them is called ocis.
+# The name is `files`, not the product's name, because the namespace is the domain rather than the
+# app: the WOPI collaboration service, the editor and the object-store client config all live here.
+# That turned out to be worth more than a tidy name - the product underneath this namespace has now
+# changed once, from PHP Nextcloud to Infinite Scale and from Infinite Scale to OpenCloud, and the
+# namespace, the certificate reflection and the hostname all survived the swap untouched.
 #
-# No pod-security warn label. The ocis and collabora/code images run as uids and with capabilities
+# No pod-security warn label. The opencloud and collabora/code images run as uids and with capabilities
 # (collabora needs MKNOD) that restricted would only warn about, and a warn that fires on every pod in
 # the namespace is noise that trains everyone to ignore the label.
 apiVersion: v1
