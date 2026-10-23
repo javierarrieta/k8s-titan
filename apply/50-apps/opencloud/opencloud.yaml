@@ -458,10 +458,13 @@ spec:
           configMap:
             name: opencloud-csp
 # HONEST LIMITS, read before trusting this file.
-# 1. NOTHING HERE HAS RUN. Every claim above is read from the 8.1.0 source, not observed on a
-#    cluster. The first start will be the first test, and the likely first failures are in the
-#    order: a missing required secret (loud, names itself), the LDAP bind set (LDAP 49 at first
-#    login), then the S3 policy (AccessDenied on upload, not at login).
+# 1. THIS HAS RUN SINCE 2026-10-23. It shipped claiming "nothing here has run", and the first start
+#    found three defects: the CSP mounted one directory above where the proxy looks, IDM had
+#    half-bootstrapped behind an os.Stat guard, and mobile/desktop logins were refused by the source
+#    flow while web worked. All three are fixed and in git. docs/opencloud-bringup-2026-10-23.md is the
+#    record of what has been observed working - web and Android and desktop login, upload to S3, admin
+#    role, Collabora editing - and of what has NOT: no backup and no restore drill for this PVC above
+#    all, which is the largest remaining gap.
 # 2. The identifiers below were minted by scripts/setup-opencloud-secrets.sh, in the same run as the
 #    Secret they sit beside, and must never be edited by hand afterwards. A mount ID changed after files
 #    exist orphans the storage tree, which is why they are in git at all: the change has to be visible.
