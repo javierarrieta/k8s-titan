@@ -1146,3 +1146,100 @@ GET /source/oauth/login/google/ -> 302 https://accounts.google.com/o/oauth2/auth
   redirect_uri  https://auth.titan.arrieta.eu/source/oauth/callback/google/
   scope         email profile
 ```
+
+## 12. `prompt=login` — the mobile login that fails on a flow with no bindings
+
+Landed 2026-10-23 (`apply/10-secrets/authentik-google-blueprint.yaml`, entry `default-source-authentication`).
+
+**Symptom.** A mobile or desktop client reaches authentik, Google accepts the password, and the user is
+told the flow does not apply to them. **Web login is completely fine the whole time**, which is what makes
+this look like the client's problem or the relying app's problem rather than authentik's.
+
+### The mechanism
+
+OpenCloud's Android client puts `prompt=login` into the authorization URL and there is no setting for it
+(`OAuthUtils.kt` appends `QUERY_PARAMETER_PROMPT`; the desktop client sends its own supported prompt
+values at `oauth.cpp:457`). `prompt=login` means *run the login flow even though this user already has a
+session* — and authentik obliges, re-entering the flow with the session intact.
+
+The flow it re-enters is the **source** flow, the one named by the source's own `authentication_flow` —
+`default-source-authentication` here, not `default-authentication-flow`. That one ships with
+`authentication: require_unauthenticated`, so `authentik/flows/planner.py:218` raises
+`FlowNonApplicableException`. The web client never sends `prompt=login`, so it never re-enters and never
+meets the check. Same provider, same application, same redirect set: one query parameter is the entire
+difference, which is why "web works" is a misleading signal here rather than a reassuring one.
+
+### Where the log is, and why it hides from every obvious filter
+
+```
+logger:  authentik.core.sources.flow_manager
+event:   Flow non applicable
+source:  <OAuthSource: google>
+```
+
+**There is no flow slug in that line.** Not in the message, not in a field. Filtering authentik's logs on
+`flow` or `slug` — the obvious thing to do when the error says "this flow" — hides the one record that
+explains the failure. The two fields that identify it are `logger` and `source`, and neither is what you
+would think to print:
+
+```sh
+# jq is not preinstalled on titan's workspaces: nix-shell -p jq --run '<the command below>'
+kubectl --context titan -n auth logs deploy/authentik-server --since=10m \
+  | jq -r 'select(.event | test("non applicable")) | [.logger, (.source | tostring), .event] | @tsv'
+```
+
+Print those three fields first. It is the whole diagnosis in one line and it cost about an hour to find
+because every narrower query looked reasonable.
+
+### What was audited while looking in the wrong place
+
+| checked | result | why it misled |
+|---|---|---|
+| `default-authentication-flow` → `authentication` | `none` | **correct** — that flow is genuinely innocent |
+| its Policy / Group / User bindings | empty | **correct** — nothing binds it, and correctly so |
+| OpenCloud autoprovisioning, LDAP `Result Code 49` | unrelated | the failure happens upstream of OpenCloud entirely |
+
+Both checks were right and neither was the answer. A flow whose bindings are empty and whose
+authentication is `none` is exactly what a healthy flow looks like, so the audit confirmed the wrong
+thing confidently. The lesson is not "check more flows" — it is that **a social source has its own flow**
+and it is reached only on the paths that re-enter login.
+
+### The fix, and its blast radius
+
+```yaml
+  - model: authentik_flows.flow
+    identifiers:
+      slug: default-source-authentication
+    state: present
+    attrs:
+      authentication: none
+```
+
+`none` is the API value for the UI's **Any users** (`FlowAuthenticationRequirement.NONE`,
+`authentik/flows/models.py:37`). Blast radius is every social login that starts from an existing
+session — Google is the only source here and that path was simply broken, so this removes a failure
+rather than loosening a control: the flow still authenticates only the user the Google identity is
+already linked to (`user_matching_mode: email_link`, no `enrollment_flow`), it no longer refuses to run.
+
+The alternative not taken: a dedicated flow bound to this source's `authentication_flow` would change
+nothing else at all, but it needs the stages `default-source-authentication` already has and those are
+not enumerable from this repo. A flow with no stages raises `EmptyFlowException` — a worse outage than
+the one being fixed.
+
+### After an authentik upgrade, check this field first
+
+System defaults are re-created by authentik's own blueprints, so `authentication` can come back as
+`require_unauthenticated` on upgrade. Ours re-asserts on the next blueprint apply, but if mobile logins
+break after an upgrade and nothing in the diff explains it, this is the first field to look at.
+
+Reading it without the UI — the sidebar group is **Flows & Stages** → **Flows**, and both flows have
+designation `authentication`, which is what makes them easy to confuse:
+
+```sh
+kubectl --context titan -n auth exec deploy/authentik-server -- python -c "import django,os;os.environ['DJANGO_SETTINGS_MODULE']='authentik.root.settings';django.setup();from authentik.flows.models import Flow;print(Flow.objects.get(slug='default-source-authentication').authentication)"
+```
+
+### Proven
+
+After the field change, Android logged in. In the window: 0 `Flow non applicable` events, one successful
+`/source/oauth/callback/google/`, no OpenCloud autoprovisioning failure.
