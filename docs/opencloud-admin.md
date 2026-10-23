@@ -97,6 +97,10 @@ kept as the record of how that value was obtained and as the procedure for a sec
    wrong or the account did not exist when settings started — start settings again after the account
    exists.
 
+   **Observed 2026-10-23:** the admin section appeared after this landed, so the whole chain — UUID from
+   `/graph/v1.0/me`, `OC_ADMIN_USER_ID`, settings' `DefaultRoleAssignments` — is confirmed by effect and
+   not just by reading source. See `docs/opencloud-bringup-2026-10-23.md`.
+
 ## What this does not do
 
 - **It grants one user.** The variable holds a single UUID. The general mechanism is role mirroring from
