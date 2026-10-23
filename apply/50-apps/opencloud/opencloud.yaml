@@ -426,8 +426,19 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /var/lib/opencloud
+            # Mounted as a single file at exactly the path PROXY_CSP_CONFIG_FILE_LOCATION names, not as
+            # a directory. A ConfigMap mounted at /etc/opencloud/csp puts the key at
+            # /etc/opencloud/csp/csp.yaml, and the proxy treats a missing CSP file as fatal:
+            #   {"level":"fatal","service":"proxy","error":"open /etc/opencloud/csp.yaml: no such file
+            #    or directory","message":"Failed to load CSP configuration."}
+            # That was the first real startup failure of this port (2026-10-23), and it also explains
+            # the corrupt bleve index: the proxy died while search was mid-way through creating its
+            # index, leaving a half-written mapping on the PVC that then failed every later start.
+            # subPath means a ConfigMap edit does not reach a running pod - irrelevant here, because
+            # the proxy reads CSP once at startup and would need a restart anyway.
             - name: csp
-              mountPath: /etc/opencloud/csp
+              mountPath: /etc/opencloud/csp.yaml
+              subPath: csp.yaml
               readOnly: true
       volumes:
         - name: data
