@@ -635,9 +635,11 @@ Four things that were true at the time of the rename and are worth knowing befor
   into `authentik-grafana-blueprint` (what authentik applies) and `tesla-grafana-oidc` (what Grafana
   reads); `make grafana-oidc-check` proves those two, the HelmRelease mount, and the redirect host all
   agree. Merging is not the same as authentik knowing about the client: the worker discovers blueprints
-  hourly and can skip a newly mounted one entirely — check with the discovery document probe and, if it
-  is missing, apply it directly (`docs/authentik-runbook.md` §5, which is where that is written down and
-  why it is not visible in any log). Two things about it are easy to get wrong and hard to notice:
+  hourly and its startup pass can skip a newly mounted one — check with the discovery document probe.
+  The skip leaves a trace (a `blueprints_discovery` enqueue with no matching start) and the next beat
+  pass applies it unattended, measured 21 min, so waiting is a legitimate answer and forcing is for
+  when the gap has a price (`docs/authentik-runbook.md` §5, which is where all of that is written down).
+  Two things about it are easy to get wrong and hard to notice:
   - **The `profile` scope is load-bearing.** The `groups` claim comes only from authentik's default
     profile scope mapping (`blueprints/system/providers-oauth2.yaml:45`), so dropping it makes
     `role_attribute_path` evaluate against a missing claim and every login silently becomes Viewer.
