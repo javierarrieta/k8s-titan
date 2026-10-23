@@ -1,10 +1,12 @@
 ---
-# Collabora CODE for oCIS, in namespace `files`.
+# Collabora CODE for OpenCloud, in namespace `files`.
 #
 # This is the same CODE line already running in casa (collabora/code, the 26.04 series), so the
-# image is not new; what is new is how it is wired. Nextcloud spoke WOPI to Collabora directly. oCIS
-# puts its own collaboration service in between, so Collabora's only cluster-facing relationship is
-# the WOPISrc handed to it by `ocis-collaboration:9300`.
+# image is not new; what is new is how it is wired. Nextcloud spoke WOPI to Collabora directly. OpenCloud, like oCIS before it, puts its own
+# collaboration service in between, so Collabora's only cluster-facing relationship is the WOPISrc
+# handed to it by `opencloud-collaboration:9300`. That service now runs inside the opencloud container
+# rather than in a sidecar - see apply/50-apps/opencloud/opencloud.yaml - but the endpoint Collabora
+# sees is the same shape and the same port.
 #
 # Pinned by digest rather than tag, for two reasons. One: the full tag is a four-part dotted version,
 # `make leak-check`'s IPv4 pattern matches it, and that gate has no exemption mechanism - widening
@@ -47,7 +49,7 @@ spec:
             - name: DONT_GEN_SSL_CERT
               value: "YES"
             # ssl.enable=false + ssl.termination=true is the pairing that has been running in casa.
-            # net.frame_ancestors must name the oCIS origin or the editor iframe is refused.
+            # net.frame_ancestors must name the OpenCloud origin or the editor iframe is refused.
             - name: extra_params
               value: >-
                 --o:ssl.enable=false
@@ -58,12 +60,12 @@ spec:
             - name: username
               valueFrom:
                 secretKeyRef:
-                  name: ocis-secrets
+                  name: opencloud-secrets
                   key: collabora-admin-user
             - name: password
               valueFrom:
                 secretKeyRef:
-                  name: ocis-secrets
+                  name: opencloud-secrets
                   key: collabora-admin-password
           ports:
             - name: cool
@@ -98,7 +100,7 @@ spec:
       volumes:
         - name: proof-key
           secret:
-            secretName: ocis-secrets
+            secretName: opencloud-secrets
             items:
               - key: collabora-proof-key
                 path: proof_key

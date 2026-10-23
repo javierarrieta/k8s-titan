@@ -90,12 +90,13 @@ spec:
       # (OutpostServiceConnection.local, outposts/models.py:127).
       configMaps:
         - authentik-tesla-blueprint
-        # oCIS's OIDC client. A ConfigMap rather than a Secret because oCIS cannot carry a client
-        # secret at all - the web service's OIDC block has a ClientID and no secret, so the client is
-        # public by construction (see apply/50-apps/auth/ocis-blueprint.yaml). Same mount-not-apply
-        # trap as every entry above: authentik's worker only reads what is listed here, and a
-        # blueprint that is never mounted is indistinguishable from one that was never written.
-        - authentik-ocis-blueprint
+        # OpenCloud's OIDC client. A ConfigMap rather than a Secret because OpenCloud cannot carry a
+        # client secret at all - the web service's OIDC block has a ClientID and no secret, and every
+        # OpenCloud client is a public client doing authorization code + PKCE (see
+        # apply/50-apps/auth/opencloud-blueprint.yaml). Same mount-not-apply trap as every entry
+        # above: authentik's worker only reads what is listed here, and a blueprint that is never
+        # mounted is indistinguishable from one that was never written.
+        - authentik-opencloud-blueprint
     authentik:
       log_level: info
       error_reporting:
