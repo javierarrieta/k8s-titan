@@ -5,10 +5,23 @@ file bytes in an S3 bucket on Casa's MinIO and only the metadata tree on titan's
 same split `apply/50-apps/ocis/ocis.yaml` documents for oCIS, and for the same reason: titan
 has no room for the data.
 
-**Status: not yet exercised.** The permission set below is derived from source, listed call by
-call, and has *not* been run against a live OpenCloud. Treat the first successful sync as the
-proof. If a call is missing you will see it as a `AccessDenied` from the storage-users
-container on upload, not as a login failure.
+**Status: the policy is proven against the live bucket; the driver has not run yet.** Every action
+below was exercised with the real key against `opencloud-blobs` on 2026-10-22, and the denials are
+the half that usually gets left too wide:
+
+| probe | result |
+|---|---|
+| `ListBucket opencloud-blobs` | allowed |
+| `PutObject` / `GetObject` / `DeleteObject` | allowed |
+| `CreateMultipartUpload` + `UploadPart` + `ListParts` + `AbortMultipartUpload` | allowed |
+| `ListBucket ocis-blobs` | **AccessDenied** — as intended |
+| `GetObject ocis-blobs` | **AccessDenied** — as intended |
+| `CreateBucket` | **AccessDenied** — as intended |
+| `GetBucketLocation` | **AccessDenied** — as intended, see the region note |
+| `ListMultipartUploads` | **AccessDenied** — a judgement call, see the last section |
+
+What is still unproven is that the driver needs nothing else. A missing action would surface as
+`AccessDenied` on upload from storage-users, not as a login failure.
 
 ## What the key actually needs
 
@@ -97,13 +110,29 @@ The same trap is already recorded for the Postgres backup bucket in
 `docs/superpowers/plans/2026-10-03-titan-authentik-cnpg.md`. If you ever remove the explicit
 region, add `s3:GetBucketLocation` on the bucket ARN — but fix the region instead.
 
+Verified for `opencloud-blobs`: the server answers `X-Amz-Bucket-Region: eu-west-1` and
+`STORAGE_USERS_DECOMPOSEDS3_REGION` is `eu-west-1`. They agree, so the pin is right. `GetBucketLocation`
+itself is deliberately not granted — the driver never calls it, and the header can be read
+unauthenticated with `curl -sI http://192.168.0.6:9000/opencloud-blobs`.
+
+## One thing this key cannot do, on purpose
+
+`ListMultipartUploads` is denied. The driver never calls it — `blobstore.go` has no such call — so
+nothing in OpenCloud needs it. What it buys is the operator's ability to enumerate and clean up
+abandoned multipart uploads, which is a real storage leak when an upload dies partway.
+
+The oCIS policy this one replaced granted it. It was dropped for least privilege rather than by
+oversight, and it is a judgement call rather than a rule: add `s3:ListBucketMultipartUploads` on the
+bucket ARN if you would rather be able to see those uploads than save one action. Without it an
+abandoned upload is invisible to this key and only shows up in an admin's bucket inventory.
+
 ## 3. Getting the credential into the repo
 
-`apply/10-secrets/opencloud-secrets.yaml` holds `s3-access-key` and `s3-secret-key`, sops-
-encrypted with the `titan-k8s` cluster key. The staging flow is the one in
-`docs/ovh-dns-credential.md` §2 — plaintext at a git-ignored name under `apply/10-secrets/`,
-`sops --encrypt --in-place`, then rename, because sops chooses recipients from the file's own
-path.
+`apply/10-secrets/opencloud-secrets.yaml` holds every OpenCloud and Collabora secret, sops-encrypted
+with the `titan-k8s` cluster key, minted by `scripts/setup-opencloud-secrets.sh`. The staging flow is
+the one in `docs/ovh-dns-credential.md` §2 — plaintext at a git-ignored name under
+`apply/10-secrets/`, `sops --encrypt --in-place`, then rename, because sops chooses recipients from
+the file's own path.
 
 ## Rotation
 

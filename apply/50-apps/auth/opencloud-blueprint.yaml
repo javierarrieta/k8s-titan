@@ -1,0 +1,171 @@
+---
+# authentik blueprint: OpenCloud's OIDC application and provider, for files.titan.arrieta.eu.
+#
+# Replaces ocis-blueprint.yaml. The application slug moves from `ocis` to `opencloud`, and with it
+# the per-provider issuer, so OC_OIDC_ISSUER in apply/50-apps/opencloud/opencloud.yaml names the new
+# one. Both halves move in the same commit; a provider at the old slug and an app pointed at the new
+# one disagree silently and every failure looks like a bad token.
+#
+# ONE PROVIDER FOR ALL FOUR CLIENTS, AND WHY THAT IS NOT A SHORTCUT
+# OpenCloud's shape is four clients with predefined IDs - `web`, `OpenCloudDesktop`,
+# `OpenCloudAndroid`, `OpenCloudIOS` - handed out by the webfinger service
+# (services/webfinger/pkg/config/defaults/defaultconfig.go:59-65). Four providers would be upstream's
+# shape, but each authentik provider with issuer_mode=per_provider is its own issuer, and the proxy
+# validates against exactly one (services/proxy/pkg/config/config.go:120). Four issuers would need
+# issuer_mode=global, and authentik's global issuer has no root /.well-known/openid-configuration -
+# verified returning 404 on auth.titan.arrieta.eu - so it needs a reverse-proxy rewrite this cluster
+# does not run.
+#
+# One provider therefore, client_id `opencloud`, and OC_OIDC_CLIENT_ID set once. The chains make that
+# sufficient rather than merely convenient: every consumer reads
+# `OC_OIDC_CLIENT_ID;WEBFINGER_<PLATFORM>_OIDC_CLIENT_ID` (services/webfinger/pkg/config/config.go:23-30)
+# and envdecode takes the LAST name that is set, so with only the OC_ name set all four platforms and
+# the web client resolve to `opencloud`. Same for the issuer: OC_OIDC_ISSUER feeds proxy, web and
+# webfinger (services/proxy/.../config.go:120, services/web/.../config.go:84,
+# services/webfinger/.../config.go:22).
+#
+# This is also what keeps the audience pin alive. PROXY_OIDC_AUDIENCES (new in 8.1.0,
+# services/proxy/pkg/config/config.go:119) holds one value here. Four providers would mean four
+# audiences and a list to keep in step.
+#
+# THE CLIENTS NO LONGER SHIP A FOREIGN CLIENT ID - CHECKED, NOT ASSUMED
+# The ownCloud desktop client compiled in `xdXOt13JK...`, which no self-hosted IdP can register, and
+# that was the whole reason oCIS desktop login could not work here. OpenCloud fixed it twice over:
+#   - opencloud-eu/desktop v4.0.0 theme.cpp:323 compiles in `OpenCloudDesktop`, and
+#     creds/oauth.cpp:616 overwrites it from the webfinger property
+#     `http://opencloud.eu/ns/oidc/client_id`, with scopes from :619.
+#   - opencloud-eu/android v1.2.5 setup.xml:104 ships `OpenCloudAndroid` and
+#     WebFingerResponse.kt:32 parses the same property.
+# So the server decides the client id and the clients obey. That is the fix, and it is why this file
+# can name one client where oCIS needed an unregistrable one.
+#
+# Desktop does not attempt dynamic registration: creds/oauth.cpp:508 skips it when the IdP advertises
+# no registration_endpoint, which authentik does not unless a DCR app is configured. Good - the
+# anonymous DCR path is exactly where the ownCloud Android client dead-ended.
+#
+# WHY IT IS NOT IN THE OUTPOST'S PROVIDER LIST
+# Same reason as open-webui and Grafana: that list is proxy-only, validate_providers dispatches on
+# provider type (outposts/api/outposts.py:69-88), and tesla-outpost-blueprint.yaml OWNS the list.
+# OpenCloud does its own OIDC redirect; it is not behind the outpost.
+#
+# IDENTITY IS KEYED ON THE USERNAME, SAME TRADE AS oCIS
+# PROXY_USER_OIDC_CLAIM=preferred_username / PROXY_USER_CS3_CLAIM=username are the compiled defaults
+# and what upstream's own external-IdP reference sets. Cost, unchanged from oCIS: renaming someone in
+# authentik makes OpenCloud see a brand new account and the old one keeps its files. Renaming a user
+# after they have data is the thing to avoid.
+#
+# NOT DONE HERE, ON PURPOSE - AND THIS IS THE ONE OPEN QUESTION
+# Admin role assignment. PROXY_ROLE_ASSIGNMENT_DRIVER=oidc maps a claim onto the admin role, and the
+# default mapping (claim `roles`, value `opencloudAdmin`) needs no config file, because `role_mapping`
+# itself is config-file-only (services/proxy/pkg/config/config.go:160). But the claim has to reach
+# OpenCloud, and clients request a fixed scope list, so it needs a scope the clients do not ask for -
+# which means overriding WEB_OIDC_SCOPE and OC_OIDC_CLIENT_SCOPES and trusting webfinger to propagate
+# it to desktop and mobile. If the claim is absent or unmatched the proxy logs an error and
+# REFUSES THE LOGIN (docs: "the user will not be able to login"). That is the open-webui lockout
+# shape again, and opencloud-eu/opencloud#2886 is still open on exactly this.
+#
+# So the first deploy ships PROXY_ROLE_ASSIGNMENT_DRIVER=default: every user gets the plain `user`
+# role, nobody is locked out, and nobody is an administrator either. See
+# docs/opencloud-admin.md for how the first admin is granted, and what has not been proven about it.
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: authentik-opencloud-blueprint
+  namespace: auth
+data:
+  opencloud.yaml: |
+    version: 1
+    metadata:
+      name: titan-opencloud
+    entries:
+      - model: authentik_providers_oauth2.oauth2provider
+        id: opencloud-provider
+        identifiers:
+          name: opencloud
+        state: present
+        attrs:
+          name: opencloud
+          # public, because no OpenCloud client can carry a secret. The web SPA has no client_secret
+          # field in its OIDC block at all, and the proxy only validates tokens against the IdP's JWKS
+          # and userinfo. PKCE is not an assumption: upstream states every OpenCloud client is a public
+          # client doing authorization code + PKCE, and the desktop client sends
+          # token_endpoint_auth_method "none" when it does register (oauth.cpp:178).
+          client_type: public
+          client_id: opencloud
+          # Read from the clients, not guessed. Four kinds of redirect land here because one provider
+          # serves four clients.
+          #
+          # Web - built client-side by the web runtime: /oidc-callback.html and
+          # /oidc-silent-redirect.html are authorization redirects, / is the logout redirect. Strict
+          # on all three; a prefix match would be a redirect bypass.
+          #
+          # Desktop - creds/oauth.cpp:51 + :331 build the redirect as http://127.0.0.1:<port> and
+          # theme.cpp:336 returns oauthPorts() = {0}, where 0 means "a random port". So the port is
+          # not predictable and only a regex admits it. Anchored, and the path is absent rather than
+          # wildcarded, because the client sends no path.
+          #
+          # Android / iOS - a custom scheme, not loopback. opencloud-eu/android v1.2.5
+          # setup.xml:89-91 gives scheme `oc` + host `android.opencloud.eu`; iOS is the same shape
+          # with its own host.
+          redirect_uris:
+            - url: https://files.titan.arrieta.eu/oidc-callback.html
+              matching_mode: strict
+              redirect_uri_type: authorization
+            - url: https://files.titan.arrieta.eu/oidc-silent-redirect.html
+              matching_mode: strict
+              redirect_uri_type: authorization
+            - url: https://files.titan.arrieta.eu/
+              matching_mode: strict
+              redirect_uri_type: logout
+            - url: ^http://127\.0\.0\.1:[0-9]+$
+              matching_mode: regex
+              redirect_uri_type: authorization
+            - url: oc://android.opencloud.eu
+              matching_mode: strict
+              redirect_uri_type: authorization
+            - url: oc://ios.opencloud.eu
+              matching_mode: strict
+              redirect_uri_type: authorization
+          # New since authentik 2026.5: redirect URIs are typed, and this cluster runs 2026.8.3, so
+          # the types above are honoured rather than all being read as authorization. The oCIS
+          # blueprint predates that and set types anyway, which is why it survived the upgrade.
+          #
+          # Back-channel logout is OpenCloud's own endpoint, not a browser redirect - the IdP calls it
+          # server to server when a session ends. Without it a logout in authentik leaves the
+          # OpenCloud session alive.
+          post_logout_redirect_uris: []
+          logout_type: Client
+          grant_types:
+            - authorization_code
+            - refresh_token
+          # offline_access is load-bearing, not decoration. WEB_OIDC_SCOPE defaults to
+          # "openid profile email" (services/web/pkg/config/defaults/defaultconfig.go) with no refresh
+          # token in sight, so the browser would be silently logged out at every access-token expiry.
+          # Desktop and mobile ask for it themselves - theme.cpp:341 is "openid offline_access email
+          # profile" - so this mapping is what makes authentik honour it for all four.
+          property_mappings:
+            - !Find [authentik_providers_oauth2.scopemapping, [managed, goauthentik.io/providers/oauth2/scope-openid]]
+            - !Find [authentik_providers_oauth2.scopemapping, [managed, goauthentik.io/providers/oauth2/scope-email]]
+            - !Find [authentik_providers_oauth2.scopemapping, [managed, goauthentik.io/providers/oauth2/scope-profile]]
+            - !Find [authentik_providers_oauth2.scopemapping, [managed, goauthentik.io/providers/oauth2/scope-offline_access]]
+          authorization_flow: !Find [authentik_flows.flow, [slug, default-provider-authorization-implicit-consent]]
+          invalidation_flow: !Find [authentik_flows.flow, [slug, default-invalidation-flow]]
+          signing_key: !Find [authentik_crypto.certificatekeypair, [managed, goauthentik.io/crypto/jwt-managed]]
+          # per_provider makes the issuer https://auth.titan.arrieta.eu/application/o/opencloud/,
+          # which is exactly what OC_OIDC_ISSUER names in apply/50-apps/opencloud/opencloud.yaml.
+          # See the header for why global is not available here.
+          issuer_mode: per_provider
+          sub_mode: hashed_user_id
+
+      - model: authentik_core.application
+        identifiers:
+          slug: opencloud
+        state: present
+        attrs:
+          name: OpenCloud
+          slug: opencloud
+          provider: !KeyOf opencloud-provider
+          meta_launch_url: https://files.titan.arrieta.eu/
+          # The Application is not decoration - see blueprints-open-webui.yaml for the recorded
+          # lesson: a provider with no owning Application is invisible to the consumer that needs it.
