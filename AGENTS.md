@@ -130,8 +130,9 @@ the stream is rejected per-pod, silently, with promtail reporting healthy.
   notify-only, and Helm's new-vs-old patching lets an out-of-band env var survive every later upgrade
   indefinitely — so `kubectl edit` on a Helm-managed Deployment makes a permanent change that git never
   sees and `make dry-run` cannot detect. Prefer a commit; if you must poke live, remove it explicitly
-  afterwards (`kubectl -n <ns> set env deploy/<name> FOO-`) and say so. See
-  `docs/authentik-runbook.md` §9, which is written because this was assumed false once.
+  afterwards (`kubectl -n <ns> set env deploy/<name> FOO-`) and say so. Forcing a sync does not undo
+  drift, and the `requestedAt` annotation only fires when its value changes — `docs/flux-manual-sync.md`.
+  See `docs/authentik-runbook.md` §9, which is written because this was assumed false once.
 - `make validate` deliberately fails when `apply/10-secrets` holds nothing. Do not
   soften that guard to make a check pass: a gate that passes vacuously is worse than
   no gate.
