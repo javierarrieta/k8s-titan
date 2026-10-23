@@ -185,6 +185,17 @@ spec:
             # 9200 and 9300, never this port.
             - name: PROXY_DEBUG_ADDR
               value: "0.0.0.0:9205"
+            # Written down rather than left to the default, because the default is a fallback three
+            # conditions deep. defaults.BaseDataPathType is "homedir" (pkg/config/defaults/paths.go:17),
+            # so the real default is $HOME/.opencloud and /var/lib/opencloud is only reached when
+            # os.UserHomeDir() fails. Measured on the shipped image (registry config blob
+            # sha256:0b2e1d129db4): Env is PATH only - no HOME - and User is '1000', so UserHomeDir()
+            # does fail and the fallback does land on this PVC. That is correct but accidental: one
+            # upstream commit adding ENV HOME would move the IDM LDAP database, the sharing JSON, the
+            # thumbnail cache and the search index onto the container's ephemeral layer, where they
+            # silently vanish on every restart. Nothing downstream would notice.
+            - name: OC_BASE_DATA_PATH
+              value: /var/lib/opencloud
             - name: PROXY_CSP_CONFIG_FILE_LOCATION
               value: /etc/opencloud/csp.yaml
             # authentik is the IdP, so the built-in OIDC provider does not run. idm still does - it is
