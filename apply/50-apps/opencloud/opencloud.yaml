@@ -264,8 +264,13 @@ spec:
             # Empty is a valid state: with an empty value settings skips the grant and idm skips the
             # password requirement. Filling it in is a one-line change with no Secret edit, because
             # IDM_ADMIN_PASSWORD is already present.
+            # Proven 2026-10-23 by GET /graph/v1.0/me: this is ALSO authentik's own user UUID - the
+            # response's identities[].issuerAssignedId is the identical value - so it can be read in
+            # the authentik admin UI with no OpenCloud credential at all. Note the API version: the
+            # route is /graph/v1.0/me (services/graph/pkg/service/v0/service.go:241 mounts v1beta1,
+            # and the proxy at defaultconfig.go:283 names v1.0); /graph/v1/me is a 404.
             - name: OC_ADMIN_USER_ID
-              value: ""
+              value: "0240605d-bdae-40ca-bd48-d036daba0bc4"
             # Required the moment OC_ADMIN_USER_ID is non-empty - services/idm/pkg/config/parser/
             # parse.go:45 returns MissingServiceUserPassword("idm", "admin") otherwise, which is a
             # crash loop that names neither the variable you changed nor the service that wants it.
