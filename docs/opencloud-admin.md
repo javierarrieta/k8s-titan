@@ -45,24 +45,50 @@ there is no `role` command anywhere in the tree.
 
 ## Procedure
 
+As of 2026-10-23 steps 1-3 are already done on titan and `OC_ADMIN_USER_ID` is populated. Steps 1-3 are
+kept as the record of how that value was obtained and as the procedure for a second instance.
+
 1. **Deploy as-is**, with `OC_ADMIN_USER_ID: ""`. Empty is a valid state — settings skips the grant and
    idm skips the password requirement. Everyone who logs in gets the plain `user` role
    (`PROXY_ROLE_ASSIGNMENT_DRIVER=default`, `GRAPH_ASSIGN_DEFAULT_USER_ROLE=true`).
 
 2. **Log in once** through authentik, so your account exists.
 
-3. **Read your own account UUID.** `GET /graph/v1/me` returns it and needs no admin rights — the route
-   is registered at `services/graph/pkg/service/v0/service.go:242`. In practice: open the web UI,
-   DevTools → Network, copy the `Authorization: Bearer …` header off any XHR, then
+3. **Read your own account UUID.** `GET /graph/v1.0/me` returns it and needs no admin rights — but it
+   needs a real API credential, **not the web session cookie**. Opening the URL in a logged-in browser
+   prompts for Basic auth, and copying a `Bearer` header out of DevTools is a dead end too: the session
+   cookie is not an API token. Note the version — the route is `/graph/v1.0/me`; bare `/graph/v1/me` is
+   a 404 (`services/graph/pkg/service/v0/service.go:241` mounts `/v1beta1`, the proxy names `/v1.0` at
+   `defaultconfig.go:283`; neither is bare `/v1`).
+
+   The credential that works is an **app token**: web UI → avatar → Preferences → **App Tokens** → New,
+   then HTTP Basic with your login name and the token as the password.
 
    ```sh
-   curl -s -H "Authorization: Bearer <token>" https://files.titan.arrieta.eu/graph/v1/me
+   set -x OC_USER javier
+   set -x OC_TOKEN (read -s)   # fish: keeps the token out of your history
+   curl -s -u "$OC_USER:$OC_TOKEN" https://files.titan.arrieta.eu/graph/v1.0/me
    ```
 
-   The `id` field is the value. **This step is the unverified part** — the route exists in source, but
-   whether it answers on this build, and whether `id` is the same UUID the settings store keys on, has
-   not been observed. If it returns 401 or the id does not work, the fallback is to read the account
-   out of idm's LDAP directly.
+   The proxy forwards basic credentials as an app-token grant — `services/proxy/pkg/middleware/app_auth.go:29`
+   sends `Type: "appauth"` — which is why a token works where the account password would not.
+   **Revoke the token afterwards**; it was needed to read one field.
+
+   Observed 2026-10-23, HTTP 200, name and address redacted:
+
+   ```json
+   {"displayName":"<you>","id":"0240605d-bdae-40ca-bd48-d036daba0bc4",
+    "identities":[{"issuer":"https://auth.titan.arrieta.eu/application/o/opencloud/",
+                   "issuerAssignedId":"0240605d-bdae-40ca-bd48-d036daba0bc4"}],
+    "mail":"<you@example>","onPremisesSamAccountName":"javier","userType":"Member"}
+   ```
+
+   `id == identities[].issuerAssignedId`, so **the OpenCloud account UUID is authentik's own user
+   UUID**. The shorter route is therefore the authentik admin UI — Users → the user → UUID — which needs
+   no OpenCloud credential at all. Use that next time; the app-token path is recorded anyway because it
+   also proves basic auth works here, which is what a WebDAV or carddav client would need.
+
+   The fallback, if graph ever stops answering, is to read the account out of idm's LDAP directly.
 
 4. **Set it and apply.** One line in the manifest, commit, let Flux reconcile. Settings restarts,
    asserts the role, done.
