@@ -554,8 +554,9 @@ that is where the diagnosis starts, not where it ends.
 
 ### A brand-new blueprint can be missed by the very pass that should have caught it
 
-The lag above is at least visible in the logs. This one is not, and it cost an hour of live breakage
-on 2026-10-20 when `authentik-grafana-blueprint` was added.
+The lag above is at least visible in the logs. This one was not — see the signature found two days
+later further down — and it cost an hour of live breakage on 2026-10-20 when
+`authentik-grafana-blueprint` was added.
 
 What happened: Flux applied the Secret, Stakater Reloader restarted the worker for it, and the
 worker's startup `blueprints_discovery` ran ten seconds after the container started and **did not
@@ -574,15 +575,51 @@ So, when a blueprint you just added is absent rather than failed:
 1. `exec` in and check the file is really there and non-empty — `wc -c /blueprints/mounted/*/*.yaml`
    compares all of them at once, which also shows whether the Secret-mounted ones are laid out the way
    the ConfigMap one is.
-2. Present and non-empty → apply it directly with `ak apply_blueprint` above rather than gambling on
-   the next hourly pass. **Read the redaction note below first**; a validation failure prints the
-   client secret.
+2. Present and non-empty → either wait for the next beat pass, which recovers it unattended (measured
+   21 min, see the next subsection), or apply it directly with `ak apply_blueprint` above. Force it
+   when the gap has a price — a client-secret rotation, an app someone is waiting on — not merely
+   because the UI still has no entry. **Read the redaction note below first**; a validation failure
+   prints the client secret.
 3. Absent or zero bytes → the problem is the Secret or the mount, not the blueprint.
 
 The asymmetry that makes this worth writing down: a blueprint that *fails* validation leaves a
 BlueprintInstance with an error in the UI, and a blueprint that was *never seen* leaves nothing at all.
 "It is not in the list" is therefore a different diagnosis from "it is in the list and red", and the
 existing `grep -i "changed file"` check does not distinguish them — both produce no such line.
+
+### The startup skip does leave a trace, and the beat recovers it on its own
+
+Found 2026-10-22 while adding `authentik-mealie-blueprint`, which was mounted the same way grafana's
+was and went through the same startup skip. The worker log, verbatim:
+
+```
+20:28:54  worker restarts (Reloader on the new Secret), migrations run
+20:29:01  blueprints_discovery ENQUEUED  id=d17ab58a   ← never started
+20:50:03  blueprints_discovery enqueued  id=b3706912 → started → finished
+20:50:03  "Creating new blueprint instance from file
+           mounted/secret-authentik-mealie-blueprint/mealie.yaml"
+20:50:03  "Applying blueprint due to changed file"
+```
+
+**The skip is visible after all.** The subsection above says it is not, and
+`docs/teslamate-runbook.md` repeats that. It shows as an *enqueued task that never starts*. Every
+other task enqueued in that same second logged `Task started` and `Task finished`; `d17ab58a` has
+only the enqueue, anywhere in the log. The read-only identity can see this — it is a pod log, no
+`exec` needed:
+
+```fish
+kubectl -n auth logs deploy/authentik-worker | grep blueprints_discovery
+# enqueued + started + finished  → the pass ran
+# enqueued with no started       → the pass was lost. This is what the grafana episode looked like.
+```
+
+**And the beat recovers it without anyone forcing anything.** Nobody touched the UI here; 21 minutes
+later the periodic pass created the instance, applied it, and the provider answered `200`. The
+grafana episode is not counter-evidence — that one was fixed by a second worker restart before a beat
+pass got the chance, so nothing above is contradicted. What changes is the default action: waiting is
+a legitimate answer, and `ak apply_blueprint` is a shortcut for impatience or a costly gap rather than
+the only way back. Note the two ends still move at different speeds during a rotation, so that case
+keeps needing the manual apply — see the rotation section.
 
 ### How to tell the provider actually exists — mind the trailing slash
 
@@ -626,6 +663,16 @@ outcomes can return `400`:
 Run it against a known-good client too (coder's) as a control. Without that baseline the probe looks
 like it returns nothing useful, because a well-formed request for a *known* client and a malformed one
 both redirect or both 400 depending on what you omit.
+
+**The client id has to be the real one, and for blueprint-rendered clients the read-only identity
+cannot get it.** Every client here is rendered from `${..._OIDC_CLIENT_ID}` by its setup script, and
+those are `uuid4()` values that live only in a Secret — `scripts/setup-mealie-secrets.sh:58` and its
+siblings. `k8s-reader` is Forbidden on `get secret`, so the id is unavailable, and a guessed id drawn
+from the app name produces `Client ID Error` for a provider that is demonstrably live. Measured
+2026-10-22: `client_id=mealie` returned `Client ID Error` while that same provider's discovery document
+returned `200` and the worker log showed the apply — because the real id is a UUID. Take the id from
+the consumer's own env, or skip this probe and use the discovery document plus the worker log, which
+need no credential at all.
 
 ### Redact before pasting any of it
 
