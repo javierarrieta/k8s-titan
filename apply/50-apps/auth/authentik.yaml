@@ -83,6 +83,12 @@ spec:
         # blueprint that is never mounted is indistinguishable from one that was never written, and
         # `make mealie-check` fails if this line is removed while the Secret still exists.
         - authentik-mealie-blueprint
+        # Sure's OIDC client. A Secret, not a ConfigMap, because it carries the client_secret, and it
+        # is NOT in the embedded outpost's provider list — that list is proxy-only and belongs to
+        # apply/50-apps/auth/tesla-outpost-blueprint.yaml. Same trap as every entry above: a valid
+        # blueprint that is never mounted is indistinguishable from one that was never written, and
+        # the worker discovers these hourly plus at startup, so a mount added after a merge can sit
+        # unapplied for up to an hour and look like it did not land.
       # A ConfigMap, not a Secret: this blueprint carries no credential, so it gets the exposure that
       # matches — readable by anyone who can read the namespace, which is fine for a proxy provider
       # definition and would not be for coder's client_secret. The outpost it declares is the embedded
