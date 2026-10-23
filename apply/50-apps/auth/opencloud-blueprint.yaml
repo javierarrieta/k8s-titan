@@ -54,19 +54,32 @@
 # authentik makes OpenCloud see a brand new account and the old one keeps its files. Renaming a user
 # after they have data is the thing to avoid.
 #
-# NOT DONE HERE, ON PURPOSE - AND THIS IS THE ONE OPEN QUESTION
-# Admin role assignment. PROXY_ROLE_ASSIGNMENT_DRIVER=oidc maps a claim onto the admin role, and the
-# default mapping (claim `roles`, value `opencloudAdmin`) needs no config file, because `role_mapping`
-# itself is config-file-only (services/proxy/pkg/config/config.go:160). But the claim has to reach
-# OpenCloud, and clients request a fixed scope list, so it needs a scope the clients do not ask for -
-# which means overriding WEB_OIDC_SCOPE and OC_OIDC_CLIENT_SCOPES and trusting webfinger to propagate
-# it to desktop and mobile. If the claim is absent or unmatched the proxy logs an error and
-# REFUSES THE LOGIN (docs: "the user will not be able to login"). That is the open-webui lockout
-# shape again, and opencloud-eu/opencloud#2886 is still open on exactly this.
+# NOT DONE YET - AND THE REASON IS SEQUENCING, NOT CAPABILITY
+# Admin role assignment from authentik groups works, and needs neither a new scope nor a config file.
+# The claim rides `profile`, which every client already requests: web via WEB_OIDC_SCOPE
+# (services/web/pkg/config/config.go:87, default "openid profile email") and Android/desktop/iOS via
+# webfinger's nativeAppScopes (services/webfinger/pkg/config/defaults/defaultconfig.go:11 and :60-66,
+# served as the http://opencloud.eu/ns/oidc/scopes property the desktop client reads at oauth.cpp:608).
+# The provider below already releases scope-profile, and authentik's built-in profile mapping is what
+# puts `groups` into the token. The claim-value-to-role mapping is already shipped
+# (services/proxy/pkg/config/defaults/defaultconfig.go:76-81), so `role_mapping` - which IS
+# config-file-only, services/proxy/pkg/config/config.go:160 - never has to be written.
 #
-# So the first deploy ships PROXY_ROLE_ASSIGNMENT_DRIVER=default: every user gets the plain `user`
-# role, nobody is locked out, and nobody is an administrator either. See
-# docs/opencloud-admin.md for how the first admin is granted, and what has not been proven about it.
+# An earlier version of this note claimed a new scope was required and that clients would not request
+# it. That was wrong, and it is the only reason this was parked.
+#
+# What still blocks the flip, and it is an ordering problem:
+#   - Absent or unmatched claim means the proxy REFUSES the login (services/proxy/pkg/userroles/
+#     oidcroles.go:86 and :106). There is no fallback role. So the groups at the bottom of this file
+#     must be POPULATED before the driver changes, or everyone is locked out. Same shape as the
+#     open-webui lockout recorded in this repo.
+#   - Assignments APPEND (services/settings/pkg/store/metadata/assignments.go:118) and the proxy only
+#     ever calls AssignRoleToUser, never RemoveRoleFromUser. Removing someone from opencloudAdmin does
+#     not demote them, it gives them two roles, and >1 role is a logged warning rather than a handled
+#     case (oidcroles.go:116). Granting from authentik works; revoking from authentik does not.
+#
+# So: apply the groups, join opencloudAdmin in the UI, then flip PROXY_ROLE_ASSIGNMENT_DRIVER in a
+# separate change. Never both in one apply. docs/opencloud-admin.md has the procedure.
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -169,3 +182,27 @@ data:
           meta_launch_url: https://files.titan.arrieta.eu/
           # The Application is not decoration - see blueprints-open-webui.yaml for the recorded
           # lesson: a provider with no owning Application is invisible to the consumer that needs it.
+
+      # Role mirroring needs groups whose NAMES are OpenCloud's claim values, because the shipped
+      # default mapping matches on those literal strings (services/proxy/pkg/config/defaults/
+      # defaultconfig.go:76-81) and `role_mapping` cannot be set by environment variable
+      # (services/proxy/pkg/config/config.go:160). Renaming these later means writing a proxy config
+      # file, not editing this blueprint. opencloudSpaceAdmin and opencloudGuest are the other two
+      # shipped claim values; they are not created here because nothing uses them yet.
+      #
+      # Created EMPTY on purpose, and joining is a deliberate act in the UI. With
+      # PROXY_ROLE_ASSIGNMENT_DRIVER=oidc a user in neither group cannot log in at all
+      # (services/proxy/pkg/userroles/oidcroles.go:86), so membership is the admission control rather
+      # than a label - which is exactly why the driver must not be flipped until these are populated.
+      - model: authentik_core.group
+        identifiers:
+          name: opencloudUser
+        state: present
+        attrs:
+          name: opencloudUser
+      - model: authentik_core.group
+        identifiers:
+          name: opencloudAdmin
+        state: present
+        attrs:
+          name: opencloudAdmin

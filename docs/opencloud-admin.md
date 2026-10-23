@@ -99,16 +99,77 @@ kept as the record of how that value was obtained and as the procedure for a sec
 
 ## What this does not do
 
-- **It grants one user.** The variable holds a single UUID. A second administrator needs a different
-  mechanism, and the candidate is the `roles` claim: `PROXY_ROLE_ASSIGNMENT_DRIVER=oidc` with the
-  default mapping (claim `roles`, value `opencloudAdmin` → admin), fed by an authentik property
-  mapping. Not wired, because with the `oidc` driver a user whose claim matches no mapping "will not
-  be able to login" and `role_mapping` is config-file-only so it cannot be widened by env
-  (`services/proxy/pkg/config/config.go:160`). That is the open-webui lockout shape. If a second admin
-  is ever needed, prove it on scratch first.
+- **It grants one user.** The variable holds a single UUID. The general mechanism is role mirroring from
+  authentik groups, documented in the next section — it is ready and deliberately not enabled.
 - **It is not a credential.** Nothing here rotates. Removing the UUID from git and reconciling revokes
   the grant on the next settings start — though note step 4 re-asserts *while the value is present*,
   so the revocation is the git revert, not the user's logout.
 - opencloud-eu/opencloud#2886 ("Admin role not assigned during OIDC autoprovision") is about the
   **claim** path, not this one. It being open is not evidence against the above, and it is not evidence
   for it either.
+
+## Role mirroring from authentik — ready, deliberately not enabled
+
+This is the mechanism for defining administrators in authentik instead of in OpenCloud. It works, every
+link is checked, and it is not switched on because of an ordering hazard and one real limitation.
+
+### The chain, link by link
+
+| link | evidence |
+|---|---|
+| authentik `profile` scope emits `groups` | built-in mapping, `request.user.ak_groups.all()` |
+| the OpenCloud provider releases `profile` | `apply/50-apps/auth/opencloud-blueprint.yaml`, `property_mappings` |
+| web requests `profile` | `WEB_OIDC_SCOPE` default `openid profile email`, `services/web/pkg/config/config.go:87` |
+| **Android, desktop and iOS request `profile`** | `nativeAppScopes`, `services/webfinger/pkg/config/defaults/defaultconfig.go:11` and `:60-66`, handed to clients as the `http://opencloud.eu/ns/oidc/scopes` webfinger property that the desktop reads at `oauth.cpp:608` |
+| claim value → OpenCloud role | shipped default `RolesMap`, `services/proxy/pkg/config/defaults/defaultconfig.go:76-81`: `opencloudAdmin`→admin, `opencloudSpaceAdmin`→spaceadmin, `opencloudUser`→user, `opencloudGuest`→user-light |
+
+So the switch is two env vars — `PROXY_ROLE_ASSIGNMENT_DRIVER=oidc` and
+`PROXY_ROLE_ASSIGNMENT_OIDC_CLAIM=groups` — plus authentik groups **named exactly as those claim
+values**. No scope change, and no config file: `role_mapping` is config-file-only
+(`services/proxy/pkg/config/config.go:160`) but its shipped default already covers the four standard
+roles, so it never needs writing. Naming the groups anything else is what would force a config file.
+
+An earlier draft of this doc, and of the blueprint header, claimed a new scope was needed and that
+clients would not request it. Both were wrong; `groups` rides a scope every client already asks for.
+
+### Procedure — the order is load-bearing
+
+1. **Apply the groups** (`opencloudUser`, `opencloudAdmin`, declared in the OpenCloud authentik
+   blueprint). They arrive empty.
+2. **Join `opencloudAdmin`** in the authentik UI. Do this before step 3, never after.
+3. **Only then flip the driver**, and in the same change set `OC_ADMIN_USER_ID` back to `""`. Leaving
+   both means settings re-asserts admin at every startup while the proxy asserts the claim role at
+   every login, so the effective role depends on which ran last.
+4. **Delete the stale assignment.** The grant from the procedure above is *data in the settings store*,
+   not config; clearing the env var does not remove the row.
+
+Never do steps 1 and 3 in one apply. With the `oidc` driver an absent or unmatched claim means the
+proxy refuses the login outright (`services/proxy/pkg/userroles/oidcroles.go:86` and `:106`) — there is
+no fallback role — so flipping the driver before anyone is in a group locks every account out.
+
+### The limitation that defines what this is good for
+
+```go
+// services/settings/pkg/store/metadata/assignments.go:118
+// WriteRoleAssignment appends the given role assignment to the existing assignments of the respective account.
+```
+
+Assignments **append**, and the proxy only ever calls `AssignRoleToUser` (`oidcroles.go:127`) — never
+`RemoveRoleFromUser`. So taking someone out of `opencloudAdmin` does not demote them; it leaves them
+holding two roles, and holding two roles is a logged warning rather than a handled case:
+
+```go
+if len(assignedRoles) > 1 {
+    logger.Error()...Msg("The user has too many roles assigned")   // oidcroles.go:116
+```
+
+Which of the two wins is not decided by anything in the code read here.
+
+**Granting from authentik works. Revoking from authentik does not.** Demotion stays a manual
+`RemoveRoleFromUser` call — the service method exists
+(`services/settings/pkg/service/v0/service.go:428`) and requires role-management permission; the exact
+HTTP route has not been verified here.
+
+That asymmetry is why this is parked. "Admin can be granted from the IdP but only revoked from
+OpenCloud" may or may not be the control plane you want, and it is a worse surprise than the one-line
+`OC_ADMIN_USER_ID` above.

@@ -339,11 +339,16 @@ spec:
               value: preferred_username
             - name: PROXY_USER_CS3_CLAIM
               value: username
-            # Safe default, and deliberately not the interesting one. `oidc` would map an authentik
-            # claim onto the admin role, but an unmatched or absent claim means the proxy refuses the
-            # login outright, and getting the claim to the proxy needs a scope the clients do not
-            # request by default. opencloud-eu/opencloud#2886 is still open on this. So: everyone gets
-            # the plain user role, nobody is locked out. See docs/opencloud-admin.md.
+            # Safe default, and the reason is ordering rather than capability. `oidc` would map an
+            # authentik group onto the admin role and the whole claim path is already in place - the
+            # groups are declared in apply/50-apps/auth/opencloud-blueprint.yaml, `groups` rides the
+            # `profile` scope that web, Android, desktop and iOS all already request, and the shipped
+            # default RolesMap does the value-to-role mapping with no config file. Two env vars would
+            # switch it on. docs/opencloud-admin.md has the chain, the procedure and the reason it is
+            # parked: with `oidc` an absent or unmatched claim REFUSES the login rather than falling
+            # back, so the groups must be populated first; and assignments append, so leaving a group
+            # grants a second role instead of revoking the first. Flip it only after joining
+            # opencloudAdmin, and never in the same apply as the groups.
             - name: PROXY_ROLE_ASSIGNMENT_DRIVER
               value: default
             - name: GRAPH_ASSIGN_DEFAULT_USER_ROLE
