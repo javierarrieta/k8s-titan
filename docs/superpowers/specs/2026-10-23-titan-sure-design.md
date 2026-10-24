@@ -245,6 +245,19 @@ the trial, so it must be settled before the trial is called a result.
    so the `reloader.stakater.com/auto` annotation goes there — an annotation on the
    HelmRelease itself would have been inert, which is the fifth instance of the
    defect `reloader.yaml` records.
+5. **The OIDC callback path is source-verified, and reading the wrong field would have got it right by
+   accident.** `config/initializers/omniauth.rb` calls `provider :openid_connect, oidc_options`, and
+   OmniAuth mounts at `/auth/<strategy>/callback` — the segment is the **strategy symbol**, not the
+   provider `name`. In `config/auth.yml` both happen to be `openid_connect`, so checking only the name
+   would have produced the correct path for the wrong reason and broken the day someone added a second
+   provider under a different name.
+
+   The same initializer hides a silent failure worth knowing before debugging a missing SSO button: if
+   `OIDC_ISSUER` / `CLIENT_ID` / `SECRET` are blank, `Oidc::ProviderOptionsBuilder` returns nothing, the
+   initializer logs `Skipping OIDC provider 'openid_connect' - missing required configuration` and
+   carries on. The app boots healthy with password login only. That is precisely what the
+   `existingSecret` gap in item 1 would have caused had those three not been named in `extraEnvVars`
+   — and `make sure-check` requires them.
 
 **Unrelated live finding on titan, noticed while checking CNPG:**
 `databaserole.coder` reports

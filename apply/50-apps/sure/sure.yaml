@@ -215,11 +215,20 @@ spec:
         ASSISTANT_MAX_TOOL_CALL_ITERATIONS: "3"
 
         # Sure reads OIDC_REDIRECT_URI from env; the chart's secret block only carries
-        # OIDC_CLIENT_ID / _SECRET / OIDC_ISSUER. The path is OmniAuth's
-        # match "/auth/:provider/callback" (config/routes.rb:355) with the openid_connect strategy
-        # (config/initializers/omniauth.rb), so the callback is /auth/openid_connect/callback.
-        # CONFIRM AT FIRST LOGIN: if authentik rejects a redirect_uri mismatch, this is the value to
-        # correct, in this file and in the blueprint together.
+        # OIDC_CLIENT_ID / _SECRET / OIDC_ISSUER (see the extraEnvVars note below - that is why all
+        # three are wired by hand here).
+        #
+        # The callback path is /auth/openid_connect/callback, verified at the layer that decides it:
+        # config/initializers/omniauth.rb calls `provider :openid_connect, oidc_options`, and OmniAuth
+        # mounts at /auth/<strategy>/callback - so the segment is the strategy symbol, not the provider
+        # `name`. Both happen to be "openid_connect" here (config/auth.yml:46-47), which is why reading
+        # only the name would have been luck rather than verification. Route: config/routes.rb:355.
+        #
+        # The related silent failure, worth knowing before debugging a missing SSO button: if
+        # OIDC_ISSUER / CLIENT_ID / SECRET are blank, ProviderOptionsBuilder returns nothing and the
+        # initializer logs "Skipping OIDC provider 'openid_connect' - missing required configuration"
+        # and carries on. The app boots healthy with password login only. That is exactly what the
+        # existingSecret gap would have caused had these three not been named in extraEnvVars.
         OIDC_ISSUER: "https://auth.titan.arrieta.eu/application/o/sure/"
         OIDC_REDIRECT_URI: "https://sure.titan.arrieta.eu/auth/openid_connect/callback"
 
