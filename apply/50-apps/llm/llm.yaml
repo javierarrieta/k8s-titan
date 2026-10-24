@@ -1,8 +1,13 @@
 # llm.titan.arrieta.eu — a second public front door for the LLM endpoint that has been
 # llm.v.arrieta.eu on the techdelivery VPS since 2026-03. This is a DUPLICATE, not a migration:
-# both clusters now serve the same backend with the same bearer token, and nothing here stops the
+# both clusters now serve the same backend and accept the same two keys, and nothing here stops the
 # VPS one. Design and the three accepted costs:
 # docs/superpowers/specs/2026-10-24-titan-llm-endpoint-design.md.
+#
+# THE CREDENTIAL IS A SET OF TWO LITERAL KEYS, not one string. Read the bearer-auth-nginx-config
+# comment near the bottom before touching the Secret: the value copied from the source repo is a
+# regex, `(keyA|keyB)`, and treating it as a literal token is what made the first version of this
+# file answer 401 to every client that had ever worked.
 #
 # WHAT IS BEHIND IT: halogen-flash on the llm01 box, 192.168.0.29:8731 — 8731 is that service's
 # own default port (halogen-flash-flake/nixos/module.nix), and the address is llm01's home-LAN
@@ -59,17 +64,18 @@ spec:
 # does it with a forwardAuth call to a throwaway nginx that answers 200 or 401. That is what this
 # duplicates, because "same key" means the same `Authorization` header has to work here too.
 #
-# EXCEPT THE ONE COMPARISON LINE, WHICH IS NOT COPIED VERBATIM. Same header, same token, different
-# operator: `~*` is a regex and the token is not a regex-safe string. Read the
+# NOT COPIED VERBATIM, IN TWO WAYS. Same header, same accepted keys, different operator and a
+# different Secret shape: the source compares with `~*`, a regex, and stores one string that IS a
+# regex. Here the two keys are two Secret keys and the compare is `=`. Read the
 # bearer-auth-nginx-config comment below before "restoring parity" with
-# ../k8s-techdelivery apply/20-infra/auth/bearer-auth-middleware.yaml, which is itself broken.
+# ../k8s-techdelivery apply/20-infra/auth/bearer-auth-middleware.yaml, whose regex is unanchored.
 #
 # THE ONE LINE THAT DECIDES WHETHER THE AUTH IS ON AT ALL is the annotation on the Ingress at the
 # bottom of this file. A router that references a middleware Traefik cannot resolve does not fail
 # closed: it serves the route unauthenticated. Same shape as grafana's note in
 # ../grafana/grafana.yaml, which calls its own middleware line the most important in its file.
 #
-# The token arrives as an env var from a Secret and is substituted into the nginx config at
+# Each token arrives as an env var from a Secret and is substituted into the nginx config at
 # container start by envsubst, so BOTH halves need a pod restart to take a rotation — the env var
 # because kubelet does not restart a pod when a Secret changes, and the config because it is
 # rendered once at start. That is what the reloader annotation below is for, and it is inert unless
@@ -128,18 +134,23 @@ spec:
           capabilities:
             drop: ["ALL"]
         env:
-        - name: BEARER_TOKEN
+        - name: BEARER_TOKEN_A
           valueFrom:
             secretKeyRef:
               name: llm-bearer-token
-              key: TOKEN
+              key: TOKEN_A
+        - name: BEARER_TOKEN_B
+          valueFrom:
+            secretKeyRef:
+              name: llm-bearer-token
+              key: TOKEN_B
         volumeMounts:
         - name: nginx-config
           mountPath: /etc/nginx/templates
         - name: nginx-entrypoint
           mountPath: /docker-entrypoint.d
         # Overrides the image's own entrypoint. envsubst is given an explicit variable list so it
-        # substitutes ONLY the token and leaves nginx's own $variables in the template alone —
+        # substitutes ONLY the two tokens and leaves nginx's own $variables in the template alone —
         # unbounded envsubst would eat $http_authorization.
         command: ["/bin/sh", "/docker-entrypoint.d/entrypoint.sh"]
         # tcpSocket, not httpGet, and the reason is the entire purpose of this container: every path
@@ -196,29 +207,44 @@ metadata:
 data:
   entrypoint.sh: |
     #!/bin/sh
-    envsubst '${BEARER_TOKEN}' < /etc/nginx/templates/default.conf.template > /etc/nginx/conf.d/default.conf
+    envsubst '${BEARER_TOKEN_A} ${BEARER_TOKEN_B}' < /etc/nginx/templates/default.conf.template > /etc/nginx/conf.d/default.conf
     exec nginx -g 'daemon off;'
 ---
-# The comparison itself, and the one line where this file deliberately does NOT match the source it
-# duplicates. The source has `~*`, a case-insensitive PCRE match with the token interpolated into the
-# pattern. The token is 137 characters and contains `(`, `)` and `|`, with the `|` between the parens
-# — so PCRE compiles an alternation group, the literal token is not one of the alternatives, and the
-# correct credential can never match its own pattern.
+# The comparison itself, and the reason the Secret holds TWO keys where the source has one string.
 #
-# Measured on the live source endpoint, not reasoned about: `Authorization: Bearer <exact token>` →
-# 401, while the same token with `( ) |` deleted → 200. So `llm.v.arrieta.eu` has been authenticating
-# a string that is in neither repo, and the recorded token has never authenticated anything. That is
-# the source's bug to fix, in its own change, once anyone knows what is holding the working string;
-# it is not a reason to ship a front door here that rejects its own credential.
+# The value this file first duplicated — one 137-character `TOKEN` — is not a bearer token. It is
+# `(sk_…67…|sk_…67…)`: a PCRE alternation group holding two real 67-character keys, both `sk_`-prefixed.
+# The source's `~*` compiles that as a group, so the source has always accepted either key and always
+# rejected its own literal value. Measured on both endpoints, 2026-10-24:
 #
-# `=` is a literal string compare, so every metacharacter in the token is inert and no rotation is
-# needed to make the recorded credential the real one. That is the whole reason to change the
-# operator rather than the token: the token was never the defect.
+#   | credential                | source `~*` | this file, first version (`=`) |
+#   |---------------------------|-------------|--------------------------------|
+#   | key A                     | `200`       | `401`                          |
+#   | key B                     | `200`       | `401`                          |
+#   | the 137-char `(A|B)` form | `401`       | `200`                          |
+#
+# The exact inverse. That first version read the metacharacters as an accident in the token and
+# "fixed" the operator, which closed the endpoint for every client that had ever worked: nobody sends
+# the wrapper, clients send one of the keys inside it.
+#
+# So the credential is a SET of two literal keys and the Secret now says so — `TOKEN_A` and `TOKEN_B`,
+# one key each, each compared with `=`. No regex is ever compiled out of a secret again, which was the
+# point of the original `=` change and is now actually true: the first version removed the regex while
+# still storing one.
+#
+# Both keys are in circulation and neither may be dropped until someone knows who holds it. Key A is
+# the one the operator's own client is configured with; key B is unattributed. A rotation replaces one
+# value here AND its counterpart in ../k8s-techdelivery apply/10-secrets/bearer-auth-token.yaml,
+# which still stores the alternation form — see spec §6.
 #
 # `=` is case-sensitive, so the scheme word must be exactly `Bearer`. Every OpenAI-style client sends
 # that. If one ever sends lowercase `bearer`, add a `map` with both spellings — legal in this file
 # because conf.d is included in the http context — rather than going back to a regex over a value
 # that contains regex metacharacters.
+#
+# What this file does NOT fix is the source's other defect: its `~*` is unanchored, so
+# `Authorization: Bearer <key> <anything after it>` returns `200` there. Measured. Anchoring is a
+# change in the other repo, and it is the one that can lock out whoever holds key B.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -229,7 +255,10 @@ data:
     server {
       listen 8080;
       location / {
-        if ($http_authorization = "Bearer ${BEARER_TOKEN}") {
+        if ($http_authorization = "Bearer ${BEARER_TOKEN_A}") {
+          return 200;
+        }
+        if ($http_authorization = "Bearer ${BEARER_TOKEN_B}") {
           return 200;
         }
         return 401;
