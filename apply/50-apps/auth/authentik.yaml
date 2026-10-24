@@ -89,6 +89,7 @@ spec:
         # blueprint that is never mounted is indistinguishable from one that was never written, and
         # the worker discovers these hourly plus at startup, so a mount added after a merge can sit
         # unapplied for up to an hour and look like it did not land.
+        - authentik-sure-blueprint
       # A ConfigMap, not a Secret: this blueprint carries no credential, so it gets the exposure that
       # matches — readable by anyone who can read the namespace, which is fine for a proxy provider
       # definition and would not be for coder's client_secret. The outpost it declares is the embedded
@@ -179,7 +180,7 @@ spec:
       #    mounted blueprints hourly plus at startup, so a blueprint edit would otherwise sit unread for
       #    up to an hour after a merge. That delay is what made PR #42's fix look like it had not landed.
       podAnnotations:
-        secret.reloader.stakater.com/reload: "authentik-secrets,authentik-coder-blueprint,authentik-google-blueprint,authentik-grafana-blueprint,authentik-open-webui-blueprint,authentik-observability-blueprint,authentik-mealie-blueprint"
+        secret.reloader.stakater.com/reload: "authentik-secrets,authentik-coder-blueprint,authentik-google-blueprint,authentik-grafana-blueprint,authentik-open-webui-blueprint,authentik-observability-blueprint,authentik-mealie-blueprint,authentik-sure-blueprint"
         # The Tesla blueprint arrives as a ConfigMap and needs the same treatment for the same reason:
         # kubelet rewrites the mounted file in place and the worker only discovers blueprints hourly
         # plus at startup, so an edit would otherwise sit unread for up to an hour after a merge.

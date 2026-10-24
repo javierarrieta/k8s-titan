@@ -103,6 +103,12 @@ kind: HelmRelease
 metadata:
   name: sure
   namespace: sure
+  annotations:
+    # `make sure-check` refuses ONBOARDING_STATE: open without this marker, so the window is a reviewed
+    # decision rather than a chart default that shipped. Spec §5.1: deploy open, create the one account,
+    # then commit the flip to closed AND delete this annotation in the same change. A stale marker is
+    # itself a failure - it teaches the next reader to ignore markers.
+    sure.titan.arrieta.eu/onboarding-window: "open-until-first-account"
 spec:
   interval: 30m
   timeout: 10m
