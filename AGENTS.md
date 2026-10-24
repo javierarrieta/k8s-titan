@@ -16,8 +16,9 @@ made and what was deliberately left out.
     apply/50-apps/          authentik with its declarative `Database`/`DatabaseRole` in
                             namespace `auth`, coder with its own, open-webui with its own in
                             namespace `open-webui`, grafana with its own in namespace
-                            `observability`, and any future app that passes the admission
-                            test below
+                            `observability`, the `llm` front door for the halogen endpoint on
+                            llm01 with its bearer token, and any future app that passes the
+                            admission test below
     apply/60-tesla/         TeslaMate with its own `Database`/`DatabaseRole`, Grafana and the
                             Tesla Fleet Telemetry intake, in namespace `apps`
 

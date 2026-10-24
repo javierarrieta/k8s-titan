@@ -1,0 +1,225 @@
+# llm.titan.arrieta.eu — a second public front door for the LLM endpoint that has been
+# llm.v.arrieta.eu on the techdelivery VPS since 2026-03. This is a DUPLICATE, not a migration:
+# both clusters now serve the same backend with the same bearer token, and nothing here stops the
+# VPS one. Design and the three accepted costs:
+# docs/superpowers/specs/2026-10-24-titan-llm-endpoint-design.md.
+#
+# WHAT IS BEHIND IT: halogen-flash on the llm01 box, 192.168.0.29:8731 — 8731 is that service's
+# own default port (halogen-flash-flake/nixos/module.nix), and the address is llm01's home-LAN
+# address, not a mesh one. llm01 is deliberately NOT a member of the 192.168.133.0/24 mesh
+# (nixos-configurations hosts/llm01/configuration.nix says so in its own words), so titan's only
+# path to it is the OPNsense WireGuard peer, whose allowedIPs carry 192.168.0.0/24. That peer is a
+# single point of failure for this hostname and is the reason the Service is an Endpoints-backed
+# one rather than a mesh name: there is no second path to fall back to.
+#
+# VERIFIED BEFORE WRITING, not assumed: `curl http://192.168.0.29:8731/health` from this cluster
+# returned 200 in 83 ms over that peer.
+---
+# A bare Endpoints with no selector, because the backend is a host outside the cluster. kube-proxy
+# will never populate this itself and nothing will ever overwrite it.
+#
+# v1 Endpoints is deprecated in favour of discovery.k8s.io/v1beta1/v1 EndpointSlice and kubectl says
+# so on every `get`. It is still the supported way to hand a Service a fixed address list, it is
+# what the source cluster has run for 221 days, and hand-authoring an EndpointSlice (the
+# `endpointslice.kubernetes.io/managed-by` label, the `kubernetes.io/service-name` link, the
+# per-slice port duplication) is more machinery for the same two facts. Kept for parity with
+# ../k8s-techdelivery apply/50-apps/apps/llm-chiclana.yaml, which is the file this duplicates.
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: llm01
+  namespace: llm
+subsets:
+  - addresses:
+      - ip: 192.168.0.29
+    ports:
+      - name: web
+        port: 8731
+---
+# No selector, on purpose: a selector would make kube-proxy ignore the Endpoints above and write an
+# empty one instead. Port 80 in, 8731 out, so the Ingress backend reads like every other Ingress in
+# this tree.
+apiVersion: v1
+kind: Service
+metadata:
+  name: llm01
+  namespace: llm
+spec:
+  ports:
+    - name: web
+      protocol: TCP
+      port: 80
+      targetPort: web
+---
+# The token check. Traefik has no native bearer-token matcher — basicAuth wants an htpasswd and a
+# `Basic` scheme, and the clients here send `Authorization: Bearer <token>` — so the source cluster
+# does it with a forwardAuth call to a throwaway nginx that answers 200 or 401. That is what this
+# duplicates, because "same key" means the same `Authorization` header has to work here too.
+#
+# THE ONE LINE THAT DECIDES WHETHER THE AUTH IS ON AT ALL is the annotation on the Ingress at the
+# bottom of this file. A router that references a middleware Traefik cannot resolve does not fail
+# closed: it serves the route unauthenticated. Same shape as grafana's note in
+# ../grafana/grafana.yaml, which calls its own middleware line the most important in its file.
+#
+# The token arrives as an env var from a Secret and is substituted into the nginx config at
+# container start by envsubst, so BOTH halves need a pod restart to take a rotation — the env var
+# because kubelet does not restart a pod when a Secret changes, and the config because it is
+# rendered once at start. That is what the reloader annotation below is for, and it is inert unless
+# `llm` is in apply/20-infra/reloader/reloader.yaml's namespace list. That list has bitten four
+# times already (promtail, open-webui, grafana, mealie — the comments there record each one).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bearer-auth-service
+  namespace: llm
+  annotations:
+    reloader.stakater.com/auto: "true"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: bearer-auth-service
+  template:
+    metadata:
+      labels:
+        app: bearer-auth-service
+    spec:
+      containers:
+      - name: bearer-auth-service
+        # Pinned to the digest the source cluster is running RIGHT NOW, read out of
+        # `kubectl --context vps -n auth get pod -l app=bearer-auth-service` rather than from the
+        # tag: the tag `nginx:1.31.6-alpine` has since been re-published and now resolves to
+        # sha256:df221db8..., so pinning the tag alone would have silently moved this to different
+        # bytes than the endpoint it duplicates. The digest below is verified still pullable.
+        #
+        # NOT the unprivileged variant that apply/60-tesla/wellknown.yaml uses, and that is a
+        # deliberate cost rather than an oversight: this container rewrites
+        # /etc/nginx/conf.d/default.conf at start, and the unprivileged image's layout for that
+        # was not verifiable from here. The root image is what this exact config has run on for 221
+        # days. Consequence: no pod-security `restricted` warn label on the `llm` namespace — see
+        # the note in apply/00-bootstrap/namespaces.yaml, and open-webui's precedent there for why
+        # a warn a workload can never satisfy is noise rather than a signal.
+        image: nginx:1.31.6-alpine@sha256:adad2ae9204d0fd7a34f40299bc838c3782be1293b10005eac4315ff5a1abf4e
+        ports:
+        - containerPort: 8080
+        env:
+        - name: BEARER_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: llm-bearer-token
+              key: TOKEN
+        volumeMounts:
+        - name: nginx-config
+          mountPath: /etc/nginx/templates
+        - name: nginx-entrypoint
+          mountPath: /docker-entrypoint.d
+        # Overrides the image's own entrypoint. envsubst is given an explicit variable list so it
+        # substitutes ONLY the token and leaves nginx's own $variables in the template alone —
+        # unbounded envsubst would eat $http_authorization.
+        command: ["/bin/sh", "/docker-entrypoint.d/entrypoint.sh"]
+        resources:
+          requests:
+            cpu: 50m
+            memory: 32Mi
+          limits:
+            cpu: 100m
+            memory: 64Mi
+      volumes:
+      - name: nginx-config
+        configMap:
+          name: bearer-auth-nginx-config
+      - name: nginx-entrypoint
+        configMap:
+          name: bearer-auth-nginx-entrypoint
+          defaultMode: 0755
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: bearer-auth-nginx-entrypoint
+  namespace: llm
+data:
+  entrypoint.sh: |
+    #!/bin/sh
+    envsubst '${BEARER_TOKEN}' < /etc/nginx/templates/default.conf.template > /etc/nginx/conf.d/default.conf
+    exec nginx -g 'daemon off;'
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: bearer-auth-nginx-config
+  namespace: llm
+data:
+  default.conf.template: |
+    server {
+      listen 8080;
+      location / {
+        if ($http_authorization ~* "Bearer ${BEARER_TOKEN}") {
+          return 200;
+        }
+        return 401;
+      }
+    }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: bearer-auth-service
+  namespace: llm
+spec:
+  selector:
+    app: bearer-auth-service
+  ports:
+  - port: 8080
+    targetPort: 8080
+---
+# Deliberately in `llm`, NOT in the Traefik namespace the way the source has it in
+# `traefik-system`. The source's own comment records that its cross-namespace reference
+# (`traefik-system-bearer-auth@kubernetescrd`) works only because Traefik's
+# `crossProviderNamespaces` is left unset, which is permissive by upstream default. On titan the
+# Traefik is k3s-bundled and its configuration is not managed in this repo at all, so that
+# permissiveness is not something this tree can prove — and the failure mode if it were ever
+# tightened is an unauthenticated LLM endpoint that still looks healthy.
+#
+# Same-namespace is provable from the tree and is already what this cluster does:
+# apply/50-apps/grafana/grafana.yaml references `observability-grafana-auth@kubernetescrd` from an
+# Ingress in `observability`. Note that the forwardAuth ADDRESS below still crosses a namespace by
+# plain URL, and grafana proves that works here too (its address is authentik's service in `auth`).
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: bearer-auth
+  namespace: llm
+spec:
+  forwardAuth:
+    address: http://bearer-auth-service.llm.svc.cluster.local:8080
+    trustForwardHeader: true
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: llm
+  namespace: llm
+  annotations:
+    traefik.ingress.kubernetes.io/router.middlewares: llm-bearer-auth@kubernetescrd
+spec:
+  ingressClassName: traefik
+  rules:
+  - host: llm.titan.arrieta.eu
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: llm01
+            port:
+              name: web
+  tls:
+  - hosts:
+    - llm.titan.arrieta.eu
+    # The cluster wildcard, reflected into `llm`. `*.titan.arrieta.eu` is one label deep, which is
+    # exactly the depth of `llm.titan` (RFC 6125 6.4.3), so no second Certificate is needed and
+    # none was added. Getting the Secret here is the reflector allow-list on
+    # apply/40-certificates/titan-wildcard.yaml — never a hand-copied Secret.
+    secretName: titan-tls
