@@ -101,6 +101,19 @@ file's own path, so the plaintext has to sit under `apply/10-secrets/` briefly),
   The first revision's claim that "the recorded credential has never authenticated anything" was true
   only of the wrapper and was read as a statement about the keys, and D9's premise that the
   metacharacters were accidental was false — they are the structure that makes the two keys work.
+
+  The last column was a prediction when PR #156 was opened and is now measured. Post-merge, against
+  the live titan endpoint at 17:48, six calls, all as wanted: key A `/health` `200`, key A `/v1/models`
+  `200` returning the real halogen payload, key B `/health` `200`, no header `401`, a nonsense token
+  `401`, the wrapper string `401`, and `http://` with a valid key `404`. It took about three minutes
+  for the `10m0s` Flux interval to pick the merge up, so a check run too early reads as still broken.
+  Not done, and still open: an actual completion on the model. `/v1/models` is a catalog read.
+
+  The last column was a prediction when PR #156 was opened and is now measured. Post-merge, against
+  the live titan endpoint at 17:48, six calls, all as wanted: key A `/health` `200`, key A `/v1/models`
+  `200` returning the real halogen payload, key B `/health` `200`, no header `401`, a nonsense token
+  `401`, the wrapper string `401`, and `http://` with a valid key `404`. It took about three minutes
+  for the `10m0s` Flux interval to pick the merge up, so a check run too early reads as still broken.
 - **The source has a second defect this file does not repeat, and does not fix either.** Its `~*` is
   unanchored, so `Authorization: Bearer <key> <anything after it>` returns `200` there; measured.
   Anchoring it is a change in the other repo and is the one that can lock out whoever holds key B.
