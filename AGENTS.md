@@ -114,6 +114,14 @@ the stream is rejected per-pod, silently, with promtail reporting healthy.
   fine and is silently never applied.
 - The cluster key is `titan-k8s`, not the titan host key. Do not "simplify" the two
   into one: the separation is what caps a pod compromise at titan's own secrets.
+- **sops matches creation rules against the path you hand it, not the path the output lands at.** So
+  `sops --encrypt /tmp/x.yaml > apply/10-secrets/y.yaml` dies with `no matching creation rules found`
+  *after* the shell redirect has already truncated `y.yaml` to zero bytes — the damage reads like the
+  encrypt failed, not like the redirect ate the file. Stage the plaintext inside `apply/10-secrets/`,
+  encrypt to a temp file, confirm it is non-empty, then move it into place. To change one key, the quiet
+  path is `sops set <file> '["stringData"]["KEY"]' --value-stdin` with the value JSON-encoded — file
+  before index, and `--value-file` errors with `Invalid set index format` in sops 3.13.3. Neither form
+  prints the secret, which is the point.
 - This repo is public. No credentials, and no concrete public IPv4 — write
   `<OVH_PUBLIC_IP>`.
 - Ingress class is k3s' bundled `traefik`, and its configuration is **not** managed
