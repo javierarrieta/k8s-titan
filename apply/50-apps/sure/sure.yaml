@@ -115,11 +115,34 @@ spec:
         ports:
         - name: redis
           containerPort: 6379
+        # Probed, because without a probe a hung Redis is never restarted and every failure shows up
+        # as a Sidekiq error that reads like an app problem. `make sure-check` requires the readiness
+        # probe to exist. Keyed on the reply rather than the exit code because `redis-cli -a` prints a
+        # warning to stderr and still exits 0.
+        #
+        # `$REDIS_PASSWORD` here is expanded by `sh` inside the container, NOT by kubelet: kubelet's
+        # `$(VAR)` expansion applies to command/args only, never to probe commands. The variable is in
+        # this container's env, so the shell sees it.
+        readinessProbe:
+          exec:
+            command: ["sh", "-c", "redis-cli -a \"$REDIS_PASSWORD\" ping 2>/dev/null | grep -q PONG"]
+          initialDelaySeconds: 5
+          periodSeconds: 10
+          timeoutSeconds: 3
+        livenessProbe:
+          exec:
+            command: ["sh", "-c", "redis-cli -a \"$REDIS_PASSWORD\" ping 2>/dev/null | grep -q PONG"]
+          initialDelaySeconds: 15
+          periodSeconds: 20
+          timeoutSeconds: 5
         resources:
           requests:
             cpu: 25m
             memory: 64Mi
           limits:
+            # cpu capped like tesla's redis: an unthrottled Redis on a single-node cluster takes the
+            # node from Rails, and Sidekiq backpressure is the cheaper failure.
+            cpu: 250m
             memory: 256Mi
 ---
 apiVersion: v1
@@ -147,7 +170,10 @@ metadata:
     # a reviewed statement rather than an implication. Sure's SSO JIT (AUTH_JIT_MODE=create_and_link,
     # which is Sure's default) creates a user and a family for any authentik identity that has no
     # Sure account yet. What narrows it:
-    #   - ALLOWED_OIDC_DOMAINS below - but it is gmail.com, so it filters nothing meaningful.
+    #   - ALLOWED_OIDC_DOMAINS below - and it is an EXCLUSIVE filter, not a no-op: a non-empty list
+    #     admits those domains and refuses every other authentik identity (app/models/auth_config.rb,
+    #     allowed_oidc_domain?). It therefore has to contain the domain of the identity that is
+    #     actually going to sign in, or the instance can never get its first user.
     #   - authentik enrolment. Measured in this repo: the Google source has NO enrollment_flow on
     #     purpose (authentik/blueprints-google.yaml:8,85 - "unknown Google identities are denied"),
     #     so Google cannot self-enrol. The DEFAULT authentik registration flow was measured closed to
@@ -162,6 +188,13 @@ metadata:
 spec:
   interval: 30m
   timeout: 10m
+  # Same as every other app/infra HelmRelease in this tree (coder, authentik, reloader, reflector,
+  # cert-manager, the CNPG operator, kube-state-metrics), and AGENTS.md states it as the convention.
+  # Notify-only: it does not correct drift, it makes drift visible in the HelmRelease status. Without
+  # it an out-of-band `kubectl edit` on this release's env block survives every later reconcile with
+  # nothing anywhere recording that it happened (AGENTS.md, "Live drift is not corrected here").
+  driftDetection:
+    mode: enabled
   # NO dependsOn, deliberately. The migrate Job cannot connect until CNPG has created the role, so
   # ordering looks desirable — but sure-db.yaml is applied by the same `apps` Kustomization as this
   # HelmRelease, and the only Kustomization that could be depended on (`databases`) does not own the
@@ -247,6 +280,9 @@ spec:
         OPENAI_URI_BASE: "http://192.168.0.29:8731/v1"
         OPENAI_MODEL: "halogen-qwen3.8-flash-next"
         OPENAI_SUPPORTS_PDF_PROCESSING: "false"
+        # Left unset, config/auth.yml defaults OIDC_BUTTON_LABEL to "" and the SSO button renders with
+        # no text at all - which reads as a broken login page rather than as a missing label.
+        OIDC_BUTTON_LABEL: "Sign in with authentik"
 
         # halogen-qwen3.8-flash-next is a REASONING model: it emits reasoning_content before
         # content, and reasoning tokens are charged against max_tokens. Measured: max_tokens=16
@@ -295,11 +331,36 @@ spec:
         # create_and_link is Sure's default and is what makes SSO signup work: an unknown authentik
         # identity gets a user + family. See the HelmRelease annotation for what actually bounds it.
         AUTH_JIT_MODE: "create_and_link"
-        # NOT a security boundary - it is a shared mailbox domain, so it admits every gmail address that
-        # can authenticate at authentik. Set anyway so non-gmail identities are refused, and so nobody
-        # later mistakes an empty value for a stricter default: empty means ALL domains are allowed
-        # (AuthConfig.allowed_oidc_domain? returns true when the list is empty).
-        ALLOWED_OIDC_DOMAINS: "gmail.com"
+        # THIS LIST IS EXCLUSIVE, AND IT HAS TO CONTAIN THE DOMAIN YOU WILL SIGN IN WITH.
+        # An earlier revision of this file called `gmail.com` a list that "filters nothing". That is
+        # backwards: AuthConfig.allowed_oidc_domain? (app/models/auth_config.rb, read at
+        # 0.7.6-alpha.9) returns true for everything only when the list is EMPTY; a non-empty list
+        # compares `email.split("@").last.downcase` against it and refuses a miss. With
+        # ONBOARDING_STATE closed above, JIT is the only door, and oidc_accounts_controller#create_user
+        # answers `account_creation_disabled` AFTER a fully successful authentik login - so a domain
+        # missing here means that identity can never have an account, while the app, the ingress, the
+        # OIDC exchange and every gate in this repo stay green.
+        #
+        # The value, and what each entry rests on:
+        #   gmail.com       - load-bearing. The identities in authentik are mostly gmail (operator,
+        #                     2026-10-25), so this is the domain the first account will be created from.
+        #   arrieta.eu      - "mostly" is not "all", and one non-gmail account is demonstrably real:
+        #                     `akadmin` (created at /if/flow/initial-setup/,
+        #                     docs/authentik-runbook.md:257) reached coder's user table as
+        #                     akadmin@arrieta.eu through the OIDC exchange
+        #                     (docs/superpowers/plans/2026-10-06-titan-coder.md:1237).
+        #   techdelivery.es - the other address this operator demonstrably holds (the ACME registration
+        #                     email, apply/20-infra/cert-manager/ovh-webhook.yaml:51).
+        #
+        # So the earlier single-value `gmail.com` would have let the primary identity in - the mistake
+        # was the reasoning, not only the value - but it refused every other authentik account, and at
+        # least one of those exists. Nothing here can enumerate the rest, which is why the list is the
+        # union and not a guess: the cost of an extra entry is bounded by authentik's enrolment policy
+        # (see the HelmRelease annotation, which is what actually decides who may authenticate at all),
+        # and the cost of a missing one is an identity that can never get through a door it can see.
+        # Acceptance item 9 in the spec (§8) records the identity that actually JIT-created; prune to
+        # what that names, and nothing further.
+        ALLOWED_OIDC_DOMAINS: "arrieta.eu,techdelivery.es,gmail.com"
         # Left at Sure's default (true) deliberately. With ONBOARDING_STATE closed nobody can create a
         # local account, and a JIT-created user has no password, so the only local door is one this
         # account could set for itself. Flipping it to false would make the instance SSO-only, and the
@@ -371,8 +432,10 @@ spec:
       enabled: false
 
     # NOT a pre-upgrade hook, whatever this comment said when the chart was assumed rather than read.
-    # templates/migrate-job.yaml:9 hardcodes `helm.sh/hook: post-install,post-upgrade` and the chart's own
-    # README says so in words: the Job runs AFTER the new pods are applied, because it has to wait for the
+    # templates/migrate-job.yaml:9 hardcodes `helm.sh/hook: post-install,post-upgrade` and the chart's
+    # README:483 says so in words (README:3 advertises "pre-upgrade migrations" in its feature list, so
+    # cite the line and not the file - the two halves of that README disagree). The Job runs AFTER the
+    # new pods are applied, because it has to wait for the
     # DB to exist before it can connect. So a failed migration does fail the release loudly, but it does
     # not prevent the new web pod from serving a request against a schema it has not migrated yet — that
     # window is seconds wide on a single replica and is the honest cost of this strategy.

@@ -211,6 +211,19 @@ reference-driven across both `HelmRelease` and `Deployment` env — including a 
 arrives through `envFrom` rather than a named `secretKeyRef` — so a tree with no references reports
 zero instead of passing vacuously.
 
+`sure-check` is that class one app further on, and it exists because every older gate is shape-bound in a
+way that misses Sure: `db-url-check` walks a `HelmRelease` env named `*PG_CONNECTION_URL` or a
+`Deployment`'s `DATABASE_URL`, and Sure is a `HelmRelease` carrying `DATABASE_URL`, so that gate reports
+zero references and passes. `sure-check` reads the `values` block instead and ties the OIDC client across
+blueprint, mount and `sure-secrets`, the DB password across both files that hold it, the Redis password
+across the two keys and the pod that reads them, and the chart defaults that fail silently at
+`health=ok` — including the one where `rails.existingSecret` makes the chart emit only `SECRET_KEY_BASE`
+and the three Active Record encryption keys, so anything else in that Secret has to be named in
+`rails.extraEnvVars` or the Secret has it, the pod does not, and the feature stays off at `health=ok`. Its
+honest limit is written in its docstring: it proves `ALLOWED_OIDC_DOMAINS` is non-empty and cannot prove
+it contains the domain of the identity that will sign in, and a non-empty list is exclusive — a miss
+refuses that identity after a successful IdP login, with every gate green.
+
 `make kustomize-listing` is in both, and it is not stylistic: `apply/50-apps/coder/coder-db.yaml` was
 committed, built green, reviewed green, and named by no kustomization, so Flux would never have
 applied it. A manifest nobody lists is a manifest that does not exist.

@@ -26,6 +26,8 @@ Things that must agree:
   4. apply/10-secrets/sure-secrets.yaml              - Sure's DATABASE_URL and OIDC client
   5. apply/10-secrets/sure-db-credentials.yaml       - CNPG's copy of the same password
   6. apply/50-apps/sure/sure-db.yaml                 - the Database and DatabaseRole they both point at
+  6b. apply/50-apps/sure/sure.yaml (plain objects)   - the PVC both workloads mount, and the hand-written
+                                                      sure-redis Deployment beside the HelmRelease
   7. apply/20-infra/reloader/reloader.yaml           - the namespace list that makes the reloader
                                                        annotation mean anything
   8. apply/40-certificates/titan-wildcard.yaml       - the Reflector allow-list that delivers titan-tls
@@ -45,14 +47,28 @@ thing bounding JIT is authentik's own enrolment policy. Each door is gated with 
 acknowledgement marker rather than a bare ban, so the permissive setting is always a reviewed statement
 rather than a default that shipped.
 
+WHAT THE GATE CANNOT PROVE ABOUT DOOR 2: that ALLOWED_OIDC_DOMAINS contains the domain of the identity
+that will actually sign in. A non-empty list is EXCLUSIVE (AuthConfig.allowed_oidc_domain? compares
+`email.split("@").last.downcase` and refuses a miss), so a list of the wrong domains refuses the only
+user there is - after a fully successful authentik login, with the app, the ingress, the OIDC exchange
+and this gate all green. The gate requires the list to be non-empty; acceptance item 9 of the design
+spec is what proves it contains the right thing.
+
 THE HAND-WRITTEN HALF IS CHECKED TOO, because no chart renders it. REDIS_URL must name the `sure-redis`
 Service this repo creates and must agree with the REDIS_PASSWORD that Service requires; sure-redis must
 start with --requirepass and runAsNonRoot, since there is no NetworkPolicy in this tree and an open
-Redis is a cluster-writable Sidekiq queue, which is an execution primitive. The two nested chart flags
-that decide whether the chart computes its own DATABASE_URL/REDIS_URL must stay false; migrations
-.strategy must be a value the chart actually acts on; and the chart version and the image tag must not
-drift apart. Every one of these was a measured hole in the first version of this file: mutating the tree
-in that way left the gate green.
+Redis is a cluster-writable Sidekiq queue, which is an execution primitive; and it must be probed, or a
+hung Redis reads as an app failure. The two nested chart flags that decide whether the chart computes
+its own DATABASE_URL/REDIS_URL must stay false; migrations.strategy must be a value the chart actually
+acts on; and the chart version and the image tag must not drift apart.
+
+THE PARTS NO CHART TOUCHES ARE CHECKED AS WELL: the PVC must exist, ask for ReadWriteOnce and carry the
+`local-path-retain` class this repo's own rule requires, and every extraVolumeMount has to name a
+volume extraVolumes actually declares; ingress.className must be the one class this cluster has;
+DATABASE_URL must connect as the `sure` role and not as the CNPG superuser; and property_mappings are
+matched on the structure they resolve to rather than on whether a substring appears somewhere in the
+list. Every one of these was a measured hole in an earlier version of this file: mutating the tree in
+that way left the gate green, which is the only evidence that counts.
 
 Fixtures may be plaintext; real secrets are sops-encrypted. A file that looks encrypted but does not
 decrypt is reported, never silently skipped.
@@ -81,6 +97,23 @@ JIT_MARKER = "sure.titan.arrieta.eu/sso-jit-boundary"
 # max_tokens=16 returned finish_reason=length with content:"" — a silent no-op in an auto-categorizer.
 MIN_RESPONSE_TOKENS = 1024
 PG_HOST = "postgres-rw.databases.svc.cluster.local"
+# The role Sure is meant to connect as: the owner of the `Database` this repo declares, and NOT the
+# CNPG `postgres` superuser. The password comparison below only proves the two copies of a password
+# agree, so without pinning the role a DATABASE_URL aimed at `postgres` passes with both copies
+# changed to match, and Sure quietly holds a superuser on the Cluster every other app shares.
+PG_USER = "sure"
+# The PVC the chart mounts at /rails/storage, and the class this repo's own rule requires: Retain is
+# the only deletion mitigation a PVC has here (apply/20-infra/storage-retain.yaml), and it is a
+# deletion mitigation and not a backup. Neither was checked when this file was first written.
+PVC_NAME = "sure-storage"
+STORAGE_CLASS = "local-path-retain"
+# k3s' bundled Traefik (AGENTS.md). A wrong class is not a typo you can see: the Ingress is created,
+# reports itself healthy, gets no address, and serves nothing, while the certificate and the OIDC
+# redirect URI both stay exactly as reviewed.
+INGRESS_CLASS = "traefik"
+# authentik's managed ScopeMapping objects, keyed on `managed` because display names are editable.
+SCOPE_MODEL = "authentik_providers_oauth2.scopemapping"
+SCOPE_PREFIX = "goauthentik.io/providers/oauth2/scope-"
 # The Service this repo hand-writes in apply/50-apps/sure/sure.yaml. The chart computes no REDIS_URL
 # here (redisSimple and redisOperator are both off), so nothing outside this file can see whether the
 # URL in the Secret actually names it.
@@ -92,6 +125,23 @@ def provider_of(entries, name="sure"):
         if e.get("model", "").endswith("oauth2provider") and e.get("identifiers", {}).get("name") == name:
             return e.get("attrs", {})
     return None
+
+
+def scope_refs(pms):
+    """The (key, value) pairs property_mappings actually resolves to.
+
+    load_tolerating_tags turns `!Find [model, [key, value]]` into a plain list, so a real entry is
+    ['!Find', 'authentik_providers_oauth2.scopemapping', ['managed', '...scope-email']]. Matching on
+    that structure is the point: the first version joined the list into one string and asked whether
+    'scope-email' appeared anywhere in it, so any mapping that merely contained that text satisfied
+    it - the same vacuity this file fixed for the reloader and Reflector list checks.
+    """
+    refs = []
+    for p in pms:
+        if (isinstance(p, (list, tuple)) and len(p) >= 3 and p[1] == SCOPE_MODEL
+                and isinstance(p[2], (list, tuple)) and len(p[2]) == 2):
+            refs.append((p[2][0], p[2][1]))
+    return refs
 
 
 def uri_urls(entry):
@@ -177,12 +227,18 @@ def main():
                     fail("the provider has no property_mappings, so no scope is grantable and the id_token "
                          "carries no email")
                 else:
-                    joined = " ".join(str(p) for p in pms)
-                    for need in ("scope-openid", "scope-email", "scope-profile"):
-                        if need not in joined:
-                            fail(f"property_mappings is missing {need}. Sure requests openid email profile "
+                    refs = scope_refs(pms)
+                    if len(refs) != len(pms):
+                        fail(f"{len(pms) - len(refs)} property_mappings entries are not a "
+                             f"!Find/!Get of {SCOPE_MODEL}. A bare string or a mapping of another model "
+                             "(the first draft used the LDAP one) passes YAML and fails the import")
+                    for need in ("openid", "email", "profile"):
+                        if ("managed", SCOPE_PREFIX + need) not in refs:
+                            fail(f"property_mappings does not resolve the managed scope {SCOPE_PREFIX + need}. "
+                                 "Sure requests openid email profile "
                                  "(app/models/oidc/provider_options_builder.rb:5) and a scope with no "
-                                 "mapping is a scope that cannot be granted")
+                                 "mapping is a scope that cannot be granted. Key on `managed`, never on "
+                                 "the display name: names are editable and localisable")
                 for field, why in (("signing_key",
                                     "without it authentik signs the id_token with HS256 using the "
                                     "client_secret (providers/oauth2/models.py:358-359) and the first real "
@@ -335,10 +391,22 @@ def main():
                  "max_tokens; too small a budget returns finish_reason=length with content empty, "
                  "which an auto-categorizer reads as 'nothing to do'")
 
-        # Storage: mounted, at the path upstream uses, on both workloads.
+        # Storage: mounted, at the path upstream uses, on both workloads, and the volume the mount
+        # names has to exist and point at the PVC this repo declares. Checking only the mount is what
+        # let a tree with no extraVolumes at all - and no PVC object anywhere - print a success line.
         for workload in ("web", "worker"):
             wl = values.get(workload) or {}
             mounts = [(m.get("name"), m.get("mountPath")) for m in (wl.get("extraVolumeMounts") or [])]
+            vols = {v.get("name"): (v.get("persistentVolumeClaim") or {}).get("claimName")
+                    for v in (wl.get("extraVolumes") or [])}
+            for vname, mpath in mounts:
+                if vname not in vols:
+                    fail(f"{workload}.extraVolumeMounts names volume {vname!r}, which {workload}."
+                         "extraVolumes does not declare - the API server rejects the pod and the "
+                         "rollout never starts")
+                elif mpath == "/rails/storage" and vols[vname] != PVC_NAME:
+                    fail(f"{workload} mounts /rails/storage from a claim named {vols[vname]!r}, not "
+                         f"{PVC_NAME!r} - the PVC this repo creates, with the Retain policy")
             if ("/rails/storage" not in [m[1] for m in mounts]):
                 fail(f"{workload}.extraVolumeMounts does not mount /rails/storage - uploads land in "
                      "the container's ephemeral filesystem and vanish on the next pod, and nothing "
@@ -390,7 +458,30 @@ def main():
                  "upstream release pinned in two places. Drop the tag (the chart defaults it to "
                  "Chart.AppVersion) or move both together.")
 
+        pvc = find(docs, "PersistentVolumeClaim", PVC_NAME, "sure")
+        if pvc is None:
+            fail(f"no PersistentVolumeClaim {PVC_NAME} in namespace sure, which is what both workloads "
+                 "mount at /rails/storage - the pods sit Pending forever and the release can still "
+                 "report Ready")
+        else:
+            pspec = pvc.get("spec") or {}
+            if pspec.get("storageClassName") != STORAGE_CLASS:
+                fail(f"{PVC_NAME} uses storageClass {pspec.get('storageClassName')!r}, not "
+                     f"{STORAGE_CLASS!r}. Retain is the only deletion mitigation a PVC has in this "
+                     "cluster (apply/20-infra/storage-retain.yaml); the default class deletes the "
+                     "directory with the claim, and the attachments in it are not backed up")
+            if "ReadWriteOnce" not in (pspec.get("accessModes") or []):
+                fail(f"{PVC_NAME} does not request ReadWriteOnce - both workloads mount it on one node")
+            if not ((pspec.get("resources") or {}).get("requests") or {}).get("storage"):
+                fail(f"{PVC_NAME} requests no storage - local-path provisions thin, but it still needs "
+                     "a size to reserve")
+
         ing = values.get("ingress") or {}
+        if ing.get("className") != INGRESS_CLASS:
+            fail(f"ingress.className is {ing.get('className')!r}, not {INGRESS_CLASS!r} - k3s' bundled "
+                 "Traefik is the only Ingress class here, so any other value leaves the Ingress created, "
+                 "addressless and serving nothing while the certificate and the OIDC redirect URI all "
+                 "still read as reviewed")
         hosts = [h.get("host") for h in (ing.get("hosts") or [])]
         if hosts != [HOST]:
             fail(f"ingress serves {hosts}, expected ['{HOST}'] - the OIDC redirect URI and the wildcard "
@@ -412,6 +503,11 @@ def main():
             fail("sure-secrets has no DATABASE_URL")
         else:
             u = urllib.parse.urlparse(db_url)
+            if urllib.parse.unquote(u.username or "") != PG_USER:
+                fail(f"DATABASE_URL connects as {urllib.parse.unquote(u.username or '')!r}, not "
+                     f"{PG_USER!r} - the owner of the `Database` declared in sure-db.yaml. Connecting "
+                     "as the CNPG superuser passes every password check and hands one app full write "
+                     "access to the Cluster every other app here shares")
             if u.hostname != PG_HOST:
                 fail(f"DATABASE_URL points at {u.hostname!r}, expected {PG_HOST!r} - the read-write "
                      "service of the shared Cluster in namespace databases")
@@ -524,7 +620,12 @@ def main():
             fail("sure-redis has no pod securityContext runAsNonRoot. The redis image config sets no "
                  "User at all, so the container runs as root; apply/60-tesla/redis.yaml:28-38 is the "
                  "file that records why naming the uid is the only thing that actually works")
-        rargs = " ".join(str(a) for a in (((rspec.get("containers") or [{}])[0]).get("args") or []))
+        rcont = (rspec.get("containers") or [{}])[0]
+        if not rcont.get("readinessProbe"):
+            fail("sure-redis has no readinessProbe. A hung Redis is never restarted, and every failure "
+                 "then surfaces as a Sidekiq error that reads like an app problem - the same "
+                 "silent-at-health-ok shape as every other check in this file")
+        rargs = " ".join(str(a) for a in (rcont.get("args") or []))
         if "--requirepass" not in rargs:
             fail("sure-redis starts without --requirepass. There is no NetworkPolicy anywhere in this "
                  "tree, so an open Redis is writable from every pod in the cluster, and a Sidekiq queue "

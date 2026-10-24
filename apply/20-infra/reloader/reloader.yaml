@@ -117,7 +117,8 @@ spec:
         # explaining a requirement is not the requirement. Found while merging #153, and fixed here
         # rather than left for a follow-up because a rotated bearer token currently does NOT restart
         # the forwardAuth nginx: every llm route keeps answering with the stale credential while
-        # reporting healthy. Cherry-pick this one to main if #153 stalls.
+        # reporting healthy. This fix is already its own commit on the #153 branch (8eb1bd2), so it can
+        # be cherry-picked to main without waiting for that PR to land.
         - llm
         # Sure. Sixth instance of the same defect: the chart's web and worker pod templates carry
         # `reloader.stakater.com/auto: "true"` (the chart exposes no workload-metadata annotation,

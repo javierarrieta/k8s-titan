@@ -577,11 +577,15 @@ mealie-check:
 # is a HelmRelease carrying DATABASE_URL, so that gate reports zero references and passes vacuously.
 # `crd-check` walks vendored CRDs and `namespace-check` walks namespaces; neither looks inside a
 # HelmRelease values block, which is where all of Sure's configuration lives. So this gate reads the
-# values directly: the OIDC client across blueprint/Secret/mount, DATABASE_URL against CNPG's copy, and
-# the chart defaults that fail silently — existingSecret not wiring OPENAI_ACCESS_TOKEN, /rails/storage
-# not mounted, Reloader reading only podAnnotations, the subcharts that must stay off, and the
-# reasoning-model token budget. ONBOARDING_STATE is checked with an acknowledgement marker rather than
-# a bare ban, because the documented bring-up sequence needs it open for exactly one reconcile.
+# values directly: the OIDC client across blueprint/Secret/mount, DATABASE_URL against CNPG's copy and
+# against the `sure` role rather than the CNPG superuser, and the chart defaults that fail silently —
+# existingSecret not wiring OPENAI_ACCESS_TOKEN, /rails/storage not mounted or mounted from a volume or
+# a claim that does not exist, the PVC left on the deleting storage class, a wrong ingress className, a
+# Redis with no --requirepass or no probe, Reloader reading only podAnnotations, the subcharts that must
+# stay off, and the reasoning-model token budget. ONBOARDING_STATE is checked with an acknowledgement
+# marker rather than a bare ban, because the documented bring-up sequence needs it open for exactly one
+# reconcile. Its honest limit is in its docstring: it proves ALLOWED_OIDC_DOMAINS is non-empty and cannot
+# prove it names the domain of the identity that will sign in — and a non-empty list is exclusive.
 # Reads Secrets, so a local gate, not a CI one.
 sure-check:
 	@python3 tools/sure-check.py --root apply

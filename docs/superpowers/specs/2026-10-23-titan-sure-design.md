@@ -1,7 +1,10 @@
 # Sure on titan — design
 
 - **Status:** implemented in `apply/`, **not yet applied to the cluster**. Reviewed 2026-10-24 against
-  the rendered chart; the corrections from that review are recorded in §10 items 9-12.
+  the rendered chart; the corrections from that review are recorded in §10 items 9-12. Reviewed again
+  2026-10-25 against the live authentik evidence and by mutating a copy of the tree against
+  `sure-check`; that round is §10 items 13-17, and item 13 is the one that decides whether the trial
+  can start at all.
 - **Date:** 2026-10-23
 - **App:** [Sure](https://github.com/we-promise/sure) — community fork of the archived
   Maybe Finance. Chart `sure-0.7.6-alpha.9`, image `ghcr.io/we-promise/sure`.
@@ -72,7 +75,8 @@ is inert without it), and the Reflector destination for `titan-tls`.
 | `DATABASE_URL` / `REDIS_URL` | via `rails.extraEnvVars` with `secretKeyRef` | `extraEnvVars` takes full `EnvVar` objects, so the password stays in a Secret instead of in a committed values block. **Not** because naming them suppresses the chart-computed URLs — an earlier row here claimed that and was wrong. `templates/_env.tpl` skips its own URL only when the key is in the `rails.extraEnv` *map* (`hasKey`); the chart computes nothing here because `cnpg.cluster.enabled` and both Redis paths are off. Verified by rendering: 28 env entries, no duplicates. `sure-check` pins all three of those flags off. |
 | `image.tag` | `0.7.6-alpha.9`, pinned | Never `stable`. This is pre-1.0 software: `v0.7.6-alpha.9` was published the day this was written and there are 769 open issues. Upgrades are a deliberate commit, not a tag that moves. Pinned twice — chart `version` and `image.tag` — so `sure-check` fails if the two drift. |
 | `migrations.strategy` | `job` | **post-install/post-upgrade, not pre-upgrade** (`templates/migrate-job.yaml:9`, and the chart README says so in words). A failed migration fails the release loudly, but it does not stop the new web pod serving a schema it has not migrated. `initContainer` closes that window for the web pod only, and adds a first-boot dependency on a rake task never observed running here; see §10 item 9. |
-| PVC | `local-path-retain` | Same reasoning as mealie: `Retain` is the only deletion mitigation here, and it is a deletion mitigation, **not** a backup. |
+| PVC | `local-path-retain` | Same reasoning as mealie: `Retain` is the only deletion mitigation here, and it is a deletion mitigation, **not** a backup. `sure-check` pins the class, the `ReadWriteOnce` access mode and the existence of the claim both workloads mount. |
+| `driftDetection.mode` | `enabled` | Every other app and infra `HelmRelease` in this tree sets it and AGENTS.md states it as the convention. Notify-only: it makes live drift visible in the release status, it does not correct it. Without it an out-of-band `kubectl edit` on a 28-entry env block is unrecorded as well as uncorrected. |
 
 ## 4. What is backed up and what is not
 
@@ -104,6 +108,7 @@ first:
 | --- | --- | --- |
 | local email+password registration page | `ONBOARDING_STATE` | `registrations_controller.rb:119-121` |
 | SSO account creation (JIT) | `AUTH_JIT_MODE`, `ALLOWED_OIDC_DOMAINS` | `oidc_accounts_controller.rb:24,119` — never reads `onboarding_state` |
+| a pending `Invitation` | nothing — it bypasses both JIT mode and the domain list | `oidc_accounts_controller#create_user`: `invitation.present? || (!jit_link_only? && allowed_oidc_domain?(email))` |
 
 `AUTH_JIT_MODE` defaults to `create_and_link` (`config/auth.yml`): an authentik
 identity with no Sure account is sent to `oidc_accounts#new_user` and creates
@@ -113,10 +118,18 @@ birth, and the instance is never reachable in a state where the first visitor wi
 it. Upstream's docker.md step 5a assumes a local first account; with OIDC
 configured that step is unnecessary.
 
-**What actually bounds JIT is authentik's enrolment policy, not the domain list.**
-`ALLOWED_OIDC_DOMAINS` is `gmail.com` here, which filters nothing; and empty means
-*all* domains, not none (`AuthConfig.allowed_oidc_domain?` returns true when the
-list is empty). Evidence from this repo: the Google source deliberately has **no
+**What actually bounds JIT is authentik's enrolment policy, and the domain list is an exclusive
+filter, not a no-op.** This section used to say `ALLOWED_OIDC_DOMAINS=gmail.com` "filters nothing".
+That is backwards and it was the round-3 blocker (§10 item 13):
+`AuthConfig.allowed_oidc_domain?` returns true for everything **only when the list is empty**; a
+non-empty list compares `email.split("@").last.downcase` against it and refuses a miss. So the list
+has to contain the domain of the identity that is actually going to sign in, or — with
+`ONBOARDING_STATE: closed` — nobody can ever get a first account, after a fully successful authentik
+login, with every check in this repo green. It is now `arrieta.eu,techdelivery.es,gmail.com` —
+`gmail.com` because the identities in authentik are mostly gmail (operator, 2026-10-25), the other two
+because "mostly" is not "all". §10 item 13 has the evidence and what the review got wrong.
+
+Evidence that the enrolment side is closed, from this repo: the Google source deliberately has **no
 `enrollment_flow`** (`authentik/blueprints-google.yaml:8,85` — "unknown Google
 identities are denied"), so Google cannot self-enrol.
 
@@ -358,6 +371,87 @@ number is referenced from `apply/50-apps/sure/sure.yaml` and from the commit mes
     records for the blueprint: a gate written from a reading of the chart, never run against a broken
     tree, is a gate that reports what its author expected.
 
+13. **`ALLOWED_OIDC_DOMAINS` was justified by reasoning that is backwards, and a single-domain list
+    refuses every account that is not that domain.** Found 2026-10-25 in the third review round. The
+    value had been justified as a filter that "filters nothing"; read against the source it is the
+    opposite — `AuthConfig.allowed_oidc_domain?` (app/models/auth_config.rb, read at `0.7.6-alpha.9`)
+    is permissive only when the list is **empty**, and otherwise compares the email's domain against the
+    list. With `ONBOARDING_STATE: closed`, JIT is the only door, and
+    `oidc_accounts_controller#create_user` answers `account_creation_disabled` *after* a completely
+    successful authentik login: app healthy, ingress healthy, OIDC exchange healthy, `make check` green.
+
+    **The review's own overstatement, kept so the correction is on the record.** The first write-up of
+    this item said the trial "could not have started". That was inferred from the only identity
+    *git* can evidence and it was wrong about the primary case: the identities in authentik are mostly
+    `gmail.com` (operator, 2026-10-25), so `gmail.com` alone would have let the first account through.
+    What the single value really did was refuse every non-gmail authentik account — and at least one of
+    those exists: `akadmin` (created at `/if/flow/initial-setup/`, `docs/authentik-runbook.md:257`)
+    reached coder's user table as `akadmin@arrieta.eu` through the OIDC exchange
+    (`docs/superpowers/plans/2026-10-06-titan-coder.md:1237`). The defect is the inverted reasoning and
+    the silent failure mode, not a guaranteed lockout.
+
+    The value is now `arrieta.eu,techdelivery.es,gmail.com`:
+
+    - `gmail.com` — **load-bearing.** The domain the first account will most likely be created from
+      (operator, 2026-10-25).
+    - `arrieta.eu` — evidenced above; "mostly gmail" is not "all gmail".
+    - `techdelivery.es` — the other address this operator demonstrably holds
+      (`apply/20-infra/cert-manager/ovh-webhook.yaml:51`).
+
+    Nothing here can enumerate the remaining accounts, which is why the list is a union rather than a
+    guess: an extra entry costs nothing that authentik's enrolment policy has not already decided —
+    that policy, not this list, is what decides who may authenticate at all — while a missing entry
+    silently denies an identity a door it can plainly see. Acceptance item 9 records the identity that
+    actually JIT-created; prune to what it names and no further.
+
+    **What could not be measured, and why.** The live check is one SQL query against authentik's
+    `core_user` (`select split_part(email,'@',2), count(*) from authentik_core.core_user group by 1`),
+    and it was attempted: the `titan` kubectl context in these workspaces is the read-only
+    `k8s-reader` identity, which is Forbidden for `pods/exec` in `databases` and cannot read Secrets,
+    so the query did not run. That is an auth state, not a missing table. The domain mix above is
+    therefore **operator-stated, not measured** — from git or from the running IdP — and acceptance
+    item 9 is what turns it into a fact.
+
+14. **`sure-check` had four more holes, each again proven by mutating a copy of the tree and watching
+    it stay green** — the same method §10 item 12 records, applied to that fix itself:
+
+    | mutation | old gate | now |
+    | --- | --- | --- |
+    | `ingress.className: traefik` → `nginx` | green | fails — the only Ingress class here is k3s' Traefik; a wrong class leaves the Ingress created, addressless and serving nothing |
+    | PVC `storageClassName: local-path-retain` → `local-path` | green | fails — Retain is the only deletion mitigation a PVC has here, and the attachments are not backed up |
+    | delete `web.extraVolumes`, leave the mount | green | fails — every mount must name a declared volume |
+    | delete the `PersistentVolumeClaim` object | green | fails — pods sit `Pending` forever while the release reports Ready |
+    | a `property_mappings` entry renamed to contain `scope-email` | green | fails — the check matched a substring of a joined string; it now matches the `!Find` structure and the `managed` value |
+    | `DATABASE_URL` aimed at the CNPG `postgres` superuser | green | fails — the password checks only prove two copies agree, so the role is now pinned to the `Database` owner |
+    | remove the Redis probes | green | fails — see item 16 |
+
+    The lesson did not need restating and is restated anyway: a check written from a reading of the
+    tree, never broken on purpose, reports what its author expected to find.
+
+15. **Sure set no `driftDetection`, while every other app and infra `HelmRelease` in this tree does**
+    (coder, authentik, reloader, reflector, cert-manager, the CNPG operator, kube-state-metrics), and
+    AGENTS.md states it as the convention. Notify-only, so the cost of omitting it is that an
+    out-of-band `kubectl edit` on a 28-entry env block is not merely uncorrected but unrecorded.
+
+16. **The hand-written Redis had no probes and no CPU limit.** A hung Redis is never restarted and
+    every failure then arrives as a Sidekiq error that reads like an app problem — the same
+    silent-at-`health=ok` shape as everything else in `sure-check`, in the one component this file
+    argues is an execution primitive. Probed with `redis-cli -a "$REDIS_PASSWORD" ping` keyed on the
+    reply, not the exit code, and `$REDIS_PASSWORD` there is expanded by `sh` inside the container:
+    kubelet's `$(VAR)` expansion covers `command`/`args` and **not** probe commands. CPU capped at
+    250m like tesla's redis.
+
+17. **Two paths and two credentials now reach the same model endpoint, and nothing gates the second
+    one.** `OPENAI_URI_BASE` points straight at `192.168.0.29:8731`, which is the same backend titan's
+    own `llm` front door already fronts through the Endpoints-backed `llm01.llm.svc`
+    (`apply/50-apps/llm/llm.yaml:35-60`). The token in `sure-secrets` is neither of
+    `llm-bearer-token`'s keys (31 chars against 92), so a halogen-token rotation leaves AI off at
+    `health=ok` and no gate in this repo notices — the exact class `db-url-check` and `oidc-check`
+    exist to prevent. **Left as an open question, not changed:** the alternative is
+    `http://llm01.llm.svc.cluster.local/v1` plus the already-reviewed front-door token, which removes
+    a credential and a path. Whoever applies this should either make that switch or record here why
+    the direct path is preferred.
+
 **Unrelated live finding on titan, noticed while checking CNPG:**
 `databaserole.coder` reports
 `secrets "coder-db-credentials" is forbidden: User
@@ -374,11 +468,18 @@ password Secret is a rotation waiting to fail.
 
 - `sure-check` — the gate that can see inside a `HelmRelease`. It ties the OIDC client across the
   blueprint Secret, its mount on the authentik `HelmRelease`, and Sure's own copy in `sure-secrets`;
-  `OIDC_REDIRECT_URI` to the blueprint's `redirect_uris` and `OIDC_ISSUER` to `issuer_mode`;
-  `DATABASE_URL` to CNPG's copy of the password and to the `Database`/`DatabaseRole`; `REDIS_URL` to
-  the hand-written `sure-redis` Service and to the `REDIS_PASSWORD` that Service requires; and the
-  chart defaults that fail silently at `health=ok`. It does **not** involve `BASE_URL` — an earlier
+  `OIDC_REDIRECT_URI` to the blueprint's `redirect_uris` and `OIDC_ISSUER` to `issuer_mode`; the
+  blueprint's `property_mappings` to the managed `scopemapping` objects they have to resolve to (by
+  structure, not by substring); `DATABASE_URL` to CNPG's copy of the password, to the
+  `Database`/`DatabaseRole`, and to the `sure` role rather than the CNPG superuser; `REDIS_URL` to the
+  hand-written `sure-redis` Service, to the `REDIS_PASSWORD` that Service requires, and to that pod
+  actually being probed; the PVC both workloads mount, its Retain class and the volumes behind every
+  mount; `ingress.className` to the one class this cluster has; and the chart defaults that fail
+  silently at `health=ok`. Each of those was proven non-vacuous by mutating a copy of the tree
+  (§10 items 12 and 14). It does **not** involve `BASE_URL` — an earlier
   draft of this section said so, and nothing in the app, the chart or the gate uses that variable.
+  What it cannot prove is recorded in its own docstring: that `ALLOWED_OIDC_DOMAINS` contains the
+  domain of the identity that will sign in (acceptance item 9).
 - `db-url-check` cannot see Sure at all (see §10 item 2), which is the reason `sure-check` exists.
 - `namespace-check`, `kustomize-listing`, `secrets-placement`, `crd-check`,
   `leak-check` all apply unchanged.
@@ -403,6 +504,15 @@ password Secret is a rotation waiting to fail.
    included in the next scheduled run.
 8. Redis actually requires the password: `kubectl -n sure exec deploy/sure-redis -- redis-cli ping`
    returns `NOAUTH Authentication required` with no credentials, and `PONG` with them.
+9. **The identity that signs in has a domain in `ALLOWED_OIDC_DOMAINS`, and that identity is named
+   here afterwards.** This is the acceptance step no offline gate can stand in for (§10 item 13):
+   `sure-check` proves the list is non-empty, never that it contains the right domain, and a miss
+   refuses the user *after* authentik has said yes. Record the username and domain once the first JIT
+   account exists, then prune the list to what is real — the domain mix is currently operator-stated
+   ("mostly gmail", 2026-10-25), not measured.
+10. The Redis readiness probe passes (`kubectl -n sure get pod -l app=sure-redis -o jsonpath=
+    '{.items[*].status.conditions[?(@.type=="Ready")].status}'` is `True`), and removing `--requirepass`
+    makes it fail rather than silently passing an open Redis.
 
 ## 9. Explicitly out of scope
 
