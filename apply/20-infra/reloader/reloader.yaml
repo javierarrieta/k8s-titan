@@ -111,3 +111,10 @@ spec:
         # token sits unread in a running pod — Traefik keeps asking a forwardAuth server that is
         # still matching the OLD token, and every route stays up and keeps answering 200 or 401 with
         # the stale credential. `watchGlobally: false` means this list is the whole scope.
+        #
+        # The entry itself was missing on main: PR #155 landed the comment above and not the list item,
+        # which is the same defect this repo records for the authentik blueprint mount — a comment
+        # explaining a requirement is not the requirement. Until it is applied, a rotated bearer token
+        # does NOT restart the forwardAuth nginx: every llm route keeps answering with the stale
+        # credential while reporting healthy.
+        - llm
