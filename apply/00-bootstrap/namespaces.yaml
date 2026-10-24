@@ -192,16 +192,20 @@ metadata:
 # the bearer-token check, and the model itself runs on another host. That is why the description
 # names the hostname rather than a product.
 #
-# NO pod-security label, deliberately, and for the reason open-webui records above rather than the
-# reason files does: the bearer-auth container is the root nginx image, because it rewrites
-# /etc/nginx/conf.d at start. A `restricted` warn on a workload that can never satisfy it is a
-# signal that reads better than it is. See apply/50-apps/llm/llm.yaml.
+# `restricted` warn, because the single pod in here can actually satisfy it: the bearer-auth container
+# is nginxinc/nginx-unprivileged at uid 101 with allowPrivilegeEscalation false, every capability
+# dropped and RuntimeDefault seccomp — the same shape apply/60-tesla/wellknown.yaml runs. That makes
+# this the observability case rather than the open-webui or files case: a warn the workload meets is a
+# signal, and one it can never meet is noise. If the image ever goes back to root nginx, this label is
+# the thing that has to come off, not the pod's securityContext.
 apiVersion: v1
 kind: Namespace
 metadata:
   name: llm
   labels:
     name: llm
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: latest
   annotations:
     kubernetes.io/metadata.name: llm
     kubernetes.io/description: "llm.titan.arrieta.eu - bearer-auth front for the halogen endpoint on llm01"

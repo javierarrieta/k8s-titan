@@ -44,18 +44,20 @@ whose apex still belongs to a different cluster. The operator chose the titan ho
 | D2 | **no new Certificate**; reuse `titan-tls` | `*.titan.arrieta.eu` covers `llm.titan.arrieta.eu` at exactly one label. Getting the Secret into `llm` is the Reflector allow-list on `titan-wildcard.yaml` — `llm` added to both the `-allowed-` and `-auto-` lists, which AGENTS.md names as the controlled mechanism. A hand-copied Secret is the thing that file exists to prevent. |
 | D3 | the `Middleware` lives in `llm`, not in the Traefik namespace | The source references `traefik-system-bearer-auth@kubernetescrd` across a namespace boundary, and its own comment records that this works only because Traefik's `crossProviderNamespaces` is left unset, which is permissive by upstream default. Titan's Traefik is k3s-bundled and **not managed in this repo**, so that permissiveness cannot be proved from the tree — and the failure mode if it were ever tightened is an unauthenticated LLM endpoint that still reports healthy. Same-namespace is provable and already used here: `apply/50-apps/grafana/grafana.yaml` references `observability-grafana-auth@kubernetescrd` from an Ingress in `observability`. The forwardAuth *address* still crosses namespaces by plain URL, which grafana also proves works (its address is authentik's Service in `auth`). |
 | D4 | nginx forwardAuth, not a Traefik-native middleware | Traefik has no bearer matcher: `basicAuth` wants an htpasswd and a `Basic` scheme, and the clients send `Authorization: Bearer <token>`. "Same key" therefore means the same header has to pass here, and the only way to do that without a new dependency is the same throwaway nginx that answers 200 or 401. |
-| D5 | image `nginx:1.31.6-alpine@sha256:adad2ae9…`, the **root** image | The digest was read out of the running pod on the source cluster (`kubectl --context vps -n auth get pod -l app=bearer-auth-service -o jsonpath='{…imageID}'`), not from the tag: `nginx:1.31.6-alpine` has since been re-published and now resolves to `sha256:df221db8…`, so a tag-only pin would have silently moved this endpoint to different bytes from the one it duplicates. The `adad2ae9` digest was verified still pullable with `skopeo inspect`. Not the `nginxinc/nginx-unprivileged` variant `apply/60-tesla/wellknown.yaml` uses, because this container rewrites `/etc/nginx/conf.d/default.conf` at start and the unprivileged image's layout for that was not verifiable from here. Consequence in D6. |
-| D6 | no `pod-security.kubernetes.io/warn` label on `llm` | Follows open-webui's precedent in `apply/00-bootstrap/namespaces.yaml`: the bearer-auth container runs as root (D5), so a `restricted` warn would fire on every pod in the namespace and train everyone to ignore the label. Not the `files` reasoning (capabilities) and not the `observability` case (a label the workload actually meets). |
+| D5 | image `nginxinc/nginx-unprivileged:1.31.7-alpine@sha256:378d0c32…`, the **non-root** image | The first draft pinned `nginx:1.31.6-alpine@sha256:adad2ae9…`, the root image the source pod runs, read out of `kubectl --context vps -n auth get pod -l app=bearer-auth-service -o jsonpath='{…imageID}'` rather than from the tag — a tag-only pin would have moved it, since that tag now resolves to `sha256:df221db8…`. The reason given for the root image was that the unprivileged variant's layout for `/etc/nginx/conf.d` was "not verifiable from here". It was verifiable, and it was: opening the digest's layers with `skopeo copy` plus `tar` shows `User=101` in the image config, `/etc/nginx/conf.d` owned `drwxrwxr-x 101/0`, `/usr/bin/envsubst` present, `pid /tmp/nginx.pid`, and no `user` directive in the overlay's `nginx.conf`. That last one is load-bearing — the stock alpine `nginx.conf` in an earlier layer does carry `user nginx;`, which is an emerg error when the master is not root, so the overlay's version has to be the one that wins. Parity with the source is about the config and the comparison, not about the uid or the nginx point release. The digest is the one `apply/60-tesla/wellknown.yaml` already runs, so the cluster pulls one unprivileged nginx; the tag has since been re-published to `sha256:b5047b9b…` with a different layer set, which is why the pin is a digest and not a tag. Consequence in D6. |
+| D6 | `pod-security.kubernetes.io/warn: restricted` on `llm` | The first draft left the label off because the container ran as root, and a warn a workload can never satisfy trains everyone to ignore it — the open-webui reasoning. Once D5 changed, the pod satisfies `restricted`: `runAsNonRoot`, uid 101, `allowPrivilegeEscalation: false`, every capability dropped, `RuntimeDefault` seccomp, the same shape `wellknown.yaml` runs. That makes it the `observability` case rather than the open-webui or files case: a warn the workload meets is a signal. The label is coupled to the image, not to the pod's `securityContext` — if the image ever goes back to root nginx, the label comes off. |
 | D7 | `llm` added to Reloader's namespace list | Reloader runs `watchGlobally: false`, so its `namespaces` list is the whole scope and an annotation outside it is inert. The nginx renders its config from `$BEARER_TOKEN` at container start and reads the token from a Secret env var, so without the list entry a rotated token sits unread in a running pod: Traefik keeps asking a forwardAuth server still matching the old token, every route stays up, and nothing looks wrong. That list has bitten four times (promtail, open-webui, grafana, mealie — the comments there record each). |
 | D8 | bare `Endpoints` with no selector, kept as v1 | The backend is a host outside the cluster. v1 `Endpoints` is deprecated since v1.33 and kubectl warns on every `get`; it is still the supported way to hand a Service a fixed address, it is what the source has run for 221 days, and a hand-authored `EndpointSlice` (the `managed-by` label, the `service-name` link, per-slice ports) is more machinery for the same two facts. Parity with the file being duplicated. |
-| D9 | the nginx comparison is copied verbatim, `~*` regex and all | `$http_authorization ~* "Bearer ${BEARER_TOKEN}"` is a case-insensitive **regex** match with the token interpolated into the pattern. That means a token containing regex metacharacters would not match literally, and `bearer` in any casing is accepted. Both are inherited on purpose: changing the comparison is how a working client gets locked out, and the token in use is alphanumeric. If it is ever rewritten, `=` exact-match is the form — and rotate the token in the same change so the new token cannot contain metacharacters. |
+| D9 | the nginx comparison is `=` exact-match, deliberately **not** the source's `~*` regex | The source's `$http_authorization ~* "Bearer ${BEARER_TOKEN}"` is a case-insensitive PCRE match with the token interpolated into the pattern, and the token is not regex-safe: 137 characters containing an open paren, a close paren and a pipe **between** them, which PCRE compiles as an alternation group — so the literal token is not one of the alternatives and can never match its own pattern. Measured on the live source endpoint: the exact token returns 401 while the same token with those three characters deleted returns 200. The source therefore authenticates a string recorded in neither repo, and its recorded credential has never authenticated anything. `=` is a literal string compare, so every metacharacter in the token is inert and the fix is the operator, not a rotation — the token was never the defect. Cost: `=` is case-sensitive on the scheme word, so a client sending lowercase `bearer` now fails where `~*` passed it. Repairing the source is a separate change in the other repo, and it is the one that can lock out whatever currently holds the working string. |
 | D10 | no new `make` gate | Every other app here got a gate because one credential was written into two or more places (coder's `db-url-check`/`oidc-check`, Mealie's `mealie-check`, grafana's two OIDC checks). This endpoint has one credential in one file in this repo — there is no second copy inside the tree to drift from. The copy that *can* drift is in another repo, and no gate in this tree can read that. |
+| D11 | the Ingress router is pinned to the `websecure` entry point | Titan runs no HTTP-to-HTTPS redirect: the traefik pod's args carry `--entryPoints.web.address=:8000/tcp`, `--entryPoints.websecure.address=:8443/tcp` and `--entryPoints.websecure.http.tls=true` with no `web.redirect`, read out of the running pod in `kube-system` rather than from the matching record in `apply/60-tesla/wellknown.yaml`. So an Ingress left on both entry points serves cleartext — `http://tesla.titan.arrieta.eu/.well-known/...` answering `200` is that, proven — which is harmless for a static public key and not harmless for a static bearer credential. The source does not have this problem because it redirects: `http://llm.v.arrieta.eu/health` answers `301`. Pinning refuses cleartext outright; a `redirectScheme` middleware was rejected because clients that follow redirects re-send `Authorization` to the https URL, which makes a wrong-scheme config succeed and stay wrong. Honest limit: nothing can stop a client pointed at `http://` from putting the token on the wire once — the request must arrive before anything can judge it. Pinning makes that request fail loudly instead of working. |
+| D12 | `tcpSocket` probes, not `httpGet` | Every path on this container answers `401` unless the header carries the token and a probe sends no header, so an `httpGet` probe fails on a healthy pod and kubelet crashloops its own auth server — a liveness check cannot assert a credential. The readiness half is what makes a Reloader-triggered rotation invisible: without it the replacement pod is Ready before nginx has bound 8080, Traefik forwards an auth check into a closed port, forwardAuth errors, Traefik fails closed, and every route 502s for that window with both pods reporting healthy. |
 
 ## 3. Files
 
 | file | change |
 |---|---|
-| `apply/00-bootstrap/namespaces.yaml` | new `llm` Namespace, with the `kubernetes.io/metadata.name` label the newer entries carry, and the D6 note about the absent warn label |
+| `apply/00-bootstrap/namespaces.yaml` | new `llm` Namespace, with the `pod-security.kubernetes.io/warn` label D6 now argues for, and the `kubernetes.io/metadata.name` annotation the newer entries carry — the API server stamps that name onto every Namespace as a label by itself, so as an annotation it is decoration, kept to match `mealie` and `files` rather than to do anything |
 | `apply/40-certificates/titan-wildcard.yaml` | `llm` added to both Reflector namespace lists (D2), plus a line saying these two lines are the mechanism |
 | `apply/20-infra/reloader/reloader.yaml` | `llm` added to `spec.values.namespaces` (D7) |
 | `apply/10-secrets/llm-bearer-token.yaml` | Secret `llm-bearer-token` in namespace `llm`, key `TOKEN`, sops-encrypted to titan's recipients |
@@ -72,9 +74,17 @@ file's own path, so the plaintext has to sit under `apply/10-secrets/` briefly),
 ## 4. What is proven
 
 - **The token is the same value.** Decrypted on both sides and compared without printing it:
-  `titan value == techdelivery value: True`, 184 base64 characters. The encrypted file carries
-  titan's five recipients, first one `age1t5z4e…` — the `titan-k8s` cluster key — so the cluster can
-  open it and the techdelivery key is not in the list.
+  `titan value == techdelivery value: True`. The token is 137 characters and base64-encodes to 184;
+  the first draft quoted the encoded length, which reads like a claim about the token's alphabet, and
+  the alphabet is the whole of D9. The encrypted file carries titan's five recipients, first one
+  `age1t5z4e…` — the `titan-k8s` cluster key — so the cluster can open it and the techdelivery key is
+  not in the list.
+- **The source's bearer check does not accept its own token, and this file does not repeat that.**
+  Probed against `https://llm.v.arrieta.eu/health` with the credential this repo stores: no header →
+  `401`, exact token → `401`, token with the three regex metacharacters deleted → `200`. The running
+  VPS pod holds exactly the git value — its `startTime` is 2026-09-20, the file has not changed
+  content since 2026-02-14, and the two repos decrypt to the same 137 characters — so this is the
+  `~*` regex and not drift. D9 is the consequence.
 - **The backend is reachable from titan.** `curl http://192.168.0.29:8731/health` → `200`, 83 ms.
 - **The old endpoint is live and is doing what this duplicates.** `curl https://llm.v.arrieta.eu/` →
   `401`, resolved and answered by the techdelivery VPS rather than by titan, i.e. the bearer check is
@@ -83,7 +93,11 @@ file's own path, so the plaintext has to sit under `apply/10-secrets/` briefly),
   nine kustomize builds, `kustomize-listing` 92 manifests / 0 unlisted, `validate` decrypting every
   Secret including the new one, `secrets-placement`, `crd-check` (which saw the `Middleware`),
   `namespace-check` over 187 objects and 17 namespaces including `llm`.
-- **The image digest exists in the registry** (`skopeo inspect docker://…@sha256:adad2ae9…`).
+- **The unprivileged image can run this config, as far as an offline check reaches.** Verified by
+  opening the pinned digest's layers with `skopeo copy` and `tar`, not by running it: image config
+  `User=101`, `/etc/nginx/conf.d` owned `drwxrwxr-x 101/0` so the uid-101 entrypoint can write
+  `default.conf` there, `/usr/bin/envsubst` present, `pid /tmp/nginx.pid`, and no `user` directive in
+  the overlay's `nginx.conf`. The digest is pullable and is the one `wellknown.yaml` already runs.
 
 ## 5. Post-merge, in order
 
@@ -92,20 +106,48 @@ file's own path, so the plaintext has to sit under `apply/10-secrets/` briefly),
 2. Confirm the Secret landed by reflection, not by hand:
    `kubectl --context titan -n llm get secret titan-tls` — needs an admin context; the `k8s-reader`
    identity in this workspace is Forbidden for Secrets.
-3. **Prove the auth is actually on.** `curl -i https://llm.titan.arrieta.eu/health` with no header
-   must be `401`. Anything else — including `200` — means the middleware reference did not resolve
-   and the endpoint is public. This is the check that matters most in the whole change, and it is the
-   one D3 exists to make unnecessary.
-4. Then `curl -i -H "Authorization: Bearer <token>" https://llm.titan.arrieta.eu/health` must be
-   `200` from halogen.
-5. `make dry-run DRYRUN_CONTEXT=<admin context>` if the merge went in ahead of it. **It was not run
-   here**: the `titan` context in the workspace that wrote this is the read-only `k8s-reader`
-   identity — `auth can-i '*' '*'` answers `no` and a Secret read is Forbidden — and `dry-run` asks
-   the live API server. Core-type validation rules live there, not in any vendored schema, which is
-   exactly why AGENTS.md says this gate cannot be replaced offline.
+3. **Prove the auth accepts its own credential.** `curl -i -H "Authorization: Bearer <token>"
+   https://llm.titan.arrieta.eu/health` must be `200` from halogen. **This is the check that matters
+   most in the whole change**, and it is the one the first draft of this section put second and
+   described as a follow-up to the unauthenticated call. That ordering was wrong: the source endpoint
+   returns `401` to its own correct token right now, so a check that only looks for rejection passes
+   on an endpoint that works for nobody.
+4. Then `curl -i https://llm.titan.arrieta.eu/health` with no header must be `401`. Necessary, but
+   not sufficient on its own and not proof that auth is on.
+
+   The reason both are needed is that three different states exist and no single call tells them
+   apart:
+
+   | no header | with the token | state |
+   |---|---|---|
+   | `200` | `200` | middleware reference did not resolve — the endpoint is **public** |
+   | `401` | `200` | correct — this is the only acceptable pair of answers |
+   | `401` | `401` | middleware resolved and rejects everything — endpoint is closed but **unusable** |
+
+   The bottom row is where `llm.v.arrieta.eu` sits today, and it is what an unauthenticated-only check
+   reads as a pass. D3 exists to rule out the top row; only step 3 rules out the bottom one.
+5. **Confirm cleartext is closed.** `curl -i http://llm.titan.arrieta.eu/health` must be `404`. A
+   `401` here means the router is on the `web` entry point after all and is answering bearer checks
+   over plaintext — D11 did not take. A `200` would be worse than either.
+6. `make dry-run DRYRUN_CONTEXT=<admin context>` — **before merge, not after.** It was not run in the
+   workspace that wrote this and there is no admin context there to run it with: `auth can-i '*' '*'`
+   answers `no` for the read-only `k8s-reader` identity, as does the `casa` context, and `dry-run` is
+   a server-side apply, so a read-only identity is Forbidden. This matters more here than in most
+   changes: the unselected `Service` and the hand-authored `Endpoints` are core types, core validation
+   rules live in the API server rather than in any vendored schema, and `crd-check` walks only the nine
+   vendored CRDs — so the two objects most likely to draw a server-side objection are the two no
+   offline gate looks at at all.
 
 ## 6. Not proven, and what it costs
 
+- **The non-root switch is proven from the image, not from a running pod.** There is no container
+  runtime in the workspace that wrote this — no docker, podman or nerdctl, and no `envsubst` on the
+  host either — so nothing here has actually executed the entrypoint script as uid 101. The writability
+  of `/etc/nginx/conf.d` is read off the layer's directory mode, which is the right evidence and is
+  still not the same as a pod that did it. `wellknown.yaml` running the same image is supporting
+  evidence, not proof: it mounts a Secret and never writes to `conf.d`. The first `kubectl -n llm
+  get pod` after merge is the real check, and a `CreateContainerConfigError` or an emerg about `user`
+  in the pod's logs is this bullet's failure mode.
 - **Nothing here proves the model works end to end from titan.** `/health` returning 200 proves the
   HTTP path; an actual completion on a 130 GiB model is a different request and has not been sent.
 - **Two live endpoints, one token, two repos.** `../k8s-techdelivery` holds the identical token in
@@ -121,9 +163,13 @@ file's own path, so the plaintext has to sit under `apply/10-secrets/` briefly),
   has not been exercised, because rotating the token would break the endpoint being duplicated.
   The proof is a rotation drill, and it belongs with the first real rotation.
 - **No monitoring was added.** Gatus runs on titan (`apply/50-apps/gatus/`) and could probe
-  `https://llm.titan.arrieta.eu/` expecting 401 — which is a useful check precisely because 401 is
-  the healthy answer. Deliberately left out of this change rather than added unasked; if the endpoint
-  matters enough to page on, that probe is the shape to add.
+  `https://llm.titan.arrieta.eu/`. The shape has to be the §5 pair, not one check expecting `401`:
+  `401` is also what a closed-but-unusable endpoint answers, so a lone 401 probe pages green on the
+  exact failure this change shipped with in its first draft. Deliberately left out rather than added
+  unasked. If the endpoint matters enough to page on it needs an unauthenticated endpoint expecting
+  `401` **and** an authenticated one expecting `200` — and the second one puts the token in Gatus's
+  own config, which is a second copy inside this tree and therefore earns a `*-check` gate by D10's
+  own rule, not a bare probe.
 - **No NetworkPolicy.** The `llm` namespace is unsegmented like every other namespace here —
   spec D6 defers NetworkPolicy rather than scheduling it, and a policy that reads as protection
   without enforcement is what that deferral exists to avoid.
