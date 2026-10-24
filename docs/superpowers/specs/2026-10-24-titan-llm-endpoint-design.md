@@ -2,8 +2,14 @@
 
 Date: 2026-10-24. Implements: a second public front door for the halogen-flash endpoint that has been
 served as `llm.v.arrieta.eu` from the techdelivery VPS, now also served by titan at
-`llm.titan.arrieta.eu`, with the **same bearer token**. A duplicate, not a migration — the VPS
+`llm.titan.arrieta.eu`, accepting the **same two keys**. A duplicate, not a migration — the VPS
 endpoint stays up and nothing here turns it off.
+
+> **Corrected the same day it shipped.** The first two revisions of this spec, and the manifest that
+> went with them, treated the credential as one literal bearer token. It is not one: it is a PCRE
+> alternation holding two real keys. D9 is the correction and §4 is the measurement behind it. The
+> live endpoint answered `401` to every credential any client had ever sent between the merge of
+> `afd0cbc` and this change.
 
 ## 1. Why a second one, and why here
 
@@ -46,9 +52,9 @@ whose apex still belongs to a different cluster. The operator chose the titan ho
 | D4 | nginx forwardAuth, not a Traefik-native middleware | Traefik has no bearer matcher: `basicAuth` wants an htpasswd and a `Basic` scheme, and the clients send `Authorization: Bearer <token>`. "Same key" therefore means the same header has to pass here, and the only way to do that without a new dependency is the same throwaway nginx that answers 200 or 401. |
 | D5 | image `nginxinc/nginx-unprivileged:1.31.7-alpine@sha256:378d0c32…`, the **non-root** image | The first draft pinned `nginx:1.31.6-alpine@sha256:adad2ae9…`, the root image the source pod runs, read out of `kubectl --context vps -n auth get pod -l app=bearer-auth-service -o jsonpath='{…imageID}'` rather than from the tag — a tag-only pin would have moved it, since that tag now resolves to `sha256:df221db8…`. The reason given for the root image was that the unprivileged variant's layout for `/etc/nginx/conf.d` was "not verifiable from here". It was verifiable, and it was: opening the digest's layers with `skopeo copy` plus `tar` shows `User=101` in the image config, `/etc/nginx/conf.d` owned `drwxrwxr-x 101/0`, `/usr/bin/envsubst` present, `pid /tmp/nginx.pid`, and no `user` directive in the overlay's `nginx.conf`. That last one is load-bearing — the stock alpine `nginx.conf` in an earlier layer does carry `user nginx;`, which is an emerg error when the master is not root, so the overlay's version has to be the one that wins. Parity with the source is about the config and the comparison, not about the uid or the nginx point release. The digest is the one `apply/60-tesla/wellknown.yaml` already runs, so the cluster pulls one unprivileged nginx; the tag has since been re-published to `sha256:b5047b9b…` with a different layer set, which is why the pin is a digest and not a tag. Consequence in D6. |
 | D6 | `pod-security.kubernetes.io/warn: restricted` on `llm` | The first draft left the label off because the container ran as root, and a warn a workload can never satisfy trains everyone to ignore it — the open-webui reasoning. Once D5 changed, the pod satisfies `restricted`: `runAsNonRoot`, uid 101, `allowPrivilegeEscalation: false`, every capability dropped, `RuntimeDefault` seccomp, the same shape `wellknown.yaml` runs. That makes it the `observability` case rather than the open-webui or files case: a warn the workload meets is a signal. The label is coupled to the image, not to the pod's `securityContext` — if the image ever goes back to root nginx, the label comes off. |
-| D7 | `llm` added to Reloader's namespace list | Reloader runs `watchGlobally: false`, so its `namespaces` list is the whole scope and an annotation outside it is inert. The nginx renders its config from `$BEARER_TOKEN` at container start and reads the token from a Secret env var, so without the list entry a rotated token sits unread in a running pod: Traefik keeps asking a forwardAuth server still matching the old token, every route stays up, and nothing looks wrong. That list has bitten four times (promtail, open-webui, grafana, mealie — the comments there record each). |
+| D7 | `llm` added to Reloader's namespace list | Reloader runs `watchGlobally: false`, so its `namespaces` list is the whole scope and an annotation outside it is inert. The nginx renders its config from `$BEARER_TOKEN_A`/`${BEARER_TOKEN_B}` at container start and reads each key from a Secret env var, so without the list entry a rotated key sits unread in a running pod: Traefik keeps asking a forwardAuth server still matching the old key, every route stays up, and nothing looks wrong. That list has bitten four times (promtail, open-webui, grafana, mealie — the comments there record each). |
 | D8 | bare `Endpoints` with no selector, kept as v1 | The backend is a host outside the cluster. v1 `Endpoints` is deprecated since v1.33 and kubectl warns on every `get`; it is still the supported way to hand a Service a fixed address, it is what the source has run for 221 days, and a hand-authored `EndpointSlice` (the `managed-by` label, the `service-name` link, per-slice ports) is more machinery for the same two facts. Parity with the file being duplicated. |
-| D9 | the nginx comparison is `=` exact-match, deliberately **not** the source's `~*` regex | The source's `$http_authorization ~* "Bearer ${BEARER_TOKEN}"` is a case-insensitive PCRE match with the token interpolated into the pattern, and the token is not regex-safe: 137 characters containing an open paren, a close paren and a pipe **between** them, which PCRE compiles as an alternation group — so the literal token is not one of the alternatives and can never match its own pattern. Measured on the live source endpoint: the exact token returns 401 while the same token with those three characters deleted returns 200. The source therefore authenticates a string recorded in neither repo, and its recorded credential has never authenticated anything. `=` is a literal string compare, so every metacharacter in the token is inert and the fix is the operator, not a rotation — the token was never the defect. Cost: `=` is case-sensitive on the scheme word, so a client sending lowercase `bearer` now fails where `~*` passed it. Repairing the source is a separate change in the other repo, and it is the one that can lock out whatever currently holds the working string. |
+| D9 | the Secret holds **two literal keys** (`TOKEN_A`, `TOKEN_B`) and nginx compares each with `=` | The credential copied from the source repo is one 137-character string, and it is not a bearer token: it is `(sk_…67…|sk_…67…)`, a PCRE alternation group around two real 67-character `sk_` keys. The source's `~*` compiles it as a group, so the source accepts either key and rejects its own literal value. The first two revisions of this change read the `(`, `|` and `)` as an accident in a literal token and "fixed" the operator to `=` while still storing the alternation — which made titan accept only the wrapper string, a string no client has ever sent, and answer `401` to both real keys. §4 has the measurements; they are the exact inverse on the two endpoints. The fix is the **Secret shape**, not the operator alone: two keys, two env vars, two `=` compares, so no regex is ever compiled out of a secret again. That is what the `=` change was reaching for and did not achieve — it removed the regex while still storing one. Cost, unchanged from the first version: `=` is case-sensitive on the scheme word, so a client sending lowercase `bearer` fails where `~*` passed it. Repairing the source is a separate change in the other repo (§6). |
 | D10 | no new `make` gate | Every other app here got a gate because one credential was written into two or more places (coder's `db-url-check`/`oidc-check`, Mealie's `mealie-check`, grafana's two OIDC checks). This endpoint has one credential in one file in this repo — there is no second copy inside the tree to drift from. The copy that *can* drift is in another repo, and no gate in this tree can read that. |
 | D11 | the Ingress router is pinned to the `websecure` entry point | Titan runs no HTTP-to-HTTPS redirect: the traefik pod's args carry `--entryPoints.web.address=:8000/tcp`, `--entryPoints.websecure.address=:8443/tcp` and `--entryPoints.websecure.http.tls=true` with no `web.redirect`, read out of the running pod in `kube-system` rather than from the matching record in `apply/60-tesla/wellknown.yaml`. So an Ingress left on both entry points serves cleartext — `http://tesla.titan.arrieta.eu/.well-known/...` answering `200` is that, proven — which is harmless for a static public key and not harmless for a static bearer credential. The source does not have this problem because it redirects: `http://llm.v.arrieta.eu/health` answers `301`. Pinning refuses cleartext outright; a `redirectScheme` middleware was rejected because clients that follow redirects re-send `Authorization` to the https URL, which makes a wrong-scheme config succeed and stay wrong. Honest limit: nothing can stop a client pointed at `http://` from putting the token on the wire once — the request must arrive before anything can judge it. Pinning makes that request fail loudly instead of working. |
 | D12 | `tcpSocket` probes, not `httpGet` | Every path on this container answers `401` unless the header carries the token and a probe sends no header, so an `httpGet` probe fails on a healthy pod and kubelet crashloops its own auth server — a liveness check cannot assert a credential. The readiness half is what makes a Reloader-triggered rotation invisible: without it the replacement pod is Ready before nginx has bound 8080, Traefik forwards an auth check into a closed port, forwardAuth errors, Traefik fails closed, and every route 502s for that window with both pods reporting healthy. |
@@ -60,7 +66,7 @@ whose apex still belongs to a different cluster. The operator chose the titan ho
 | `apply/00-bootstrap/namespaces.yaml` | new `llm` Namespace, with the `pod-security.kubernetes.io/warn` label D6 now argues for, and the `kubernetes.io/metadata.name` annotation the newer entries carry — the API server stamps that name onto every Namespace as a label by itself, so as an annotation it is decoration, kept to match `mealie` and `files` rather than to do anything |
 | `apply/40-certificates/titan-wildcard.yaml` | `llm` added to both Reflector namespace lists (D2), plus a line saying these two lines are the mechanism |
 | `apply/20-infra/reloader/reloader.yaml` | `llm` added to `spec.values.namespaces` (D7) |
-| `apply/10-secrets/llm-bearer-token.yaml` | Secret `llm-bearer-token` in namespace `llm`, key `TOKEN`, sops-encrypted to titan's recipients |
+| `apply/10-secrets/llm-bearer-token.yaml` | Secret `llm-bearer-token` in namespace `llm`, keys `TOKEN_A` and `TOKEN_B` — one literal key each, D9 — sops-encrypted to titan's recipients |
 | `apply/10-secrets/kustomization.yaml` | lists it — an unlisted Secret builds green and is silently never applied |
 | `apply/50-apps/llm/llm.yaml` | `Endpoints` + selector-less `Service` `llm01`; the forwardAuth nginx `Deployment` + `Service` + two `ConfigMap`s; `Middleware bearer-auth`; `Ingress llm` |
 | `apply/50-apps/kustomization.yaml` | lists it |
@@ -73,18 +79,33 @@ file's own path, so the plaintext has to sit under `apply/10-secrets/` briefly),
 
 ## 4. What is proven
 
-- **The token is the same value.** Decrypted on both sides and compared without printing it:
-  `titan value == techdelivery value: True`. The token is 137 characters and base64-encodes to 184;
-  the first draft quoted the encoded length, which reads like a claim about the token's alphabet, and
-  the alphabet is the whole of D9. The encrypted file carries titan's five recipients, first one
+- **The two keys are the same credentials the source accepts.** Decrypted on both sides and compared
+  without printing them: titan's old `TOKEN` and techdelivery's `TOKEN` are the same 137 characters,
+  and that string splits into exactly two 67-character `sk_` keys, `TOKEN_A` and `TOKEN_B`, both of
+  which are now stored here on their own. The encrypted file carries titan's five recipients, first one
   `age1t5z4e…` — the `titan-k8s` cluster key — so the cluster can open it and the techdelivery key is
   not in the list.
-- **The source's bearer check does not accept its own token, and this file does not repeat that.**
-  Probed against `https://llm.v.arrieta.eu/health` with the credential this repo stores: no header →
-  `401`, exact token → `401`, token with the three regex metacharacters deleted → `200`. The running
-  VPS pod holds exactly the git value — its `startTime` is 2026-09-20, the file has not changed
-  content since 2026-02-14, and the two repos decrypt to the same 137 characters — so this is the
-  `~*` regex and not drift. D9 is the consequence.
+- **The credential is a set of two keys, and that was measured on both endpoints, not reasoned about.**
+  Against `https://llm.v.arrieta.eu/health` (source, `~*`) and `https://llm.titan.arrieta.eu/health`
+  (titan, the first `=` version), 2026-10-24:
+
+  | credential | source | titan, first `=` version | titan, after D9 |
+  |---|---|---|---|
+  | key A (the one the operator's client is configured with) | `200` | `401` | `200` |
+  | key B (unattributed) | `200` | `401` | `200` |
+  | the 137-char `(A\|B)` wrapper string | `401` | `200` | `401` |
+  | no header | `401` | `401` | `401` |
+
+  The middle two columns are the exact inverse, which is the whole bug in one row: the wrapper string
+  authenticated on the cluster where nobody holds it and failed on the cluster where everybody does.
+  The first revision's claim that "the recorded credential has never authenticated anything" was true
+  only of the wrapper and was read as a statement about the keys, and D9's premise that the
+  metacharacters were accidental was false — they are the structure that makes the two keys work.
+- **The source has a second defect this file does not repeat, and does not fix either.** Its `~*` is
+  unanchored, so `Authorization: Bearer <key> <anything after it>` returns `200` there; measured.
+  Anchoring it is a change in the other repo and is the one that can lock out whoever holds key B.
+- **The bearer check is on and fails closed.** No header → `401` on both endpoints; `http://` on titan
+  → `404`, so D11 took.
 - **The backend is reachable from titan.** `curl http://192.168.0.29:8731/health` → `200`, 83 ms.
 - **The old endpoint is live and is doing what this duplicates.** `curl https://llm.v.arrieta.eu/` →
   `401`, resolved and answered by the techdelivery VPS rather than by titan, i.e. the bearer check is
@@ -106,26 +127,26 @@ file's own path, so the plaintext has to sit under `apply/10-secrets/` briefly),
 2. Confirm the Secret landed by reflection, not by hand:
    `kubectl --context titan -n llm get secret titan-tls` — needs an admin context; the `k8s-reader`
    identity in this workspace is Forbidden for Secrets.
-3. **Prove the auth accepts its own credential.** `curl -i -H "Authorization: Bearer <token>"
-   https://llm.titan.arrieta.eu/health` must be `200` from halogen. **This is the check that matters
-   most in the whole change**, and it is the one the first draft of this section put second and
-   described as a follow-up to the unauthenticated call. That ordering was wrong: the source endpoint
-   returns `401` to its own correct token right now, so a check that only looks for rejection passes
-   on an endpoint that works for nobody.
+3. **Prove the auth accepts a credential a client actually has.** `curl -i -H "Authorization: Bearer
+   <key A or B>" https://llm.titan.arrieta.eu/health` must be `200` from halogen. **This is the check
+   that matters most in the whole change**, and it is the one the first draft of this section put second
+   and described as a follow-up to the unauthenticated call. That ordering was wrong, and the shipped
+   result was worse than the ordering: an unauthenticated-only check passed on an endpoint that had just
+   closed for every real client.
 4. Then `curl -i https://llm.titan.arrieta.eu/health` with no header must be `401`. Necessary, but
    not sufficient on its own and not proof that auth is on.
 
    The reason both are needed is that three different states exist and no single call tells them
    apart:
 
-   | no header | with the token | state |
+   | no header | with a real key | state |
    |---|---|---|
    | `200` | `200` | middleware reference did not resolve — the endpoint is **public** |
    | `401` | `200` | correct — this is the only acceptable pair of answers |
    | `401` | `401` | middleware resolved and rejects everything — endpoint is closed but **unusable** |
 
-   The bottom row is where `llm.v.arrieta.eu` sits today, and it is what an unauthenticated-only check
-   reads as a pass. D3 exists to rule out the top row; only step 3 rules out the bottom one.
+   The bottom row is where titan sat between `afd0cbc` and D9, and it is what an unauthenticated-only
+   check reads as a pass. D3 exists to rule out the top row; only step 3 rules out the bottom one.
 5. **Confirm cleartext is closed.** `curl -i http://llm.titan.arrieta.eu/health` must be `404`. A
    `401` here means the router is on the `web` entry point after all and is answering bearer checks
    over plaintext — D11 did not take. A `200` would be worse than either.
@@ -150,10 +171,16 @@ file's own path, so the plaintext has to sit under `apply/10-secrets/` briefly),
   in the pod's logs is this bullet's failure mode.
 - **Nothing here proves the model works end to end from titan.** `/health` returning 200 proves the
   HTTP path; an actual completion on a 130 GiB model is a different request and has not been sent.
-- **Two live endpoints, one token, two repos.** `../k8s-techdelivery` holds the identical token in
-  `apply/10-secrets/bearer-auth-token.yaml`. Rotating means editing both, and no gate in either tree
-  detects the halves disagreeing. Duplicating the endpoint also doubles the public surface that one
-  bearer token protects: two clusters, two Traefiks, two nginx forwardAuth pods, one secret.
+- **Two live endpoints, the same two keys, two repos, two *forms*.** `../k8s-techdelivery`
+  `apply/10-secrets/bearer-auth-token.yaml` still holds the `(A|B)` alternation in one `TOKEN` key;
+  titan now holds `TOKEN_A` and `TOKEN_B` separately. Same accepted set, different shape, and nothing
+  in either tree notices if they stop agreeing — D10's honest limit. Rotating a key means editing the
+  right value in both repos, and a rotation that changes only one of the two alternatives on the source
+  side means the `(A|B)` string there no longer splits cleanly. Duplicating the endpoint also doubles
+  the public surface that the keys protect: two clusters, two Traefiks, two nginx forwardAuth pods.
+- **Key B is unattributed.** Both keys are live on the source and both are kept here, and nobody has
+  established what holds key B. Dropping either one is therefore a lockout waiting to happen, which is
+  why neither was dropped when the credential got its shape fixed.
 - **titan's path to `llm01` is one WireGuard peer.** `llm01` is explicitly not a mesh member
   (`../nixos-configurations hosts/llm01/configuration.nix`), so if the OPNsense peer drops, this
   hostname 502s with the pod still Ready and the Traefik still healthy. The VPS path has the same
