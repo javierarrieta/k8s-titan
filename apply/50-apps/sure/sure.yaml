@@ -104,11 +104,19 @@ metadata:
   name: sure
   namespace: sure
   annotations:
-    # `make sure-check` refuses ONBOARDING_STATE: open without this marker, so the window is a reviewed
-    # decision rather than a chart default that shipped. Spec §5.1: deploy open, create the one account,
-    # then commit the flip to closed AND delete this annotation in the same change. A stale marker is
-    # itself a failure - it teaches the next reader to ignore markers.
-    sure.titan.arrieta.eu/onboarding-window: "open-until-first-account"
+    # The boundary of this instance is authentik's enrolment policy, and this marker is what makes that
+    # a reviewed statement rather than an implication. Sure's SSO JIT (AUTH_JIT_MODE=create_and_link,
+    # which is Sure's default) creates a user and a family for any authentik identity that has no
+    # Sure account yet. What narrows it:
+    #   - ALLOWED_OIDC_DOMAINS below - but it is gmail.com, so it filters nothing meaningful.
+    #   - authentik enrolment. Measured in this repo: the Google source has NO enrollment_flow on
+    #     purpose (authentik/blueprints-google.yaml:8,85 - "unknown Google identities are denied"),
+    #     so Google cannot self-enrol. The DEFAULT authentik registration flow is not declared anywhere
+    #     in this tree, so whether username/password self-signup is open at auth.titan.arrieta.eu is
+    #     UNVERIFIED. Check it in the authentik admin UI before trusting this marker.
+    # If authentik self-enrolment turns out to be open, the fix is AUTH_JIT_MODE=link_only here, not a
+    # wider allowlist. `make sure-check` requires this annotation whenever JIT can create accounts.
+    sure.titan.arrieta.eu/sso-jit-boundary: "authentik-enrolment"
 spec:
   interval: 30m
   timeout: 10m
@@ -152,13 +160,13 @@ spec:
 
       settings:
         SELF_HOSTED: "true"
-        # !!! OPEN ON PURPOSE, AND ONLY FOR THE FIRST RECONCILE !!!
-        # The chart default is `open`, and on a public hostname that means the first person to reach
-        # /account/sign_up owns the instance. Spec §5.1: create the one account immediately, then
-        # commit the flip to "closed" — do not leave this for a follow-up. If Sure turns out to
-        # support creating a user out of band (rails runner in a Job), that replaces this whole
-        # window and should be done instead.
-        ONBOARDING_STATE: "open"
+        # CLOSED, and it never had to be open. This governs ONLY the local email+password registration
+        # page (registrations_controller.rb:119-121 redirects when state is closed). The first account
+        # comes from SSO JIT instead - an authentik identity signing in for the first time is sent to
+        # oidc_accounts#new_user and creates itself - so the instance is never reachable in a state where
+        # the first visitor wins it. Upstream's own sequence (docs/hosting/docker.md step 5a) assumes a
+        # local first account; with OIDC configured that step is unnecessary.
+        ONBOARDING_STATE: "closed"
         AI_DEBUG_MODE: "false"
 
       # --- LLM: casa's halogen endpoint, reached over the WireGuard mesh ------------------------
@@ -211,6 +219,27 @@ spec:
         # correct, in this file and in the blueprint together.
         OIDC_ISSUER: "https://auth.titan.arrieta.eu/application/o/sure/"
         OIDC_REDIRECT_URI: "https://sure.titan.arrieta.eu/auth/openid_connect/callback"
+
+        # --- who is allowed to get a Sure account --------------------------------------------------
+        # Two independent doors, and ONBOARDING_STATE only governs the first one:
+        #   local registration page  -> ONBOARDING_STATE (closed above)
+        #   SSO account creation     -> AUTH_JIT_MODE + ALLOWED_OIDC_DOMAINS (config/auth.yml, read by
+        #                               config/initializers/auth.rb; enforced at
+        #                               oidc_accounts_controller.rb:24,119, which never reads
+        #                               Setting.onboarding_state)
+        # create_and_link is Sure's default and is what makes SSO signup work: an unknown authentik
+        # identity gets a user + family. See the HelmRelease annotation for what actually bounds it.
+        AUTH_JIT_MODE: "create_and_link"
+        # NOT a security boundary - it is a shared mailbox domain, so it admits every gmail address that
+        # can authenticate at authentik. Set anyway so non-gmail identities are refused, and so nobody
+        # later mistakes an empty value for a stricter default: empty means ALL domains are allowed
+        # (AuthConfig.allowed_oidc_domain? returns true when the list is empty).
+        ALLOWED_OIDC_DOMAINS: "gmail.com"
+        # Left at Sure's default (true) deliberately. With ONBOARDING_STATE closed nobody can create a
+        # local account, and a JIT-created user has no password, so the only local door is one this
+        # account could set for itself. Flipping it to false would make the instance SSO-only, and the
+        # documented break-glass is AUTH_LOCAL_ADMIN_OVERRIDE_ENABLED - which depends on being a super
+        # admin, a status not verified here. Unverified break-glass is worse than no break-glass.
 
       # DATABASE_URL / REDIS_URL as full EnvVar objects so the passwords stay in the Secret.
       # Setting these two keys is also what makes templates/_env.tpl skip the chart-computed URLs.

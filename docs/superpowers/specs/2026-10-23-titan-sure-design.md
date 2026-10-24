@@ -90,20 +90,45 @@ Sure reads `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET`, `OIDC_ISSUER` from the chart'
 secret block and `OIDC_REDIRECT_URI` from env (present in `.env.example`, absent
 from the chart's `secret.values`, so it goes in `rails.extraEnv`).
 
-### 5.1 The one setting that must not ship open
+### 5.1 Two independent doors, and only one of them is ONBOARDING_STATE
 
-`rails.settings.ONBOARDING_STATE` is `open` in the chart defaults and was `open`
-in the casa spike. On a public hostname that means **anyone who finds the URL can
-create the first account and own the instance.** On titan the sequence has to be:
+This section originally said "deploy open, create the account by hand, close it".
+That was wrong, and reading the source is what showed it. Sure has **two
+independent ways to acquire an account** and `ONBOARDING_STATE` governs only the
+first:
 
-1. deploy with `ONBOARDING_STATE: "open"`,
-2. create the one account by hand, immediately,
-3. commit the flip to `closed` in the same change review, before Flux's next sync
-   if at all possible,
-4. confirm `/account/sign_up` is gone.
+| door | governed by | enforced at |
+| --- | --- | --- |
+| local email+password registration page | `ONBOARDING_STATE` | `registrations_controller.rb:119-121` |
+| SSO account creation (JIT) | `AUTH_JIT_MODE`, `ALLOWED_OIDC_DOMAINS` | `oidc_accounts_controller.rb:24,119` — never reads `onboarding_state` |
 
-A better variant, if Sure supports it, is to never open it and create the user via
-`rails runner` in a Job. **Open question — verify before implementing.**
+`AUTH_JIT_MODE` defaults to `create_and_link` (`config/auth.yml`): an authentik
+identity with no Sure account is sent to `oidc_accounts#new_user` and creates
+itself. So the correct configuration is `ONBOARDING_STATE: "closed"` from the very
+first reconcile — the first account comes from SSO, authentik-authenticated from
+birth, and the instance is never reachable in a state where the first visitor wins
+it. Upstream's docker.md step 5a assumes a local first account; with OIDC
+configured that step is unnecessary.
+
+**What actually bounds JIT is authentik's enrolment policy, not the domain list.**
+`ALLOWED_OIDC_DOMAINS` is `gmail.com` here, which filters nothing; and empty means
+*all* domains, not none (`AuthConfig.allowed_oidc_domain?` returns true when the
+list is empty). Evidence from this repo: the Google source deliberately has **no
+`enrollment_flow`** (`authentik/blueprints-google.yaml:8,85` — "unknown Google
+identities are denied"), so Google cannot self-enrol. The **default authentik
+registration flow is not declared anywhere in this tree**, so whether username and
+password self-signup is open at `auth.titan.arrieta.eu` is **unverified** — check it
+in the admin UI. If it is open, the fix is `AUTH_JIT_MODE=link_only`, not a wider
+allowlist.
+
+`make sure-check` gates both doors with explicit acknowledgement annotations, so a
+permissive setting is always a reviewed statement rather than a default that
+shipped.
+
+Still unverified: whether the first JIT-created user becomes a super admin, and
+whether `AUTH_LOCAL_ADMIN_OVERRIDE_ENABLED` would leave a way in if authentik were
+down. Local login is therefore left at its default rather than relying on a
+break-glass path that has not been proven.
 
 Related: check whether Sure honours `email_verified` the way mealie v3.21.0 had to
 (mealie's comment records that release "turned on the email_verified requirement

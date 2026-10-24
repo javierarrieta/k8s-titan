@@ -33,9 +33,14 @@ OPENAI_ACCESS_TOKEN, OIDC_CLIENT_ID, OIDC_CLIENT_SECRET and OIDC_ISSUER in rails
 does not wire them. Anything else the app needs from the Secret must be named in rails.extraEnvVars, or
 the Secret has the key, the pod does not, and AI/SSO stay off at health=ok. Item 3 checks that.
 
-ONBOARDING_STATE is checked with an explicit acknowledgement marker rather than a bare ban, because the
-documented bring-up sequence (spec §5.1) genuinely needs it open for one reconcile: open, create the one
-account, close. The marker makes that window a reviewed decision instead of a default.
+ONBOARDING_STATE and SSO JIT are TWO INDEPENDENT DOORS and the gate checks both. ONBOARDING_STATE governs
+only the local email+password registration page (registrations_controller.rb:119-121). SSO account
+creation is governed by AUTH_JIT_MODE and ALLOWED_OIDC_DOMAINS (config/auth.yml, enforced at
+oidc_accounts_controller.rb:24,119, which never reads onboarding_state). Closing the first while the
+second can create accounts is closing the narrow door and leaving the wide one propped, and the only
+thing bounding JIT is authentik's own enrolment policy. Each door is gated with an explicit
+acknowledgement marker rather than a bare ban, so the permissive setting is always a reviewed statement
+rather than a default that shipped.
 
 Fixtures may be plaintext; real secrets are sops-encrypted. A file that looks encrypted but does not
 decrypt is reported, never silently skipped.
@@ -57,6 +62,8 @@ REDIRECTS = [f"https://{HOST}/auth/openid_connect/callback"]
 ISSUER = f"https://auth.titan.arrieta.eu/application/o/sure/"
 # The marker that says "yes, onboarding is open, and that is the reviewed one-reconcile window".
 ONBOARDING_MARKER = "sure.titan.arrieta.eu/onboarding-window"
+# The marker that says "JIT can create accounts and the boundary is authentik enrolment, checked".
+JIT_MARKER = "sure.titan.arrieta.eu/sso-jit-boundary"
 # Reasoning models charge thinking tokens against max_tokens; measured on halogen-qwen3.8-flash-next,
 # max_tokens=16 returned finish_reason=length with content:"" — a silent no-op in an auto-categorizer.
 MIN_RESPONSE_TOKENS = 1024
@@ -176,14 +183,10 @@ def main():
             fail("OIDC_REDIRECT_URI is not among the blueprint's redirect_uris - authentik refuses the "
                  "authorization request and both services look healthy")
 
-        # The onboarding window, as a reviewed decision rather than a default.
+        # Door 1: the local email+password registration page. ONBOARDING_STATE governs ONLY this
+        # (registrations_controller.rb:119-121). It is not what governs SSO account creation.
         state = ((rails.get("settings") or {}).get("ONBOARDING_STATE") or "").strip().lower()
         marker = ((hr.get("metadata") or {}).get("annotations") or {}).get(ONBOARDING_MARKER)
-        if state == "open" and not marker:
-            fail("ONBOARDING_STATE is open with no acknowledgement annotation. On a public hostname the "
-                 "first visitor to /account/sign_up owns the instance. Spec §5.1: open, create the one "
-                 f"account, close. If that is the current step, add {ONBOARDING_MARKER}: \"open-until-"
-                 "first-account\" and remove it in the commit that flips this to closed.")
         if state not in ("open", "closed", "invite_only", ""):
             fail(f"ONBOARDING_STATE is {state!r}. Sure accepts open | closed | invite_only (.env.example, "
                  "and docs/hosting/docker.md step 5a). A value it does not recognise is not a safe "
@@ -191,10 +194,46 @@ def main():
         if state == "":
             fail("ONBOARDING_STATE is empty - the chart default is open, so an empty value is not a "
                  "safe default, it is the value that lets anyone register")
+        if state == "open" and not marker:
+            fail("ONBOARDING_STATE is open with no acknowledgement annotation. On a public hostname the "
+                 "first visitor to /account/sign_up owns the instance. With OIDC configured there is no "
+                 "reason to open it at all - the first account comes from SSO JIT instead. If this really "
+                 f"is a one-reconcile window, add {ONBOARDING_MARKER} and delete it in the commit that "
+                 "closes it.")
         if marker and state != "open":
             fail(f"the {ONBOARDING_MARKER} annotation is still present but ONBOARDING_STATE is "
                  f"{state!r} - the marker exists to mark an open window, and a stale one teaches the "
                  "next reader to ignore it")
+
+        # Door 2: SSO account creation. Independent of door 1 - oidc_accounts_controller.rb:24,119 gates
+        # on AuthConfig.jit_link_only? and allowed_oidc_domain?, and never reads onboarding_state. So
+        # closing registration while JIT can create accounts has closed the narrow door and left the wide
+        # one propped, and the only thing bounding JIT is authentik's own enrolment policy.
+        jit = (env_named(values, "AUTH_JIT_MODE") or "create_and_link").strip().lower()
+        domains = (env_named(values, "ALLOWED_OIDC_DOMAINS") or "").strip()
+        jit_marker = ((hr.get("metadata") or {}).get("annotations") or {}).get(JIT_MARKER)
+        if jit not in ("create_and_link", "link_only"):
+            fail(f"AUTH_JIT_MODE is {jit!r}; Sure accepts create_and_link | link_only (config/auth.yml). "
+                 "An unrecognised value falls back to create_and_link, the permissive one.")
+        if jit == "create_and_link":
+            if not domains:
+                fail("ALLOWED_OIDC_DOMAINS is empty while JIT creates accounts. Empty is the permissive "
+                     "value, not the strict one: AuthConfig.allowed_oidc_domain? returns true for every "
+                     "address when the list is empty, so any authentik identity gets a Sure account.")
+            if not jit_marker:
+                fail(f"JIT creates accounts ({jit}) with no {JIT_MARKER} annotation. The real boundary is "
+                     "authentik's enrolment policy, not the domain list - the Google source deliberately "
+                     "has no enrollment_flow (authentik/blueprints-google.yaml:8,85) but the DEFAULT "
+                     "authentik registration flow is not declared in this tree, so it is unverified. "
+                     "Check it, then add the annotation; if self-enrolment is open the fix is "
+                     "AUTH_JIT_MODE=link_only, not a wider allowlist.")
+        if jit == "link_only" and state == "closed" and not jit_marker:
+            fail("AUTH_JIT_MODE=link_only with ONBOARDING_STATE=closed means nothing can ever create an "
+                 f"account from scratch. If users already exist that is intentional - say so with "
+                 f"{JIT_MARKER} so the next reader can tell a locked door from a mistake.")
+        if jit_marker and jit == "create_and_link" and not domains:
+            fail(f"the {JIT_MARKER} annotation is present but ALLOWED_OIDC_DOMAINS is empty - the marker "
+                 "asserts a reviewed boundary and an empty list asserts none")
 
         # The LLM endpoint: /v1 must be in the base, and the reasoning budget must not be a footgun.
         base = env_named(values, "OPENAI_URI_BASE") or ""
