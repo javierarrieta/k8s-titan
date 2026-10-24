@@ -222,10 +222,11 @@ def main():
                      "address when the list is empty, so any authentik identity gets a Sure account.")
             if not jit_marker:
                 fail(f"JIT creates accounts ({jit}) with no {JIT_MARKER} annotation. The real boundary is "
-                     "authentik's enrolment policy, not the domain list - the Google source deliberately "
-                     "has no enrollment_flow (authentik/blueprints-google.yaml:8,85) but the DEFAULT "
-                     "authentik registration flow is not declared in this tree, so it is unverified. "
-                     "Check it, then add the annotation; if self-enrolment is open the fix is "
+                     "authentik's enrolment policy, not the domain list. Evidence to re-check before "
+                     "adding it: the Google source has no enrollment_flow by design "
+                     "(authentik/blueprints-google.yaml:8,85), and /if/flow/default-registration-flow/ "
+                     "measured 404 for anonymous visitors on 2026-10-23 while the authentication and "
+                     "user-settings flows return 200. If either changes, the fix is "
                      "AUTH_JIT_MODE=link_only, not a wider allowlist.")
         if jit == "link_only" and state == "closed" and not jit_marker:
             fail("AUTH_JIT_MODE=link_only with ONBOARDING_STATE=closed means nothing can ever create an "

@@ -111,11 +111,14 @@ metadata:
     #   - ALLOWED_OIDC_DOMAINS below - but it is gmail.com, so it filters nothing meaningful.
     #   - authentik enrolment. Measured in this repo: the Google source has NO enrollment_flow on
     #     purpose (authentik/blueprints-google.yaml:8,85 - "unknown Google identities are denied"),
-    #     so Google cannot self-enrol. The DEFAULT authentik registration flow is not declared anywhere
-    #     in this tree, so whether username/password self-signup is open at auth.titan.arrieta.eu is
-    #     UNVERIFIED. Check it in the authentik admin UI before trusting this marker.
-    # If authentik self-enrolment turns out to be open, the fix is AUTH_JIT_MODE=link_only here, not a
-    # wider allowlist. `make sure-check` requires this annotation whenever JIT can create accounts.
+    #     so Google cannot self-enrol. The DEFAULT authentik registration flow was measured closed to
+    #     anonymous visitors on 2026-10-23: GET /if/flow/default-registration-flow/ returns 404 while
+    #     default-authentication-flow and default-user-settings-flow return 200 on the same server, and
+    #     /flows/-/default/registration/ 404s where /flows/-/default/authentication/ 302s. 404 conflates
+    #     deleted / not-visible / not-public, but all three mean the same thing to an anonymous visitor,
+    #     which is the only audience a registration flow has.
+    # If authentik enrolment ever opens up, the fix here is AUTH_JIT_MODE=link_only, not a wider
+    # allowlist. `make sure-check` requires this annotation whenever JIT can create accounts.
     sure.titan.arrieta.eu/sso-jit-boundary: "authentik-enrolment"
 spec:
   interval: 30m

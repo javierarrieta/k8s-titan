@@ -115,11 +115,33 @@ configured that step is unnecessary.
 *all* domains, not none (`AuthConfig.allowed_oidc_domain?` returns true when the
 list is empty). Evidence from this repo: the Google source deliberately has **no
 `enrollment_flow`** (`authentik/blueprints-google.yaml:8,85` — "unknown Google
-identities are denied"), so Google cannot self-enrol. The **default authentik
-registration flow is not declared anywhere in this tree**, so whether username and
-password self-signup is open at `auth.titan.arrieta.eu` is **unverified** — check it
-in the admin UI. If it is open, the fix is `AUTH_JIT_MODE=link_only`, not a wider
-allowlist.
+identities are denied"), so Google cannot self-enrol.
+
+**The default registration flow was then measured closed, from outside.** Same
+server, same path shape, same anonymous client, 2026-10-23:
+
+| request | result |
+| --- | --- |
+| `GET /if/flow/default-authentication-flow/` | **200** |
+| `GET /if/flow/default-user-settings-flow/` | **200** |
+| `GET /if/flow/default-registration-flow/` | **404** |
+| `GET /flows/-/default/authentication/` | 302 → `/if/flow/default-authentication-flow/` |
+| `GET /flows/-/default/registration/` | **404** |
+
+The two 200s are the control: the endpoint works and unauthenticated flow pages are
+reachable here, so the registration 404 is a statement about that flow and not
+about the probe. `/if/flow/<slug>/` 404s for deleted, not-visible and not-public
+alike, which is a real limitation of the method — but all three mean the same thing
+to an anonymous visitor, and an anonymous visitor is the only audience a
+registration flow has.
+
+So the JIT door is passable only by identities authentik already holds accounts for,
+which is what the `sso-jit-boundary` annotation asserts. If authentik enrolment ever
+opens, the fix is `AUTH_JIT_MODE=link_only`, not a wider allowlist.
+
+Note what did **not** work as a probe, so nobody repeats it: `/api/v3/flows/executor/…`
+returns 404 for every slug from outside, including `default-authentication-flow`, so
+the API paths are not usable evidence from here. `/if/flow/<slug>/` is.
 
 `make sure-check` gates both doors with explicit acknowledgement annotations, so a
 permissive setting is always a reviewed statement rather than a default that
