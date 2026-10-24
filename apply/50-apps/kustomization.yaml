@@ -105,3 +105,10 @@ resources:
   # A bad field here freezes coder's and authentik's updates for the length of the failure, which is
   # the accepted cost recorded at the top of this file; one hand-written manifest is not bulk.
   - llm/llm.yaml
+  # Sure, the personal-finance tracker trialled as a Firefly III replacement. Same two-file split as
+  # mealie: the CNPG Database and DatabaseRole must live in `databases` beside their Cluster while the
+  # app lives in `sure`. The third artifact is again not here — the OIDC client becomes a Secret in
+  # 10-secrets and is mounted by the authentik HelmRelease. Design:
+  # docs/superpowers/specs/2026-10-23-titan-sure-design.md.
+  - sure/sure-db.yaml
+  - sure/sure.yaml

@@ -209,3 +209,17 @@ metadata:
   annotations:
     kubernetes.io/metadata.name: llm
     kubernetes.io/description: "llm.titan.arrieta.eu - bearer-auth front for the halogen endpoint on llm01"
+---
+# Sure (personal-finance tracker, trialling as a Firefly III replacement). Fails §3.1 of the
+# 2026-10-19 scale-out design on four counts — four pods, its own database, its own public hostname,
+# its own Secret set — so it gets a namespace, and it stays in the shared `apps` stage per §3.2
+# because its bulk is a HelmRelease, which fails on its own rather than freezing coder and authentik.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: sure
+  labels:
+    name: sure
+  annotations:
+    kubernetes.io/metadata.name: sure
+    kubernetes.io/description: "Sure personal-finance tracker, authenticated by authentik, data in the shared CNPG cluster"

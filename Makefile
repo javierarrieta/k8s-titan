@@ -13,12 +13,12 @@ KUSTOMIZE_DIRS := $(shell find apply -name kustomization.yaml 2>/dev/null | sed 
 # not be able to slip between the encryption rule and the validation glob.
 SECRET_FIND := find apply/10-secrets \( -name '*.yaml' -o -name '*.yml' \) ! -name kustomization.yaml
 
-.PHONY: check check-ci kustomize-check kustomize-listing dry-run py-deps validate update-keys scan leak-check secrets-placement secrets-list secrets-present release-secrets db-url-check oidc-check grafana-oidc-check observability-oidc-check open-webui-oidc-check mealie-check crd-check namespace-check tesla-forwarder-test update-cnpg-crds update-crds
+.PHONY: check check-ci kustomize-check kustomize-listing dry-run py-deps validate update-keys scan leak-check secrets-placement secrets-list secrets-present release-secrets db-url-check oidc-check grafana-oidc-check observability-oidc-check open-webui-oidc-check mealie-check sure-check crd-check namespace-check tesla-forwarder-test update-cnpg-crds update-crds
 
 # leak-check runs FIRST: make has no -k, so it stops at the first failing prerequisite.
 # validate needs the age key, so an operator who forgot SOPS_AGE_KEY_FILE would never
 # reach a leak gate placed behind it.
-check: py-deps leak-check kustomize-check kustomize-listing validate secrets-placement release-secrets db-url-check oidc-check grafana-oidc-check observability-oidc-check open-webui-oidc-check mealie-check crd-check namespace-check tesla-forwarder-test
+check: py-deps leak-check kustomize-check kustomize-listing validate secrets-placement release-secrets db-url-check oidc-check grafana-oidc-check observability-oidc-check open-webui-oidc-check mealie-check sure-check crd-check namespace-check tesla-forwarder-test
 	@echo "check: all offline gates passed"
 
 # The subset provable from the tree alone - no age key, no cluster, no network.
@@ -571,3 +571,21 @@ open-webui-oidc-check:
 # contradicts (see authentik/blueprints-coder.yaml). Reads Secrets, so a local gate, not a CI one.
 mealie-check:
 	@python3 tools/mealie-check.py --root apply
+
+# sure-check: Sure is a HelmRelease, and every existing gate is shape-bound in a way that misses it.
+# `db-url-check` walks a HelmRelease env named *PG_CONNECTION_URL or a Deployment's DATABASE_URL — Sure
+# is a HelmRelease carrying DATABASE_URL, so that gate reports zero references and passes vacuously.
+# `crd-check` walks vendored CRDs and `namespace-check` walks namespaces; neither looks inside a
+# HelmRelease values block, which is where all of Sure's configuration lives. So this gate reads the
+# values directly: the OIDC client across blueprint/Secret/mount, DATABASE_URL against CNPG's copy and
+# against the `sure` role rather than the CNPG superuser, and the chart defaults that fail silently —
+# existingSecret not wiring OPENAI_ACCESS_TOKEN, /rails/storage not mounted or mounted from a volume or
+# a claim that does not exist, the PVC left on the deleting storage class, a wrong ingress className, a
+# Redis with no --requirepass or no probe, Reloader reading only podAnnotations, the subcharts that must
+# stay off, and the reasoning-model token budget. ONBOARDING_STATE is checked with an acknowledgement
+# marker rather than a bare ban, because the documented bring-up sequence needs it open for exactly one
+# reconcile. Its honest limit is in its docstring: it proves ALLOWED_OIDC_DOMAINS is non-empty and cannot
+# prove it names the domain of the identity that will sign in — and a non-empty list is exclusive.
+# Reads Secrets, so a local gate, not a CI one.
+sure-check:
+	@python3 tools/sure-check.py --root apply

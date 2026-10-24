@@ -1,0 +1,507 @@
+# Sure on titan: personal-finance tracker being trialled as a replacement for the Firefly III
+# instance in casa. Design, evidence and the open questions:
+# docs/superpowers/specs/2026-10-23-titan-sure-design.md.
+#
+# WHY IT IS A HelmRelease AND STAYS IN 50-apps
+# The chart is the bulk of the object count, and a bad `values` block fails this HelmRelease on its
+# own rather than freezing coder and authentik — the same reasoning that kept coder and open-webui in
+# the `apps` stage (spec §3.2 of the 2026-10-19 scale-out design). The namespace is separate because
+# §3.1 is about pod count, databases and credentials, and Sure fails it on four counts.
+#
+# WHAT IS BACKED UP AND WHAT IS NOT
+# Postgres (`sure`, in the Cluster that ships base backups and WAL) holds users, accounts,
+# transactions, categories and the OIDC identity. The PVC at /rails/storage holds uploaded files:
+# transaction attachments, account statements, imports/exports, profile pictures
+# (upstream docs/hosting/docker.md:196,487). Only the Postgres half is protected — the generic PV
+# stream is still deferred (AGENTS.md, "Backups"). Upstream treats that volume as part of its own
+# backup procedure, so this is a named gap, not an oversight.
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: HelmRepository
+metadata:
+  name: sure
+  namespace: sure
+spec:
+  type: default
+  url: https://we-promise.github.io/sure
+  interval: 12h
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: sure-storage
+  namespace: sure
+spec:
+  accessModes:
+  - ReadWriteOnce
+  # local-path-retain, not the default local-path: Retain is the only deletion mitigation this
+  # cluster has for a PVC (apply/20-infra/storage-retain.yaml), and it is a deletion mitigation and
+  # NOT a backup. local-path is thin — it reserves a directory, not disk.
+  storageClassName: local-path-retain
+  resources:
+    requests:
+      # Attachments and statements are the only thing that grows here and they are small (PDFs).
+      # 5Gi matches mealie's ceiling for the same class of content.
+      storage: 5Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sure-redis
+  namespace: sure
+  labels:
+    app: sure-redis
+spec:
+  replicas: 1
+  strategy:
+    # RWO PVC on the app; Redis here is `--save ""` with no volume at all, so there is nothing to
+    # conflict about, but Recreate keeps a single ReplicaSlot honest and matches tesla's redis.
+    type: Recreate
+  selector:
+    matchLabels:
+      app: sure-redis
+  template:
+    metadata:
+      labels:
+        app: sure-redis
+      # Same reason as web and worker, with a sharper edge here: this pod reads REDIS_PASSWORD from
+      # sure-secrets, and so do web and worker through REDIS_URL. If only the Rails pods restart on a
+      # rotation, Redis keeps requiring the OLD password while the app presents the NEW one and every
+      # queue operation fails with an auth error naming Redis. One Secret, three readers, all three
+      # have to reload. `make sure-check` requires this annotation.
+      annotations:
+        reloader.stakater.com/auto: "true"
+    spec:
+      # Copied from apply/60-tesla/redis.yaml:28-38, which is the file that records why naming the uid
+      # is the only thing that works here: the redis image config sets no User at all, so without these
+      # the container runs as root, and the entrypoint drops privileges only when it starts as root.
+      # Citing the image digest was never evidence about the security context, and the first draft of
+      # this file cited the one and omitted the other.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: redis
+        # Same image and digest tesla runs (apply/60-tesla/redis.yaml:41) — already proven on this
+        # node, and pinned by digest per the fleet rule.
+        image: library/redis:8.8.3-alpine@sha256:0b2b77d3ea5078274795e3177cdbdada8b96316684a38911d528534ed679b5ec
+        # No persistence, on purpose: Sure uses Redis for Sidekiq queues and short-lived cache. A
+        # queued job lost to a Redis restart is retried by Sidekiq; a stale cache is worse than an
+        # empty one, and a volume would only make the stale state survive a restart.
+        #
+        # --requirepass, and this is not decoration. There is no NetworkPolicy anywhere in this tree, so
+        # an open Redis is reachable from every pod in the cluster, and a writable Sidekiq queue is an
+        # execution primitive: a job enqueued by anything in here runs as Sure's own user against Sure's
+        # own database. Tesla's redis predates that being understood; this one does not get to inherit
+        # it silently. The password is a key of sure-secrets and the same value is inside REDIS_URL —
+        # `make sure-check` fails if the two diverge, because a mismatch crash-loops the worker with an
+        # auth error that names Redis and not the Secret.
+        args: ["redis-server", "--save", "", "--appendonly", "no", "--requirepass", "$(REDIS_PASSWORD)"]
+        env:
+        # kubelet expands $(VAR) in args from variables defined in the same container's env list, so
+        # this must stay here rather than travelling with the other Rails keys below.
+        - name: REDIS_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: sure-secrets
+              key: REDIS_PASSWORD
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+        ports:
+        - name: redis
+          containerPort: 6379
+        # Probed, because without a probe a hung Redis is never restarted and every failure shows up
+        # as a Sidekiq error that reads like an app problem. `make sure-check` requires the readiness
+        # probe to exist. Keyed on the reply rather than the exit code because `redis-cli -a` prints a
+        # warning to stderr and still exits 0.
+        #
+        # `$REDIS_PASSWORD` here is expanded by `sh` inside the container, NOT by kubelet: kubelet's
+        # `$(VAR)` expansion applies to command/args only, never to probe commands. The variable is in
+        # this container's env, so the shell sees it.
+        readinessProbe:
+          exec:
+            command: ["sh", "-c", "redis-cli -a \"$REDIS_PASSWORD\" ping 2>/dev/null | grep -q PONG"]
+          initialDelaySeconds: 5
+          periodSeconds: 10
+          timeoutSeconds: 3
+        livenessProbe:
+          exec:
+            command: ["sh", "-c", "redis-cli -a \"$REDIS_PASSWORD\" ping 2>/dev/null | grep -q PONG"]
+          initialDelaySeconds: 15
+          periodSeconds: 20
+          timeoutSeconds: 5
+        resources:
+          requests:
+            cpu: 25m
+            memory: 64Mi
+          limits:
+            # cpu capped like tesla's redis: an unthrottled Redis on a single-node cluster takes the
+            # node from Rails, and Sidekiq backpressure is the cheaper failure.
+            cpu: 250m
+            memory: 256Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: sure-redis
+  namespace: sure
+  labels:
+    app: sure-redis
+spec:
+  selector:
+    app: sure-redis
+  ports:
+  - name: redis
+    port: 6379
+    targetPort: redis
+---
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: sure
+  namespace: sure
+  annotations:
+    # The boundary of this instance is authentik's enrolment policy, and this marker is what makes that
+    # a reviewed statement rather than an implication. Sure's SSO JIT (AUTH_JIT_MODE=create_and_link,
+    # which is Sure's default) creates a user and a family for any authentik identity that has no
+    # Sure account yet. What narrows it:
+    #   - ALLOWED_OIDC_DOMAINS below - and it is an EXCLUSIVE filter, not a no-op: a non-empty list
+    #     admits those domains and refuses every other authentik identity (app/models/auth_config.rb,
+    #     allowed_oidc_domain?). It therefore has to contain the domain of the identity that is
+    #     actually going to sign in, or the instance can never get its first user.
+    #   - authentik enrolment. Measured in this repo: the Google source has NO enrollment_flow on
+    #     purpose (authentik/blueprints-google.yaml:8,85 - "unknown Google identities are denied"),
+    #     so Google cannot self-enrol. The DEFAULT authentik registration flow was measured closed to
+    #     anonymous visitors on 2026-10-23: GET /if/flow/default-registration-flow/ returns 404 while
+    #     default-authentication-flow and default-user-settings-flow return 200 on the same server, and
+    #     /flows/-/default/registration/ 404s where /flows/-/default/authentication/ 302s. 404 conflates
+    #     deleted / not-visible / not-public, but all three mean the same thing to an anonymous visitor,
+    #     which is the only audience a registration flow has.
+    # If authentik enrolment ever opens up, the fix here is AUTH_JIT_MODE=link_only, not a wider
+    # allowlist. `make sure-check` requires this annotation whenever JIT can create accounts.
+    sure.titan.arrieta.eu/sso-jit-boundary: "authentik-enrolment"
+spec:
+  interval: 30m
+  timeout: 10m
+  # Same as every other app/infra HelmRelease in this tree (coder, authentik, reloader, reflector,
+  # cert-manager, the CNPG operator, kube-state-metrics), and AGENTS.md states it as the convention.
+  # Notify-only: it does not correct drift, it makes drift visible in the HelmRelease status. Without
+  # it an out-of-band `kubectl edit` on this release's env block survives every later reconcile with
+  # nothing anywhere recording that it happened (AGENTS.md, "Live drift is not corrected here").
+  driftDetection:
+    mode: enabled
+  # NO dependsOn, deliberately. The migrate Job cannot connect until CNPG has created the role, so
+  # ordering looks desirable — but sure-db.yaml is applied by the same `apps` Kustomization as this
+  # HelmRelease, and the only Kustomization that could be depended on (`databases`) does not own the
+  # Database. A dependsOn naming a HelmRelease called `postgres` would simply fail to resolve: there
+  # is no such HelmRelease, the Cluster is a plain CNPG object. coder, which has the identical race,
+  # solves it with `install.strategy: RetryOnFailure` (apply/50-apps/coder/coder.yaml:48-51) and so does
+  # this, for the same reason: the first install can fail once on the migrate hook and the retry succeeds
+  # with the role present. The mechanism matters. `install.remediation.retries`, which an earlier
+  # revision of this file used, would instead have meant *uninstall the release and reinstall it
+  # immediately* — Flux's default install remediation is `uninstall` — so it retried the race with no
+  # delay at all and took the pods down while it did. RetryOnFailure waits retryInterval and leaves the
+  # release alone.
+  chart:
+    spec:
+      chart: sure
+      # Pinned to an exact pre-release. NEVER `stable` here: this is pre-1.0 software (769 open
+      # issues, and v0.7.6-alpha.9 was published the day this was written). An upgrade is a commit.
+      version: "0.7.6-alpha.9"
+      sourceRef:
+        kind: HelmRepository
+        name: sure
+        namespace: sure
+  install:
+    strategy:
+      name: RetryOnFailure
+      retryInterval: 5m
+  upgrade:
+    remediation:
+      # Roll back once if an upgrade fails. Left at rollback deliberately: with the migrate hook running
+      # post-upgrade (see values.migrations below), a failed migration can leave the schema ahead of a
+      # rolled-back app, and Rails tolerates that direction — extra rows in schema_migrations are inert,
+      # missing ones are not. The reverse (new app, old schema) is the failure that serves errors, and
+      # that is the window the hook ordering cannot close.
+      retries: 1
+  values:
+    image:
+      repository: ghcr.io/we-promise/sure
+      tag: "0.7.6-alpha.9"
+      pullPolicy: IfNotPresent
+
+    rails:
+      env: production
+      # Contains SECRET_KEY_BASE, the three ACTIVE_RECORD_ENCRYPTION_* keys, DATABASE_URL,
+      # REDIS_URL, OPENAI_ACCESS_TOKEN, OIDC_CLIENT_ID, OIDC_CLIENT_SECRET. The chart injects these
+      # as individual secretKeyRef env entries, not envFrom (verified by rendering the chart).
+      existingSecret: sure-secrets
+      encryptionEnv:
+        enabled: true
+
+      settings:
+        SELF_HOSTED: "true"
+        # CLOSED, and it never had to be open. This governs ONLY the local email+password registration
+        # page (registrations_controller.rb:119-121 redirects when state is closed). The first account
+        # comes from SSO JIT instead - an authentik identity signing in for the first time is sent to
+        # oidc_accounts#new_user and creates itself - so the instance is never reachable in a state where
+        # the first visitor wins it. Upstream's own sequence (docs/hosting/docker.md step 5a) assumes a
+        # local first account; with OIDC configured that step is unnecessary.
+        ONBOARDING_STATE: "closed"
+        AI_DEBUG_MODE: "false"
+
+      # --- LLM: casa's halogen endpoint, reached over the WireGuard mesh ------------------------
+      # titan is a public OVH box, not on the LAN; 192.168.0.0/24 is routable from titan pods only
+      # because the mesh advertises it. Precedent that this works: grafana's datasource
+      # (grafana-datasources.yaml:7), promtail reaching 192.168.0.42 ("Measured from a titan pod:
+      # HTTPS 200"), opencloud reaching 192.168.0.6:9000.
+      #
+      # REACHABILITY: settled, by a chain rather than by a probe. open-webui runs on titan and its
+      # admin settings point at this endpoint with models responding (confirmed by the operator
+      # 2026-10-23). That is a proof, not an impression: open-webui's traffic already crosses the mesh
+      # to 192.168.0.29:8731, so casa's firewall admits it from mesh sources. The repo cannot show it,
+      # because open-webui keeps model configuration in its own Postgres and its Secret carries no base
+      # URL (checked 2026-10-23) - which is why this had to come from the running instance.
+      # Direct check, if it is ever doubted:
+      #   kubectl --context titan -n sure exec deploy/sure-web -- curl -sf --max-time 10 \
+      #     http://192.168.0.29:8731/v1/models
+      #
+      # OPENAI_URI_BASE is handed straight to ruby-openai as `uri_base`
+      # (app/models/provider/openai.rb:85), so it MUST include /v1. With a custom uri_base the
+      # provider reports custom_provider? and supports_responses_endpoint? defaults to false, i.e. it
+      # calls /v1/chat/completions — which is what this endpoint serves.
+      extraEnv:
+        LLM_PROVIDER: "openai"
+        OPENAI_URI_BASE: "http://192.168.0.29:8731/v1"
+        OPENAI_MODEL: "halogen-qwen3.8-flash-next"
+        OPENAI_SUPPORTS_PDF_PROCESSING: "false"
+        # Left unset, config/auth.yml defaults OIDC_BUTTON_LABEL to "" and the SSO button renders with
+        # no text at all - which reads as a broken login page rather than as a missing label.
+        OIDC_BUTTON_LABEL: "Sign in with authentik"
+
+        # halogen-qwen3.8-flash-next is a REASONING model: it emits reasoning_content before
+        # content, and reasoning tokens are charged against max_tokens. Measured: max_tokens=16
+        # returned finish_reason=length with content:"" — in an auto-categorizer that is
+        # indistinguishable from "nothing to do", a silent no-op at health=ok.
+        #
+        # The endpoint CAN disable reasoning per request (chat_template_kwargs {"enable_thinking":
+        # false}, reasoning {"effort":"none"}, or thinking {"type":"disabled"} — all measured
+        # working). Sure cannot send any of them: its provider builds client options from
+        # access_token/uri_base/model only and the sole per-request escape in .env.example is
+        # OPENAI_EXTRA_HEADERS, which is headers, not body. So until upstream grows an extra_body
+        # knob, the mitigation is budget and batch size, not the switch.
+        LLM_JSON_MODE: "auto"
+        LLM_CONTEXT_WINDOW: "8192"
+        LLM_MAX_RESPONSE_TOKENS: "2048"
+        LLM_MAX_ITEMS_PER_CALL: "10"
+        OPENAI_REQUEST_TIMEOUT: "120"
+        AI_RESPONSE_TIMEOUT: "180"
+        ASSISTANT_MAX_TOOL_CALL_ITERATIONS: "3"
+
+        # Sure reads OIDC_REDIRECT_URI from env; the chart's secret block only carries
+        # OIDC_CLIENT_ID / _SECRET / OIDC_ISSUER (see the extraEnvVars note below - that is why all
+        # three are wired by hand here).
+        #
+        # The callback path is /auth/openid_connect/callback, verified at the layer that decides it:
+        # config/initializers/omniauth.rb calls `provider :openid_connect, oidc_options`, and OmniAuth
+        # mounts at /auth/<strategy>/callback - so the segment is the strategy symbol, not the provider
+        # `name`. Both happen to be "openid_connect" here (config/auth.yml:46-47), which is why reading
+        # only the name would have been luck rather than verification. Route: config/routes.rb:355.
+        #
+        # The related silent failure, worth knowing before debugging a missing SSO button: if
+        # OIDC_ISSUER / CLIENT_ID / SECRET are blank, ProviderOptionsBuilder returns nothing and the
+        # initializer logs "Skipping OIDC provider 'openid_connect' - missing required configuration"
+        # and carries on. The app boots healthy with password login only. That is exactly what the
+        # existingSecret gap would have caused had these three not been named in extraEnvVars.
+        OIDC_ISSUER: "https://auth.titan.arrieta.eu/application/o/sure/"
+        OIDC_REDIRECT_URI: "https://sure.titan.arrieta.eu/auth/openid_connect/callback"
+
+        # --- who is allowed to get a Sure account --------------------------------------------------
+        # Two independent doors, and ONBOARDING_STATE only governs the first one:
+        #   local registration page  -> ONBOARDING_STATE (closed above)
+        #   SSO account creation     -> AUTH_JIT_MODE + ALLOWED_OIDC_DOMAINS (config/auth.yml, read by
+        #                               config/initializers/auth.rb; enforced at
+        #                               oidc_accounts_controller.rb:24,119, which never reads
+        #                               Setting.onboarding_state)
+        # create_and_link is Sure's default and is what makes SSO signup work: an unknown authentik
+        # identity gets a user + family. See the HelmRelease annotation for what actually bounds it.
+        AUTH_JIT_MODE: "create_and_link"
+        # THIS LIST IS EXCLUSIVE, AND IT HAS TO CONTAIN THE DOMAIN YOU WILL SIGN IN WITH.
+        # An earlier revision of this file called `gmail.com` a list that "filters nothing". That is
+        # backwards: AuthConfig.allowed_oidc_domain? (app/models/auth_config.rb, read at
+        # 0.7.6-alpha.9) returns true for everything only when the list is EMPTY; a non-empty list
+        # compares `email.split("@").last.downcase` against it and refuses a miss. With
+        # ONBOARDING_STATE closed above, JIT is the only door, and oidc_accounts_controller#create_user
+        # answers `account_creation_disabled` AFTER a fully successful authentik login - so a domain
+        # missing here means that identity can never have an account, while the app, the ingress, the
+        # OIDC exchange and every gate in this repo stay green.
+        #
+        # The value, and what each entry rests on:
+        #   gmail.com       - load-bearing. The identities in authentik are mostly gmail (operator,
+        #                     2026-10-25), so this is the domain the first account will be created from.
+        #   arrieta.eu      - "mostly" is not "all", and one non-gmail account is demonstrably real:
+        #                     `akadmin` (created at /if/flow/initial-setup/,
+        #                     docs/authentik-runbook.md:257) reached coder's user table as
+        #                     akadmin@arrieta.eu through the OIDC exchange
+        #                     (docs/superpowers/plans/2026-10-06-titan-coder.md:1237).
+        #   techdelivery.es - the other address this operator demonstrably holds (the ACME registration
+        #                     email, apply/20-infra/cert-manager/ovh-webhook.yaml:51).
+        #
+        # So the earlier single-value `gmail.com` would have let the primary identity in - the mistake
+        # was the reasoning, not only the value - but it refused every other authentik account, and at
+        # least one of those exists. Nothing here can enumerate the rest, which is why the list is the
+        # union and not a guess: the cost of an extra entry is bounded by authentik's enrolment policy
+        # (see the HelmRelease annotation, which is what actually decides who may authenticate at all),
+        # and the cost of a missing one is an identity that can never get through a door it can see.
+        # Acceptance item 9 in the spec (§8) records the identity that actually JIT-created; prune to
+        # what that names, and nothing further.
+        ALLOWED_OIDC_DOMAINS: "arrieta.eu,techdelivery.es,gmail.com"
+        # Left at Sure's default (true) deliberately. With ONBOARDING_STATE closed nobody can create a
+        # local account, and a JIT-created user has no password, so the only local door is one this
+        # account could set for itself. Flipping it to false would make the instance SSO-only, and the
+        # documented break-glass is AUTH_LOCAL_ADMIN_OVERRIDE_ENABLED - which depends on being a super
+        # admin, a status not verified here. Unverified break-glass is worse than no break-glass.
+
+      # DATABASE_URL / REDIS_URL as full EnvVar objects so the passwords stay in the Secret.
+      #
+      # WHY THEY ARE NOT DUPLICATED, corrected: an earlier note here claimed naming these two in
+      # extraEnvVars is what makes templates/_env.tpl skip the chart-computed URLs. It is not. The skip
+      # is `hasKey .Values.rails.extraEnv "DATABASE_URL"` — the extraEnv MAP, which does not carry them.
+      # The chart computes nothing here for a different reason: sure.databaseUrl returns "" unless
+      # cnpg.cluster.enabled, and sure.redisUrl returns "" unless redisOperator.managed.enabled or
+      # redisSimple.enabled. Verified by rendering 0.7.6-alpha.9 with these values: 28 env entries, no
+      # duplicate names. The trap is that the condition lives in the flags below and not in this block, so
+      # enabling one of them later would emit a second DATABASE_URL plus a DB_PASSWORD secretKeyRef
+      # pointing at a key sure-secrets does not have — CreateContainerConfigError. `make sure-check` now
+      # pins all three flags off so that cannot arrive quietly.
+      #
+      # WHY SO MUCH TRAVELS HERE AND NOT THROUGH existingSecret: with `existingSecret` set, the chart
+      # wires only SECRET_KEY_BASE and the three ACTIVE_RECORD_ENCRYPTION_* keys from it (measured on
+      # 0.7.6-alpha.9 — OPENAI_ACCESS_TOKEN and OIDC_* are listed in rails.secret.values but are not
+      # emitted when existingSecret is in use). Anything else the app needs from the Secret has to be
+      # named here explicitly, or it silently never reaches the pod.
+      extraEnvVars:
+      - name: OPENAI_ACCESS_TOKEN
+        valueFrom:
+          secretKeyRef:
+            name: sure-secrets
+            key: OPENAI_ACCESS_TOKEN
+      - name: DATABASE_URL
+        valueFrom:
+          secretKeyRef:
+            name: sure-secrets
+            key: DATABASE_URL
+      - name: REDIS_URL
+        valueFrom:
+          secretKeyRef:
+            name: sure-secrets
+            key: REDIS_URL
+      - name: OIDC_CLIENT_ID
+        valueFrom:
+          secretKeyRef:
+            name: sure-secrets
+            key: OIDC_CLIENT_ID
+      - name: OIDC_CLIENT_SECRET
+        valueFrom:
+          secretKeyRef:
+            name: sure-secrets
+            key: OIDC_CLIENT_SECRET
+
+    # --- dependencies: use what titan already runs ---------------------------------------------
+    # The chart defaults to installing the CloudNativePG operator and its own Cluster. titan already
+    # runs both, and every other app here (authentik, coder, open-webui, mealie, teslamate) is a
+    # Database inside the shared `postgres` Cluster — which is also how Sure's data gets onto the
+    # existing ScheduledBackup for free.
+    cnpg:
+      enabled: false
+      cluster:
+        enabled: false
+    # No Redis operator on titan. Redis is the plain Deployment above; the chart's bundled
+    # redisSimple derives its service name and password key internally, which is a guess rather than
+    # something a reviewer can check.
+    redisOperator:
+      enabled: false
+      managed:
+        enabled: false
+    redisSimple:
+      enabled: false
+
+    # NOT a pre-upgrade hook, whatever this comment said when the chart was assumed rather than read.
+    # templates/migrate-job.yaml:9 hardcodes `helm.sh/hook: post-install,post-upgrade` and the chart's
+    # README:483 says so in words (README:3 advertises "pre-upgrade migrations" in its feature list, so
+    # cite the line and not the file - the two halves of that README disagree). The Job runs AFTER the
+    # new pods are applied, because it has to wait for the
+    # DB to exist before it can connect. So a failed migration does fail the release loudly, but it does
+    # not prevent the new web pod from serving a request against a schema it has not migrated yet — that
+    # window is seconds wide on a single replica and is the honest cost of this strategy.
+    # `migrations.strategy: initContainer` is the chart's alternative and closes the window for the web
+    # pod (it gates the rollout on `rake db:pending_migrations`), at the cost of a first-boot dependency
+    # on a rake task this image has never been observed running — and worker-deployment.yaml has no
+    # initContainer path at all, so Sidekiq would start early regardless. Deliberate call for a trial:
+    # keep the chart's tested default, know the window, revisit before this is anything load-bearing.
+    migrations:
+      strategy: job
+
+    web:
+      replicas: 1
+      # Reloader reads this on the pod template (the chart exposes no workload-metadata annotation,
+      # only web.podAnnotations / worker.podAnnotations). Without it a rotated OIDC client or
+      # SECRET_KEY_BASE sits unread in a running pod that reports Ready — the same inert-annotation
+      # defect reloader.yaml records for promtail, open-webui, grafana and mealie. Requires `sure` in
+      # reloader.namespaces; watchGlobally is false.
+      podAnnotations:
+        reloader.stakater.com/auto: "true"
+      resources:
+        requests:
+          cpu: 100m
+          memory: 512Mi
+        limits:
+          memory: 1Gi
+      extraVolumes:
+      - name: storage
+        persistentVolumeClaim:
+          claimName: sure-storage
+      extraVolumeMounts:
+      # /rails/storage is the path upstream mounts (docs/hosting/docker.md:196). Mounting it at the
+      # wrong path does not fail anything — uploads silently land in the container's ephemeral
+      # filesystem and disappear on the next pod, which is why the path is cited rather than guessed.
+      - name: storage
+        mountPath: /rails/storage
+
+    worker:
+      replicas: 1
+      podAnnotations:
+        reloader.stakater.com/auto: "true"
+      resources:
+        requests:
+          cpu: 100m
+          memory: 256Mi
+        limits:
+          memory: 768Mi
+      extraVolumes:
+      - name: storage
+        persistentVolumeClaim:
+          claimName: sure-storage
+      extraVolumeMounts:
+      # Both pods mount it: the worker processes imports and writes attachments too. Single node,
+      # ReadWriteOnce, one node — legal, and it stops being legal the day this goes to 2 nodes.
+      - name: storage
+        mountPath: /rails/storage
+
+    ingress:
+      enabled: true
+      className: traefik
+      hosts:
+      - host: sure.titan.arrieta.eu
+        paths:
+        - path: /
+          pathType: Prefix
+      tls:
+      - secretName: titan-tls
+        hosts:
+        - sure.titan.arrieta.eu

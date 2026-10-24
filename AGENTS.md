@@ -114,6 +114,14 @@ the stream is rejected per-pod, silently, with promtail reporting healthy.
   fine and is silently never applied.
 - The cluster key is `titan-k8s`, not the titan host key. Do not "simplify" the two
   into one: the separation is what caps a pod compromise at titan's own secrets.
+- **sops matches creation rules against the path you hand it, not the path the output lands at.** So
+  `sops --encrypt /tmp/x.yaml > apply/10-secrets/y.yaml` dies with `no matching creation rules found`
+  *after* the shell redirect has already truncated `y.yaml` to zero bytes — the damage reads like the
+  encrypt failed, not like the redirect ate the file. Stage the plaintext inside `apply/10-secrets/`,
+  encrypt to a temp file, confirm it is non-empty, then move it into place. To change one key, the quiet
+  path is `sops set <file> '["stringData"]["KEY"]' --value-stdin` with the value JSON-encoded — file
+  before index, and `--value-file` errors with `Invalid set index format` in sops 3.13.3. Neither form
+  prints the secret, which is the point.
 - This repo is public. No credentials, and no concrete public IPv4 — write
   `<OVH_PUBLIC_IP>`.
 - Ingress class is k3s' bundled `traefik`, and its configuration is **not** managed
@@ -202,6 +210,19 @@ default locks every non-admin out of a login page that still looks healthy. `db-
 reference-driven across both `HelmRelease` and `Deployment` env — including a `DATABASE_URL` that
 arrives through `envFrom` rather than a named `secretKeyRef` — so a tree with no references reports
 zero instead of passing vacuously.
+
+`sure-check` is that class one app further on, and it exists because every older gate is shape-bound in a
+way that misses Sure: `db-url-check` walks a `HelmRelease` env named `*PG_CONNECTION_URL` or a
+`Deployment`'s `DATABASE_URL`, and Sure is a `HelmRelease` carrying `DATABASE_URL`, so that gate reports
+zero references and passes. `sure-check` reads the `values` block instead and ties the OIDC client across
+blueprint, mount and `sure-secrets`, the DB password across both files that hold it, the Redis password
+across the two keys and the pod that reads them, and the chart defaults that fail silently at
+`health=ok` — including the one where `rails.existingSecret` makes the chart emit only `SECRET_KEY_BASE`
+and the three Active Record encryption keys, so anything else in that Secret has to be named in
+`rails.extraEnvVars` or the Secret has it, the pod does not, and the feature stays off at `health=ok`. Its
+honest limit is written in its docstring: it proves `ALLOWED_OIDC_DOMAINS` is non-empty and cannot prove
+it contains the domain of the identity that will sign in, and a non-empty list is exclusive — a miss
+refuses that identity after a successful IdP login, with every gate green.
 
 `make kustomize-listing` is in both, and it is not stylistic: `apply/50-apps/coder/coder-db.yaml` was
 committed, built green, reviewed green, and named by no kustomization, so Flux would never have
