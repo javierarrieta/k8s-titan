@@ -15,6 +15,6 @@ spec:
   secretTemplate:
     annotations:
       reflector.v1.k8s.emberstack.com/reflection-allowed: "true"
-      reflector.v1.k8s.emberstack.com/reflection-allowed-namespaces: "apps,auth,open-webui,observability,files,mealie"
+      reflector.v1.k8s.emberstack.com/reflection-allowed-namespaces: "apps,auth,open-webui,observability,files,mealie,sure"
       reflector.v1.k8s.emberstack.com/reflection-auto-enabled: "true"
-      reflector.v1.k8s.emberstack.com/reflection-auto-namespaces: "apps,auth,open-webui,observability,files,mealie"
+      reflector.v1.k8s.emberstack.com/reflection-auto-namespaces: "apps,auth,open-webui,observability,files,mealie,sure"
