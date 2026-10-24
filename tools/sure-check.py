@@ -177,15 +177,20 @@ def main():
                  "authorization request and both services look healthy")
 
         # The onboarding window, as a reviewed decision rather than a default.
-        state = ((rails.get("settings") or {}).get("ONBOARDING_STATE") or "").lower()
+        state = ((rails.get("settings") or {}).get("ONBOARDING_STATE") or "").strip().lower()
         marker = ((hr.get("metadata") or {}).get("annotations") or {}).get(ONBOARDING_MARKER)
         if state == "open" and not marker:
             fail("ONBOARDING_STATE is open with no acknowledgement annotation. On a public hostname the "
                  "first visitor to /account/sign_up owns the instance. Spec §5.1: open, create the one "
                  f"account, close. If that is the current step, add {ONBOARDING_MARKER}: \"open-until-"
                  "first-account\" and remove it in the commit that flips this to closed.")
-        if state not in ("open", "closed", "invitations", "disabled", ""):
-            fail(f"ONBOARDING_STATE is {state!r}, which is not a value Sure recognises")
+        if state not in ("open", "closed", "invite_only", ""):
+            fail(f"ONBOARDING_STATE is {state!r}. Sure accepts open | closed | invite_only (.env.example, "
+                 "and docs/hosting/docker.md step 5a). A value it does not recognise is not a safe "
+                 "default - it is whatever the app falls back to.")
+        if state == "":
+            fail("ONBOARDING_STATE is empty - the chart default is open, so an empty value is not a "
+                 "safe default, it is the value that lets anyone register")
         if marker and state != "open":
             fail(f"the {ONBOARDING_MARKER} annotation is still present but ONBOARDING_STATE is "
                  f"{state!r} - the marker exists to mark an open window, and a stale one teaches the "
