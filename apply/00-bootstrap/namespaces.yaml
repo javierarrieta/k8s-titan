@@ -182,3 +182,26 @@ metadata:
   annotations:
     kubernetes.io/metadata.name: mealie
     kubernetes.io/description: "Mealie recipe manager, authenticated by authentik, data in the shared CNPG cluster"
+---
+# The public LLM endpoint at llm.titan.arrieta.eu, which fronts halogen-flash on the llm01 box.
+# It fails the admission test in docs/superpowers/specs/2026-10-19-titan-app-scale-out-design.md
+# §3.1 on two counts — own public hostname, own Secret set — so it gets a namespace, and it stays
+# in the shared `apps` stage per §3.2: one hand-written manifest, no bulk authored here.
+#
+# The namespace holds a proxy target rather than an app: the only pod here is the nginx that answers
+# the bearer-token check, and the model itself runs on another host. That is why the description
+# names the hostname rather than a product.
+#
+# NO pod-security label, deliberately, and for the reason open-webui records above rather than the
+# reason files does: the bearer-auth container is the root nginx image, because it rewrites
+# /etc/nginx/conf.d at start. A `restricted` warn on a workload that can never satisfy it is a
+# signal that reads better than it is. See apply/50-apps/llm/llm.yaml.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: llm
+  labels:
+    name: llm
+  annotations:
+    kubernetes.io/metadata.name: llm
+    kubernetes.io/description: "llm.titan.arrieta.eu - bearer-auth front for the halogen endpoint on llm01"
