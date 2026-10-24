@@ -15,8 +15,10 @@
 # VERIFIED BEFORE WRITING, not assumed: `curl http://192.168.0.29:8731/health` from this cluster
 # returned 200 in 83 ms over that peer.
 ---
-# A bare Endpoints with no selector, because the backend is a host outside the cluster. kube-proxy
-# will never populate this itself and nothing will ever overwrite it.
+# A bare Endpoints with no selector, because the backend is a host outside the cluster. The endpoints
+# controller only owns the Endpoints of a Service that HAS a selector, so nothing reconciles this one
+# and nothing overwrites it; kube-proxy sits one step further downstream and only consumes the
+# EndpointSlices mirrored from it.
 #
 # v1 Endpoints is deprecated in favour of discovery.k8s.io/v1beta1/v1 EndpointSlice and kubectl says
 # so on every `get`. It is still the supported way to hand a Service a fixed address list, it is
@@ -36,8 +38,9 @@ subsets:
       - name: web
         port: 8731
 ---
-# No selector, on purpose: a selector would make kube-proxy ignore the Endpoints above and write an
-# empty one instead. Port 80 in, 8731 out, so the Ingress backend reads like every other Ingress in
+# No selector, on purpose: with a selector the endpoints controller takes ownership of the Endpoints
+# object and reconciles it against the pods that match, of which there are none, so it would empty the
+# one above. Port 80 in, 8731 out, so the Ingress backend reads like every other Ingress in
 # this tree.
 apiVersion: v1
 kind: Service
@@ -55,6 +58,11 @@ spec:
 # `Basic` scheme, and the clients here send `Authorization: Bearer <token>` — so the source cluster
 # does it with a forwardAuth call to a throwaway nginx that answers 200 or 401. That is what this
 # duplicates, because "same key" means the same `Authorization` header has to work here too.
+#
+# EXCEPT THE ONE COMPARISON LINE, WHICH IS NOT COPIED VERBATIM. Same header, same token, different
+# operator: `~*` is a regex and the token is not a regex-safe string. Read the
+# bearer-auth-nginx-config comment below before "restoring parity" with
+# ../k8s-techdelivery apply/20-infra/auth/bearer-auth-middleware.yaml, which is itself broken.
 #
 # THE ONE LINE THAT DECIDES WHETHER THE AUTH IS ON AT ALL is the annotation on the Ingress at the
 # bottom of this file. A router that references a middleware Traefik cannot resolve does not fail
@@ -84,24 +92,41 @@ spec:
       labels:
         app: bearer-auth-service
     spec:
+      # Non-root, and the uid is read out of the image rather than remembered: its config carries
+      # User=101, and the overlay layer owns /etc/nginx/conf.d as drwxrwxr-x 101/0 — which is exactly
+      # what lets this container's own entrypoint write default.conf at start. That writability was
+      # the stated reason for running the root image, and it turned out to hold for the unprivileged
+      # one as well once the layers were opened instead of reasoned about. Same image and same
+      # settings as apply/60-tesla/wellknown.yaml, which has been running them in this cluster.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 101
+        runAsGroup: 101
+        fsGroup: 101
+        seccompProfile:
+          type: RuntimeDefault
       containers:
       - name: bearer-auth-service
-        # Pinned to the digest the source cluster is running RIGHT NOW, read out of
-        # `kubectl --context vps -n auth get pod -l app=bearer-auth-service` rather than from the
-        # tag: the tag `nginx:1.31.6-alpine` has since been re-published and now resolves to
-        # sha256:df221db8..., so pinning the tag alone would have silently moved this to different
-        # bytes than the endpoint it duplicates. The digest below is verified still pullable.
+        # The image this file duplicates is nginx:1.31.6-alpine running as root, and parity was the
+        # reason given for that. Parity is about the config and the comparison, not about the uid or
+        # the nginx point release: the behaviour that has to match is `listen 8080` plus the token
+        # check, and both are in this file's own ConfigMap.
         #
-        # NOT the unprivileged variant that apply/60-tesla/wellknown.yaml uses, and that is a
-        # deliberate cost rather than an oversight: this container rewrites
-        # /etc/nginx/conf.d/default.conf at start, and the unprivileged image's layout for that
-        # was not verifiable from here. The root image is what this exact config has run on for 221
-        # days. Consequence: no pod-security `restricted` warn label on the `llm` namespace — see
-        # the note in apply/00-bootstrap/namespaces.yaml, and open-webui's precedent there for why
-        # a warn a workload can never satisfy is noise rather than a signal.
-        image: nginx:1.31.6-alpine@sha256:adad2ae9204d0fd7a34f40299bc838c3782be1293b10005eac4315ff5a1abf4e
+        # Pinned by digest rather than tag for the reason already recorded in this file about the
+        # image it replaces — `nginxinc/nginx-unprivileged:1.31.7-alpine` has been re-published since
+        # wellknown.yaml pinned it and now resolves to sha256:b5047b9b..., whose layer set is not the
+        # one below. The digest pinned here is the one whose layers were actually opened:
+        # /usr/bin/envsubst present, /etc/nginx/conf.d writable by uid 101, `pid /tmp/nginx.pid`, and
+        # no `user` directive in the final nginx.conf. That last one is load-bearing — a `user`
+        # directive is an emerg error when the master is not root, and the stock alpine nginx.conf in
+        # an earlier layer does carry one, so it has to be the overlay's version that wins.
+        image: nginxinc/nginx-unprivileged:1.31.7-alpine@sha256:378d0c32f6562f7fd9629170797f57d2b953aa09be983b3daaf4809bb039ca00
         ports:
         - containerPort: 8080
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
         env:
         - name: BEARER_TOKEN
           valueFrom:
@@ -117,7 +142,37 @@ spec:
         # substitutes ONLY the token and leaves nginx's own $variables in the template alone —
         # unbounded envsubst would eat $http_authorization.
         command: ["/bin/sh", "/docker-entrypoint.d/entrypoint.sh"]
+        # tcpSocket, not httpGet, and the reason is the entire purpose of this container: every path
+        # on it answers 401 unless the header carries the token, and a probe sends no header. An
+        # httpGet liveness or readiness probe therefore fails on a perfectly healthy pod and kubelet
+        # crashloops its own auth server — a probe that asserts a credential is not a liveness check.
+        # A TCP connect to 8080 is the only check that means "nginx is listening".
+        #
+        # The readiness half is what makes a token rotation safe. Reloader restarts this pod when the
+        # Secret changes, and with no readiness gate the replacement is marked Ready the instant its
+        # container starts, before nginx has bound 8080. Traefik then forwards an auth check into a
+        # closed port, forwardAuth errors, and Traefik fails closed: every route on the hostname 502s
+        # for that window with both pods looking fine. With a readiness probe the default
+        # RollingUpdate policy holds the old pod until the new one is actually listening
+        # (maxUnavailable rounds to 0 at replicas: 1, maxSurge to 1), so the swap is invisible.
+        readinessProbe:
+          tcpSocket:
+            port: 8080
+          initialDelaySeconds: 2
+          periodSeconds: 5
+          failureThreshold: 2
+        livenessProbe:
+          tcpSocket:
+            port: 8080
+          initialDelaySeconds: 5
+          periodSeconds: 10
         resources:
+          # The cpu limit is deliberate and stays, matching wellknown.yaml's house pattern. The
+          # counter-argument is real — this container sits on the critical path of every request, so
+          # CFS throttling would show up as unexplained p99 on the model rather than as a rejected
+          # auth — but a forwardAuth that answers `return 200` or `return 401` without proxying is
+          # cheap enough that 100m is not the binding constraint here. The memory limit is the one
+          # worth keeping regardless: an OOM kill is loud, which is the property throttling lacks.
           requests:
             cpu: 50m
             memory: 32Mi
@@ -144,6 +199,26 @@ data:
     envsubst '${BEARER_TOKEN}' < /etc/nginx/templates/default.conf.template > /etc/nginx/conf.d/default.conf
     exec nginx -g 'daemon off;'
 ---
+# The comparison itself, and the one line where this file deliberately does NOT match the source it
+# duplicates. The source has `~*`, a case-insensitive PCRE match with the token interpolated into the
+# pattern. The token is 137 characters and contains `(`, `)` and `|`, with the `|` between the parens
+# — so PCRE compiles an alternation group, the literal token is not one of the alternatives, and the
+# correct credential can never match its own pattern.
+#
+# Measured on the live source endpoint, not reasoned about: `Authorization: Bearer <exact token>` →
+# 401, while the same token with `( ) |` deleted → 200. So `llm.v.arrieta.eu` has been authenticating
+# a string that is in neither repo, and the recorded token has never authenticated anything. That is
+# the source's bug to fix, in its own change, once anyone knows what is holding the working string;
+# it is not a reason to ship a front door here that rejects its own credential.
+#
+# `=` is a literal string compare, so every metacharacter in the token is inert and no rotation is
+# needed to make the recorded credential the real one. That is the whole reason to change the
+# operator rather than the token: the token was never the defect.
+#
+# `=` is case-sensitive, so the scheme word must be exactly `Bearer`. Every OpenAI-style client sends
+# that. If one ever sends lowercase `bearer`, add a `map` with both spellings — legal in this file
+# because conf.d is included in the http context — rather than going back to a regex over a value
+# that contains regex metacharacters.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -154,7 +229,7 @@ data:
     server {
       listen 8080;
       location / {
-        if ($http_authorization ~* "Bearer ${BEARER_TOKEN}") {
+        if ($http_authorization = "Bearer ${BEARER_TOKEN}") {
           return 200;
         }
         return 401;
@@ -195,6 +270,28 @@ spec:
     address: http://bearer-auth-service.llm.svc.cluster.local:8080
     trustForwardHeader: true
 ---
+# Cleartext is refused here, not redirected, and that is a deliberate difference from the endpoint
+# this file duplicates. Measured: `http://llm.v.arrieta.eu/health` answers `301` to the https URL,
+# while titan has no scheme redirect at all — the traefik pod's args are `--entryPoints.web.address
+# =:8000/tcp`, `--entryPoints.websecure.address=:8443/tcp` and `--entryPoints.websecure.http.tls
+# =true` with no `web.redirect`, read out of the running pod in kube-system rather than from the
+# record in apply/60-tesla/wellknown.yaml, which says the same. So an Ingress left on both entry
+# points answers in cleartext; `http://tesla.titan.arrieta.eu/.well-known/...` returning `200` is
+# that, proven. For a static public key that is harmless. Here the header being carried is a static
+# bearer credential, so cleartext has to be closed on purpose.
+#
+# What this cannot do, and no Traefik configuration can: a client pointed at `http://` puts the token
+# on the wire in plaintext before any middleware runs, because the request has to arrive before
+# anything can judge it. What pinning the router to `websecure` changes is that such a request is not
+# *served*. It gets `404` and someone fixes the URL, instead of working and never being fixed.
+#
+# Not a `redirectScheme` middleware, which is the friendlier-looking shape and worse here: clients
+# that follow redirects re-send `Authorization` to the new URL, which papers over the wrong scheme
+# completely — the caller succeeds and nobody ever learns the configured URL was http.
+#
+# The footgun is the string. A typo in the entry point name attaches this router to nothing and every
+# route 404s silently, the same silent-total-failure class as a middleware reference to an object that
+# does not exist. §5 of the spec catches it: both of its calls come back `404`.
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
@@ -202,6 +299,7 @@ metadata:
   namespace: llm
   annotations:
     traefik.ingress.kubernetes.io/router.middlewares: llm-bearer-auth@kubernetescrd
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
 spec:
   ingressClassName: traefik
   rules:
