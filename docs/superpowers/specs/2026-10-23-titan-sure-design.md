@@ -97,10 +97,10 @@ Sure reads `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET`, `OIDC_ISSUER` from the chart'
 secret block and `OIDC_REDIRECT_URI` from env (present in `.env.example`, absent
 from the chart's `secret.values`, so it goes in `rails.extraEnv`).
 
-### 5.1 Two independent doors, and only one of them is ONBOARDING_STATE
+### 5.1 Three doors, and only one of them is ONBOARDING_STATE
 
 This section originally said "deploy open, create the account by hand, close it".
-That was wrong, and reading the source is what showed it. Sure has **two
+That was wrong, and reading the source is what showed it. Sure has **three
 independent ways to acquire an account** and `ONBOARDING_STATE` governs only the
 first:
 
@@ -109,6 +109,13 @@ first:
 | local email+password registration page | `ONBOARDING_STATE` | `registrations_controller.rb:119-121` |
 | SSO account creation (JIT) | `AUTH_JIT_MODE`, `ALLOWED_OIDC_DOMAINS` | `oidc_accounts_controller.rb:24,119` — never reads `onboarding_state` |
 | a pending `Invitation` | nothing — it bypasses both JIT mode and the domain list | `oidc_accounts_controller#create_user`: `invitation.present? || (!jit_link_only? && allowed_oidc_domain?(email))` |
+
+The third row is listed because a table that claims to enumerate the doors has to
+include the one that ignores the other two controls: a pending invitation lets that
+email create an account whatever `AUTH_JIT_MODE` says and whatever the domain list
+contains. With one human and one account (§9) there is nobody to invite, so it is
+accepted rather than mitigated — but it is a door, and a reader reasoning from a
+two-row table would conclude the first two controls are exhaustive. They are not.
 
 `AUTH_JIT_MODE` defaults to `create_and_link` (`config/auth.yml`): an authentik
 identity with no Sure account is sent to `oidc_accounts#new_user` and creates
@@ -263,10 +270,69 @@ kubectl --context titan -n sure exec deploy/sure-web -- \
   curl -sf --max-time 10 http://192.168.0.29:8731/v1/models
 ```
 
+## 7. Gates
+
+`make check` on titan is far stricter than casa's. New targets mirroring
+`mealie-check`:
+
+- `sure-check` — the gate that can see inside a `HelmRelease`. It ties the OIDC client across the
+  blueprint Secret, its mount on the authentik `HelmRelease`, and Sure's own copy in `sure-secrets`;
+  `OIDC_REDIRECT_URI` to the blueprint's `redirect_uris` and `OIDC_ISSUER` to `issuer_mode`; the
+  blueprint's `property_mappings` to the managed `scopemapping` objects they have to resolve to (by
+  structure, not by substring); `DATABASE_URL` to CNPG's copy of the password, to the
+  `Database`/`DatabaseRole`, and to the `sure` role rather than the CNPG superuser; `REDIS_URL` to the
+  hand-written `sure-redis` Service, to the `REDIS_PASSWORD` that Service requires, and to that pod
+  actually being probed; the PVC both workloads mount, its Retain class and the volumes behind every
+  mount; `ingress.className` to the one class this cluster has; and the chart defaults that fail
+  silently at `health=ok`. Each of those was proven non-vacuous by mutating a copy of the tree
+  (§10 items 12 and 14). It does **not** involve `BASE_URL` — an earlier
+  draft of this section said so, and nothing in the app, the chart or the gate uses that variable.
+  What it cannot prove is recorded in its own docstring: that `ALLOWED_OIDC_DOMAINS` contains the
+  domain of the identity that will sign in (acceptance item 9).
+- `db-url-check` cannot see Sure at all (see §10 item 2), which is the reason `sure-check` exists.
+- `namespace-check`, `kustomize-listing`, `secrets-placement`, `crd-check`,
+  `leak-check` all apply unchanged.
+
+## 8. Acceptance
+
+1. `make check` green.
+2. HelmRelease `Ready`, web and worker pods Running, migrate Job completed. Note the Job is a
+   **post**-install hook (§3), so it runs after the pods exist: `Ready` before the Job completes is
+   normal, not a sign the hook is missing.
+3. `sure.titan.arrieta.eu` reachable, sign-in via authentik end to end — the token exchange, not just
+   the redirect. `/account/sign_up` is closed from the first reconcile (§5.1); confirm it, do not
+   assume it.
+4. The LLM endpoint answers **from a sure pod**, not by inference from open-webui:
+   `kubectl --context titan -n sure exec deploy/sure-web -- curl -sf --max-time 10 http://192.168.0.29:8731/v1/models`.
+   §6.2 argues reachability by a chain; this is the measurement.
+5. A Revolut CSV (multi-currency, containing an FX conversion) imports into one
+   account per currency wallet without duplicating the conversion.
+6. Auto-categorization returns categories for ~50 real rows through halogen, and
+   the log shows non-empty `content` — not the empty-content failure in §6.1.
+7. `kubectl --context titan -n databases get backup` shows Sure's database
+   included in the next scheduled run.
+8. Redis actually requires the password: `kubectl -n sure exec deploy/sure-redis -- redis-cli ping`
+   returns `NOAUTH Authentication required` with no credentials, and `PONG` with them.
+9. **The identity that signs in has a domain in `ALLOWED_OIDC_DOMAINS`, and that identity is named
+   here afterwards.** This is the acceptance step no offline gate can stand in for (§10 item 13):
+   `sure-check` proves the list is non-empty, never that it contains the right domain, and a miss
+   refuses the user *after* authentik has said yes. Record the username and domain once the first JIT
+   account exists, then prune the list to what is real — the domain mix is currently operator-stated
+   ("mostly gmail", 2026-10-25), not measured.
+10. The Redis readiness probe passes (`kubectl -n sure get pod -l app=sure-redis -o jsonpath=
+    '{.items[*].status.conditions[?(@.type=="Ready")].status}'` is `True`), and removing `--requirepass`
+    makes it fail rather than silently passing an open Redis.
+
+## 9. Explicitly out of scope
+
+- Replacing Firefly III. Nothing in casa is deleted until Sure survives a few weeks.
+- Trade Republic account connection, until the Enable Banking application exists.
+- Multi-user. One human, one account.
+- The casa spike directory, which is deleted rather than maintained.
+
 ## 10. Found while implementing (2026-10-23), all verified by rendering or by the cluster
 
-*(Numbered 10 and sitting between §6.2 and §7 because it was appended after the first review; the
-number is referenced from `apply/50-apps/sure/sure.yaml` and from the commit messages, so it stays.)*
+*(Numbered 10 rather than renumbered: the number is cited from `apply/50-apps/sure/sure.yaml`, from the PR description and from the commit messages. It sits last so the document reads in numeric order; it was appended after the first review, which is why it is not §7.)*
 
 1. **The chart does not wire `OPENAI_ACCESS_TOKEN` when `existingSecret` is set.**
    `rails.secret.values` lists it (and `OIDC_CLIENT_ID` / `_SECRET` / `_ISSUER`), but
@@ -452,71 +518,3 @@ number is referenced from `apply/50-apps/sure/sure.yaml` and from the commit mes
     a credential and a path. Whoever applies this should either make that switch or record here why
     the direct path is preferred.
 
-**Unrelated live finding on titan, noticed while checking CNPG:**
-`databaserole.coder` reports
-`secrets "coder-db-credentials" is forbidden: User
-"system:serviceaccount:databases:postgres" cannot get resource "secrets" in API group
-"" in the namespace "databases"`. The role shows `APPLIED true` with that message.
-mealie, open-webui, authentik and teslamate show no such message. Pre-existing,
-nothing to do with Sure, and worth a separate look — a role that cannot read its own
-password Secret is a rotation waiting to fail.
-
-## 7. Gates
-
-`make check` on titan is far stricter than casa's. New targets mirroring
-`mealie-check`:
-
-- `sure-check` — the gate that can see inside a `HelmRelease`. It ties the OIDC client across the
-  blueprint Secret, its mount on the authentik `HelmRelease`, and Sure's own copy in `sure-secrets`;
-  `OIDC_REDIRECT_URI` to the blueprint's `redirect_uris` and `OIDC_ISSUER` to `issuer_mode`; the
-  blueprint's `property_mappings` to the managed `scopemapping` objects they have to resolve to (by
-  structure, not by substring); `DATABASE_URL` to CNPG's copy of the password, to the
-  `Database`/`DatabaseRole`, and to the `sure` role rather than the CNPG superuser; `REDIS_URL` to the
-  hand-written `sure-redis` Service, to the `REDIS_PASSWORD` that Service requires, and to that pod
-  actually being probed; the PVC both workloads mount, its Retain class and the volumes behind every
-  mount; `ingress.className` to the one class this cluster has; and the chart defaults that fail
-  silently at `health=ok`. Each of those was proven non-vacuous by mutating a copy of the tree
-  (§10 items 12 and 14). It does **not** involve `BASE_URL` — an earlier
-  draft of this section said so, and nothing in the app, the chart or the gate uses that variable.
-  What it cannot prove is recorded in its own docstring: that `ALLOWED_OIDC_DOMAINS` contains the
-  domain of the identity that will sign in (acceptance item 9).
-- `db-url-check` cannot see Sure at all (see §10 item 2), which is the reason `sure-check` exists.
-- `namespace-check`, `kustomize-listing`, `secrets-placement`, `crd-check`,
-  `leak-check` all apply unchanged.
-
-## 8. Acceptance
-
-1. `make check` green.
-2. HelmRelease `Ready`, web and worker pods Running, migrate Job completed. Note the Job is a
-   **post**-install hook (§3), so it runs after the pods exist: `Ready` before the Job completes is
-   normal, not a sign the hook is missing.
-3. `sure.titan.arrieta.eu` reachable, sign-in via authentik end to end — the token exchange, not just
-   the redirect. `/account/sign_up` is closed from the first reconcile (§5.1); confirm it, do not
-   assume it.
-4. The LLM endpoint answers **from a sure pod**, not by inference from open-webui:
-   `kubectl --context titan -n sure exec deploy/sure-web -- curl -sf --max-time 10 http://192.168.0.29:8731/v1/models`.
-   §6.2 argues reachability by a chain; this is the measurement.
-5. A Revolut CSV (multi-currency, containing an FX conversion) imports into one
-   account per currency wallet without duplicating the conversion.
-6. Auto-categorization returns categories for ~50 real rows through halogen, and
-   the log shows non-empty `content` — not the empty-content failure in §6.1.
-7. `kubectl --context titan -n databases get backup` shows Sure's database
-   included in the next scheduled run.
-8. Redis actually requires the password: `kubectl -n sure exec deploy/sure-redis -- redis-cli ping`
-   returns `NOAUTH Authentication required` with no credentials, and `PONG` with them.
-9. **The identity that signs in has a domain in `ALLOWED_OIDC_DOMAINS`, and that identity is named
-   here afterwards.** This is the acceptance step no offline gate can stand in for (§10 item 13):
-   `sure-check` proves the list is non-empty, never that it contains the right domain, and a miss
-   refuses the user *after* authentik has said yes. Record the username and domain once the first JIT
-   account exists, then prune the list to what is real — the domain mix is currently operator-stated
-   ("mostly gmail", 2026-10-25), not measured.
-10. The Redis readiness probe passes (`kubectl -n sure get pod -l app=sure-redis -o jsonpath=
-    '{.items[*].status.conditions[?(@.type=="Ready")].status}'` is `True`), and removing `--requirepass`
-    makes it fail rather than silently passing an open Redis.
-
-## 9. Explicitly out of scope
-
-- Replacing Firefly III. Nothing in casa is deleted until Sure survives a few weeks.
-- Trade Republic account connection, until the Enable Banking application exists.
-- Multi-user. One human, one account.
-- The casa spike directory, which is deleted rather than maintained.
