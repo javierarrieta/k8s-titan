@@ -296,8 +296,32 @@ spec:
         # OPENAI_EXTRA_HEADERS, which is headers, not body. So until upstream grows an extra_body
         # knob, the mitigation is budget and batch size, not the switch.
         LLM_JSON_MODE: "auto"
-        LLM_CONTEXT_WINDOW: "8192"
-        LLM_MAX_RESPONSE_TOKENS: "2048"
+        # Raised 2026-10-25 from 8192/2048 to 32768/8192 at the operator's request. Sure's own
+        # defaults are far smaller - Assistant::TokenBudget::DEFAULT_CONTEXT_WINDOW is 2048 and the
+        # response fallback is 512 - so these two numbers, not the model, were the binding constraint:
+        # max_input_tokens is context_window - max_response_tokens - system_prompt_reserve (256), i.e.
+        # 5,888 before and 24,320 now, and that is the budget the auto-categorizer batch slicer works
+        # inside. Above SMALL_CONTEXT_THRESHOLD (4096) either way, so per-request context like account
+        # rosters is not collapsed to counts in either configuration.
+        #
+        # Setting these in the manifest also DISABLES the two fields on the Self-Hosting settings page
+        # (app/views/settings/hostings/_openai_settings.html.erb renders them `disabled:` when the ENV
+        # is present). Precedence is ENV > Setting > default, so a value typed into the UI is ignored
+        # while these lines exist. That is deliberate: a UI edit that silently does nothing is worse
+        # than a greyed-out field.
+        #
+        # MEASURED 2026-10-25 from inside the pod (operator ran it with an admin context; k8s-reader is
+        # Forbidden pods/exec):
+        #   kubectl --context titan -n sure exec deploy/sure-web -- curl -sf --max-time 10 \
+        #     http://192.168.0.29:8731/v1/models
+        #   -> max_model_len 262144, context_length 262144, max_tokens_cap 65536, max_tokens_default 8192
+        # So 32768 is ~12.5% of the served window and 8192 is the endpoint's OWN default, well under its
+        # 65536 cap. Both values are conservative by a wide margin; there is room to raise either, or to
+        # raise LLM_MAX_ITEMS_PER_CALL, without approaching what the endpoint will accept. If the served
+        # model behind halogen ever changes to a smaller window, requests fail with a context-length error
+        # rather than truncating - loud, which is the wanted failure mode.
+        LLM_CONTEXT_WINDOW: "32768"
+        LLM_MAX_RESPONSE_TOKENS: "8192"
         LLM_MAX_ITEMS_PER_CALL: "10"
         OPENAI_REQUEST_TIMEOUT: "120"
         AI_RESPONSE_TIMEOUT: "180"

@@ -236,7 +236,8 @@ escape in `.env.example` is `OPENAI_EXTRA_HEADERS`, which is headers, not body.
 So until upstream grows an `extra_body`, the mitigation is budget and batch size:
 
 ```
-LLM_MAX_RESPONSE_TOKENS=2048      # default is far smaller; reasoning eats it
+LLM_CONTEXT_WINDOW=32768          # Sure's own default is 2048
+LLM_MAX_RESPONSE_TOKENS=8192      # default is far smaller; reasoning eats it
 LLM_MAX_ITEMS_PER_CALL=10         # Sure's default is 25
 LLM_JSON_MODE=auto
 OPENAI_REQUEST_TIMEOUT=120
