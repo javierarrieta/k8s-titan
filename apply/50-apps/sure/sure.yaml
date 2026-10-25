@@ -337,8 +337,23 @@ spec:
         # categorize" at health=ok. If categorization ever looks quiet, this is the first value to
         # put back down.
         LLM_MAX_ITEMS_PER_CALL: "25"
-        OPENAI_REQUEST_TIMEOUT: "120"
-        AI_RESPONSE_TIMEOUT: "180"
+        # Raised 2026-10-25 from 120/180 to 300/360. The old ceiling sat ~30% above the slowest batch
+        # that actually succeeded, so it was converting "slow" into "failed" for no protective reason:
+        # five AutoCategorizeJob runs completed in 65.9 / 77.7 / 81.6 / 85.5 / 92.8s and two died at
+        # exactly 120.1s with
+        #   Family::AutoCategorizer::Error (Failed to auto-categorize transactions:
+        #                                   Net::ReadTimeout with #<TCPSocket:(closed)>)
+        # A 25-item reasoning-model call emits reasoning_content before content, so ~4s per item puts a
+        # full batch at 90-110s - straddling the old value. That was introduced by the batch-size change
+        # in #160, which raised items without looking at the request timeout.
+        #
+        # The trade-off accepted here: a genuinely hung endpoint now holds a worker for up to 300s instead
+        # of 120s. That is the better deal because the short timeout never protected the data - the job
+        # has retry enabled, so the old behaviour was 120s of GPU burned, a retry, and the same slow call
+        # again. AI_RESPONSE_TIMEOUT moves with it (360) so the outer assistant budget stays above the
+        # per-request one rather than cutting it short from the other side.
+        OPENAI_REQUEST_TIMEOUT: "300"
+        AI_RESPONSE_TIMEOUT: "360"
         ASSISTANT_MAX_TOOL_CALL_ITERATIONS: "3"
 
         # Sure reads OIDC_REDIRECT_URI from env; the chart's secret block only carries
