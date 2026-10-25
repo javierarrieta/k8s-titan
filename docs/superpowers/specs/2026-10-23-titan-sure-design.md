@@ -240,8 +240,8 @@ LLM_CONTEXT_WINDOW=32768          # Sure's own default is 2048
 LLM_MAX_RESPONSE_TOKENS=8192      # default is far smaller; reasoning eats it
 LLM_MAX_ITEMS_PER_CALL=25         # Sure's default; bounds call count before the token slicer does
 LLM_JSON_MODE=auto
-OPENAI_REQUEST_TIMEOUT=120
-AI_RESPONSE_TIMEOUT=180
+OPENAI_REQUEST_TIMEOUT=300        # was 120; 25-item reasoning batches land at 90-110s
+AI_RESPONSE_TIMEOUT=360           # stays above the per-request budget
 ASSISTANT_MAX_TOOL_CALL_ITERATIONS=3
 OPENAI_SUPPORTS_PDF_PROCESSING=false
 ```
