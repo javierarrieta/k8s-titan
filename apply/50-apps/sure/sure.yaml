@@ -322,7 +322,21 @@ spec:
         # rather than truncating - loud, which is the wanted failure mode.
         LLM_CONTEXT_WINDOW: "32768"
         LLM_MAX_RESPONSE_TOKENS: "8192"
-        LLM_MAX_ITEMS_PER_CALL: "10"
+        # Raised 2026-10-25 from 10 to 25, which is Sure's own default (Provider::LlmConcept
+        # .max_items_per_call falls back to 25). This is the knob that actually bounds call count: the
+        # executors each_slice the pending items by this number FIRST
+        # (app/models/rule/action_executor/auto_categorize.rb:55, auto_detect_merchants.rb:28,
+        # provider_merchant/enhancer.rb:11) and only then hand each slice to BatchSlicer, which sub-splits
+        # solely when the slice exceeds max_input_tokens. At 10 items a slice is a few hundred tokens
+        # against 24,320 available, so the slicer never fires - which is also why raising
+        # LLM_CONTEXT_WINDOW past 32768 buys nothing while this stays small.
+        #
+        # Not higher than 25 deliberately: past this the limit is model quality, not tokens, and the
+        # failure is silent. halogen-qwen3.8-flash-next is a reasoning model, so a prompt it cannot
+        # finish returns finish_reason=length with content:"" - indistinguishable from "nothing to
+        # categorize" at health=ok. If categorization ever looks quiet, this is the first value to
+        # put back down.
+        LLM_MAX_ITEMS_PER_CALL: "25"
         OPENAI_REQUEST_TIMEOUT: "120"
         AI_RESPONSE_TIMEOUT: "180"
         ASSISTANT_MAX_TOOL_CALL_ITERATIONS: "3"
