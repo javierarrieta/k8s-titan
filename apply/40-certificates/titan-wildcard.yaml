@@ -14,7 +14,11 @@ spec:
     - "*.titan.arrieta.eu"
   secretTemplate:
     annotations:
+      # The allow-list IS the mechanism: AGENTS.md forbids copying titan-tls by hand, so a new
+      # consuming namespace means editing these two lines and nothing else. `llm` was added
+      # 2026-10-24 for llm.titan.arrieta.eu, whose Ingress lives in `llm`; `sure` alongside it for
+      # sure.titan.arrieta.eu.
       reflector.v1.k8s.emberstack.com/reflection-allowed: "true"
-      reflector.v1.k8s.emberstack.com/reflection-allowed-namespaces: "apps,auth,open-webui,observability,files,mealie"
+      reflector.v1.k8s.emberstack.com/reflection-allowed-namespaces: "apps,auth,open-webui,observability,files,mealie,llm,sure"
       reflector.v1.k8s.emberstack.com/reflection-auto-enabled: "true"
-      reflector.v1.k8s.emberstack.com/reflection-auto-namespaces: "apps,auth,open-webui,observability,files,mealie"
+      reflector.v1.k8s.emberstack.com/reflection-auto-namespaces: "apps,auth,open-webui,observability,files,mealie,llm,sure"

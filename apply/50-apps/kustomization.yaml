@@ -96,3 +96,19 @@ resources:
   # and Mealie does not.
   - mealie/mealie-db.yaml
   - mealie/mealie.yaml
+  # llm.titan.arrieta.eu: a bearer-auth front for the halogen endpoint on the llm01 box, duplicated
+  # from ../k8s-techdelivery rather than migrated — both clusters serve it now, with one token.
+  # One file holding the proxy target (Endpoints + Service with no selector), the forwardAuth nginx,
+  # the Middleware and the Ingress, all in namespace `llm`. It reads llm-bearer-token from
+  # 10-secrets and titan-tls reflected into `llm` via the allow-list on 40-certificates/titan-wildcard.yaml.
+  #
+  # A bad field here freezes coder's and authentik's updates for the length of the failure, which is
+  # the accepted cost recorded at the top of this file; one hand-written manifest is not bulk.
+  - llm/llm.yaml
+  # Sure, the personal-finance tracker trialled as a Firefly III replacement. Same two-file split as
+  # mealie: the CNPG Database and DatabaseRole must live in `databases` beside their Cluster while the
+  # app lives in `sure`. The third artifact is again not here — the OIDC client becomes a Secret in
+  # 10-secrets and is mounted by the authentik HelmRelease. Design:
+  # docs/superpowers/specs/2026-10-23-titan-sure-design.md.
+  - sure/sure-db.yaml
+  - sure/sure.yaml

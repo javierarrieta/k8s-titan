@@ -101,6 +101,29 @@ resources:
   - authentik-mealie-blueprint.yaml
   - mealie-db-credentials.yaml
   - mealie-secrets.yaml
+  # Sure. Same three-file shape and the same duplication: the DB password exists in CNPG's
+  # DatabaseRole (namespace databases) and inside Sure's DATABASE_URL (namespace sure), and the OIDC
+  # client exists in authentik's blueprint (namespace auth) and in Sure's env. NOTE for the gate
+  # author: tools/db-url-check.py walks a HelmRelease env named *PG_CONNECTION_URL and a Deployment's
+  # DATABASE_URL. Sure is a HelmRelease carrying DATABASE_URL, which is neither shape, so the
+  # existing gate passes vacuously for this app. `make sure-check` has to cover it.
+  - authentik-sure-blueprint.yaml
+  - sure-db-credentials.yaml
+  - sure-secrets.yaml
   # OpenCloud's own Secret. Namespace `files` is the namespace OpenCloud takes over from oCIS rather
   # than a new one, because the hostname and the reflected certificate moved with it.
   - opencloud-secrets.yaml
+  # The bearer token llm.titan.arrieta.eu checks every request against, read by the forwardAuth nginx
+  # in namespace `llm` (apply/50-apps/llm/llm.yaml). One value, one place, nothing duplicated — which
+  # is why there is no `*-check` gate for it, unlike coder's or Mealie's credentials: there is no
+  # second copy here to drift from.
+  #
+  # The copy that CAN drift is in another repo: ../k8s-techdelivery apply/10-secrets/bearer-auth-token
+  # .yaml holds the identical token for llm.v.arrieta.eu, and the two clusters are both live with it
+  # by decision. Rotating means editing both repos, and nothing in either tree detects the halves
+  # disagreeing — the spec for this endpoint names that as an accepted cost, not an oversight.
+  #
+  # Referenced by a Deployment's secretKeyRef, not by a HelmRelease, so `make release-secrets` cannot
+  # vouch for this name the way it does for the chart-consumed ones. An unlisted file here would build
+  # green and be silently never applied, which is the lie `make secrets-placement` exists to catch.
+  - llm-bearer-token.yaml

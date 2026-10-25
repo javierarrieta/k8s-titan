@@ -105,3 +105,26 @@ spec:
         # password sits unread in a running pod: authentik answers invalid_client and the pod reports
         # Ready the whole time. `watchGlobally: false` means this list is the whole scope.
         - mealie
+        # llm.titan.arrieta.eu. Fifth time this list has bitten, and the fifth time it would have
+        # been silent: the bearer-auth nginx in `llm` renders its nginx config from $BEARER_TOKEN at
+        # container start and reads the token from a Secret env var, so without this line a rotated
+        # token sits unread in a running pod — Traefik keeps asking a forwardAuth server that is
+        # still matching the OLD token, and every route stays up and keeps answering 200 or 401 with
+        # the stale credential. `watchGlobally: false` means this list is the whole scope.
+        #
+        # The entry itself was missing on main: PR #155 landed the comment above and not the list item,
+        # which is the same defect this repo records for the authentik blueprint mount — a comment
+        # explaining a requirement is not the requirement. Found while merging #153, and fixed here
+        # rather than left for a follow-up because a rotated bearer token currently does NOT restart
+        # the forwardAuth nginx: every llm route keeps answering with the stale credential while
+        # reporting healthy. This fix is already its own commit on the #153 branch (8eb1bd2), so it can
+        # be cherry-picked to main without waiting for that PR to land.
+        - llm
+        # Sure. Sixth instance of the same defect: the chart's web and worker pod templates carry
+        # `reloader.stakater.com/auto: "true"` (the chart exposes no workload-metadata annotation,
+        # only podAnnotations) and reads SECRET_KEY_BASE, the AR encryption keys and the OIDC client
+        # through env `valueFrom.secretKeyRef` — not envFrom, which the chart renders empty here.
+        # Reloader tracks both forms, so the annotation works either way; the sentence used to name the
+        # wrong one. Without this line a rotation sits unread in a running pod that reports Ready.
+        # `watchGlobally: false` means this list is the whole scope.
+        - sure

@@ -145,6 +145,62 @@ spec:
       # requests, and until this PVC has a restore point an inconsistent tree is unrecoverable rather
       # than merely annoying.
       terminationGracePeriodSeconds: 120
+      # Web apps are files on the PVC, not database rows. The web service enumerates
+      # $OC_BASE_DATA_PATH/web/assets/apps at startup (WEB_ASSET_APPS_PATH, services/web/pkg/config/
+      # defaults/defaultconfig.go:84) and the App Store in the UI only hands you a zip - installing is
+      # a filesystem write. In a GitOps tree that needs a declared writer, or it becomes drift that
+      # `make dry-run` cannot see and a PVC restore silently loses.
+      #
+      # This container is that writer, and it is a no-op in steady state: each app gets a marker under
+      # web/assets/.installed and a matching marker means no network at all, so a GitHub outage never
+      # blocks a rollout. It reaches the network only when an app is new or its version changed, and
+      # then it FAILS rather than starting without the app - a silently missing app is worse than a pod
+      # that will not start, because the missing app is at least visible as one.
+      #
+      # Adding an app is one install_app line. The archive's own top-level directory must equal the app
+      # name, which it does for every release in opencloud-eu/web-extensions. Verify the checksum
+      # yourself before pasting it: the release's sha256sum.txt lists paths under apps/, so the hash
+      # has to be taken against the file, not the listed path.
+      initContainers:
+        - name: web-apps
+          image: alpine:3.20
+          command: ["/bin/sh", "-ec"]
+          args:
+            - |
+              install_app() {
+                name="$1"; ver="$2"; url="$3"; sha="$4"
+                apps=/var/lib/opencloud/web/assets/apps
+                marker="/var/lib/opencloud/web/assets/.installed/$name"
+                mkdir -p "$apps" "$(dirname "$marker")"
+                if [ -f "$marker" ] && [ "$(cat "$marker")" = "$ver" ]; then
+                  echo "web-app $name: already $ver"
+                  return 0
+                fi
+                echo "web-app $name: installing $ver"
+                apk add --no-cache curl unzip >/dev/null
+                curl -fsSL --retry 3 -o "/tmp/$name.zip" "$url"
+                echo "$sha  /tmp/$name.zip" | sha256sum -c -
+                rm -rf "$apps/$name"
+                unzip -q "/tmp/$name.zip" -d "$apps/"
+                echo "$ver" > "$marker"
+                echo "web-app $name: installed"
+              }
+              # draw.io editor for .drawio and .vsdx. The editor itself is NOT in this bundle - it is
+              # iframed from https://embed.diagrams.net by default, which means diagram content passes
+              # through a third party from the user's browser. That origin is already in frame-src in
+              # the csp ConfigMap above. To stop relying on it, deploy draw.io on the mesh and set
+              # draw-io.config.url in apps.yaml plus the matching frame-src entry.
+              install_app draw-io 2.2.0 \
+                https://github.com/opencloud-eu/web-extensions/releases/download/draw-io-v2.2.0/draw-io-2.2.0.zip \
+                49c3aa32aa517f2a90f249b5470b38dc18b7d006841c442f64335d660b551d0c
+              # Importer is ready to enable the same way - importer-v2.0.1, sha256
+              # 31cb34c825aeca5716dfc454bf85143a6035fe3153c29f0b43db904c027acb00 - but it is deliberately
+              # NOT installed: it does nothing without a Uppy Companion service to do the fetching, and
+              # companionUrl is a required config key. Installing it before Companion exists would put a
+              # broken button in the UI.
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/opencloud
       containers:
         - name: opencloud
           # Pinned to a specific release, not a moving tag: opencloudeu/opencloud-rolling:8.1.0 on

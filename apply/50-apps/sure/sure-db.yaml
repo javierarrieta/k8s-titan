@@ -1,0 +1,46 @@
+# Sure's database and role, authored beside the app that owns them and living in `databases`,
+# because a CNPG Database must share a namespace with its Cluster. Read mealie-db.yaml,
+# open-webui/open-webui-db.yaml and auth/authentik-db.yaml first; everything they record about
+# DatabaseRole applies here verbatim.
+#
+# THE NAMING
+# Kubernetes object names and the Postgres identifiers are both `sure` — no hyphen, so no quoted-
+# identifier trap. open-webui had to translate `open-webui` to `open_webui` and every place that
+# interpolates it became a quoting bug waiting to be found during an incident. A future rename to
+# `sure-finance` would introduce exactly that problem, which is why it is written down here.
+#
+# THE PASSWORD IS COMMITTED TWICE ON PURPOSE
+# CNPG writes the role password from `passwordSecret`; Sure reads it inside DATABASE_URL in
+# sure-secrets. Neither can be derived from the other at apply time, so the same secret appears in
+# two files — the exact duplication tools/db-url-check.py exists to catch when one half is rotated
+# and the other is not. See that script's docstring before changing either copy.
+apiVersion: postgresql.cnpg.io/v1
+kind: Database
+metadata:
+  name: sure
+  namespace: databases
+spec:
+  name: sure
+  owner: sure
+  cluster:
+    name: postgres
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: DatabaseRole
+metadata:
+  name: sure
+  namespace: databases
+spec:
+  name: sure
+  cluster:
+    name: postgres
+  # Required and silent when missing: CNPG creates the role NOLOGIN by default, so without this the
+  # Database reports Ready and every connection fails with a message pointing somewhere else.
+  # Observed live with the authentik role before it was understood.
+  login: true
+  # NOT superuser. Sure's migrations are ordinary Rails DDL against its own schema and it has no
+  # extension to create. That is an argument from absence, so the first migrate Job is the proof: if
+  # a migration needs more, it fails loudly and the fix is a deliberate `superuser: true` with its
+  # own note, not a silent widening. Same reasoning and caveat as mealie's and open-webui's roles.
+  passwordSecret:
+    name: sure-db-credentials
