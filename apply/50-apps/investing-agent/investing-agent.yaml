@@ -134,6 +134,23 @@ spec:
       # the entrypoint (the image warns about this override above) or a preStop hook, not at this
       # number. Re-check the ledger line after the next rollout rather than assuming this fixed it.
       terminationGracePeriodSeconds: 200
+      # The image warns on every boot that PID 1 has no init above it and orphaned children will
+      # accumulate as zombies. It is asking for its own supervision tree: docker/entrypoint-
+      # dispatch.sh execs s6-overlay's /init, and s6-rc.d supervises `dashboard` and `main-hermes`
+      # as separate services (the dashboard gets a finish script — the thing this manifest has to
+      # fake with a liveness probe below).
+      #
+      # That tree is not available under this pod's hardening. /init has to create its
+      # /run/s6-linux-init-* mounts, which a non-root process on a readOnlyRootFilesystem cannot
+      # do, so adopting it means runAsUser 0 and a writable rootfs. The trade is declined here, in
+      # writing, rather than in someone's head six months from now. The image's UID guard is not the
+      # obstacle — `id hermes` in the image is uid=10000, which matches runAsUser, so the wrapper
+      # would accept this pod; it is the read-only rootfs and the dropped capabilities.
+      #
+      # shareProcessNamespace is the Kubernetes-native equivalent of the `docker run --init` the
+      # warning suggests: the pod gets a namespace init that reaps orphans, with no change to the
+      # run user, the read-only rootfs or the capability drop.
+      shareProcessNamespace: true
       securityContext:
         runAsNonRoot: true
         runAsUser: 10000
@@ -153,10 +170,13 @@ spec:
         # SIGKILLed SQLite mid-write on a claim with no restore point. opencloud.yaml:144-147
         # makes the same argument about its own PVC.
         #
-        # `exec` puts the gateway at PID 1: the container exits with the gateway's status, so
-        # kubelet restarts the pod the moment the worker dies, and SIGTERM lands on the process
-        # that owns the writes. The dashboard stays a background child; if it dies the pod goes Not
-        # Ready and the liveness probe restarts it.
+        # `exec` makes the gateway the container's main process: the container exits with the
+        # gateway's status, so kubelet restarts the pod the moment the worker dies, and SIGTERM
+        # lands on the process that owns the writes. With shareProcessNamespace it is no longer PID 1
+        # of the namespace — the pod's init sits above it and reaps — but it is still the process
+        # kubelet signals and the one whose exit ends the container, which is the property this
+        # paragraph exists to protect. The dashboard stays a background child; if it dies the pod goes
+        # Not Ready and the liveness probe restarts it.
         #
         # Residual gap, named rather than probed: a gateway that is alive but wedged is still
         # invisible, because it exposes no health endpoint of its own.
