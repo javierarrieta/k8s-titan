@@ -221,6 +221,13 @@ update-keys: secrets-present
 # .github/ is exactly as public. Depends on secrets-present so it cannot pass vacuously
 # when run on its own.
 #
+# It also rejects `data:` inside apply/10-secrets, which is a fourth thing and not obvious.
+# A Secret's `data:` values are base64 by contract and a sops ciphertext is not base64, so the
+# API server refuses the undecrypted tree on server-side dry-run: `make dry-run` stops at
+# 10-secrets and never reaches the stage you changed. Flux decrypts before it applies, so the
+# cluster never sees this, and only the live gate does. `stringData` takes an arbitrary string,
+# which is why every other Secret here already used it (measured: 30 of 32).
+#
 # One exemption: a Secret that is a ServiceAccount token REQUEST -- typed
 # kubernetes.io/service-account-token and carrying no data/stringData. The
 # controller fills those in-cluster, so nothing secret is in git. The exemption is
@@ -244,6 +251,7 @@ secrets-placement: secrets-present
 	for f in $$($(SECRET_FIND)); do \
 	  if git check-ignore -q "$$f" 2>/dev/null; then continue; fi; \
 	  if ! grep -q 'ENC\[' "$$f"; then echo "FAIL: $$f is not sops-encrypted (no ENC[)"; fail=1; fi; \
+	  if grep -q '^data:' "$$f"; then echo "FAIL: $$f uses data: - a sops ciphertext is not valid base64, so the API server rejects it on server-side dry-run; use stringData"; fail=1; fi; \
 	  base=$$(basename "$$f"); \
 	  if ! grep -qE "^ *- *(\./)?$$base$$" apply/10-secrets/kustomization.yaml; then \
 	    echo "FAIL: $$f is not listed in apply/10-secrets/kustomization.yaml - it builds fine and is silently never applied"; fail=1; fi; \
