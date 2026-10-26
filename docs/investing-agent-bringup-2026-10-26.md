@@ -18,6 +18,7 @@ what was measured before merging, what has run, and what is still unproven. Read
 | the image pin is real, and the semver move is still ahead of us | Docker Hub API on `/v2/repositories/nousresearch/hermes-agent/tags/v2026.9.24/` returns the tag (amd64, 968 MB); `v0.22.5` also answers 200 |
 | the new process tree does what its comment claims | 14 assertions against a fake `hermes`, run under both `sh` and `bash`: both children start; after `exec` the container PID *is* the gateway; SIGTERM reaches the gateway and the container is gone in <20 ms; a gateway crash exits the container non-zero ~1 s later; a dashboard death does **not** end the container, which is exactly why the liveness probe is load-bearing. The old `… & wait` form was run for comparison and did stay Running with a dead gateway. |
 | the source volume's real host path | `kubectl get pv -o custom-columns=…` on the techdelivery host: `investing-agent-pv-claim` → `/opt/k3s/volumes/pvc-21879166-bb63-4c16-a2d2-9f99120058d4_apps_investing-agent-pv-claim`. **Not `/opt/data`** — that is the *container* mount path, and the first `du -sh` measured a different directory entirely. The source cluster's `local-path` uses `nodePathMap: /opt/k3s/volumes`, not the k3s default `/var/lib/rancher/k3s/storage` |
+| the source tree fits the claim | `du -sh` on the path that PV names, 2026-10-26: **161M** against a 10Gi claim — roughly 64x headroom. The claim is the source's own value and was kept rather than trimmed, because `allowVolumeExpansion: false` makes trimming irreversible |
 | the live API server accepts every object in the tree | `make dry-run DRYRUN_CONTEXT=<admin>`, 2026-10-26, on the rebased branch: `00-bootstrap ok (56)`, `10-secrets ok (33)`, `20-infra ok (29)`, `40-certificates ok (3)`, `50-apps ok (73)` — 5 stages built, 5 accepted. This is the first live validation of the new PVC and Deployment, and the first time that gate reached `50-apps` in weeks |
 | the built object is what was written | `kubectl kustomize apply/50-apps` → `Deployment apps/investing-agent` replicas 1, `strategy: Recreate`, `terminationGracePeriodSeconds: 60`, readiness + startup + liveness all present, PVC on `local-path-retain` |
 
@@ -36,26 +37,22 @@ Three things came out of that one error:
 everything behind it — fixed in PR #166, which is what let `20-infra` onwards be checked at all;
 - `secrets-placement` now rejects `data:` under `apply/10-secrets`, so it cannot come back.
 
-## Pre-flight: the size, on the right directory this time
+## Pre-flight: the size, and the wrong directory it took to get it
 
 `/opt/data` is what the container mounts, not where the source cluster keeps the bytes. The first
-`du -sh /opt/data` returned **11M** and measured something else — the operator's instinct was
-right, and the PV listing settled it:
+`du -sh /opt/data` returned 11M and measured something else — the operator's instinct was right,
+and the PV listing settled it:
 
 ```
 CLAIM: investing-agent-pv-claim
 PATH:  /opt/k3s/volumes/pvc-21879166-bb63-4c16-a2d2-9f99120058d4_apps_investing-agent-pv-claim
+du -sh <that path>  ->  161M
 ```
 
-So the figure still owed, and it is the one number that cannot be fixed after the PVC binds
-(`local-path-retain` sets `allowVolumeExpansion: false`):
-
-```
-du -sh /opt/k3s/volumes/pvc-21879166-bb63-4c16-a2d2-9f99120058d4_apps_investing-agent-pv-claim
-```
-
-Anything under a few Gi is fine; the 10Gi claim is the source's own value and was kept rather than
-trimmed.
+161M against a 10Gi claim, so the `allowVolumeExpansion: false` trap is not a live risk and the
+copy is a seconds-long transfer, not one to schedule. The lesson is in the method: with
+`local-path`, a volume's host path is derived from a random PV name and a cluster-specific
+`nodePathMap`, so it is read off the PV object and never guessed from the mount path.
 
 ## What still has to happen, in order
 
@@ -76,7 +73,7 @@ trimmed.
 4. prove it: the dashboard answers through the Service (`http://investing-agent.apps.svc`), one
    cron run completes, and the DB is not reported corrupt.
 
-`make dry-run` has been run and passed; see the table above. The `du -sh` is still owed, on the path named in the pre-flight section.
+`make dry-run` and the `du -sh` pre-flight have both been done; see the table above.
 
 ## Not proven
 
@@ -89,9 +86,8 @@ trimmed.
   decision, not an oversight — closing it is its own change.
 - **a gateway that is alive but wedged is invisible.** It exposes no health endpoint, so nothing can
   probe it. `exec` fixed the *dead* gateway; wedged is still dark.
-- **cold start against the migrated tree is unmeasured, and so is its size** (see the pre-flight
-  above). The startupProbe allows ~5 minutes before liveness takes over, which is generous; if the
-  pod ever fails to become Ready, tighten that from a measurement rather than a guess.
+- **cold start against the migrated tree is unmeasured, but the tree is 161M**, so the startupProbe's
+  ~5 minutes is ample by a wide margin. If the pod ever fails to become Ready, the volume is not why.
 - **why `gateway.lock` ever goes stale is unknown.** The manifest deletes it on every start, which
   was inherited from the source without anyone recording the failure it papers over. With the gateway
   now at PID 1 a crash restarts the pod cleanly, so if the lock turns out to have been guarding

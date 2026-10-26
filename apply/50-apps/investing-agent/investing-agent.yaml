@@ -33,13 +33,12 @@
 #     llm.titan front door, whose header records `curl http://192.168.0.29:8731/health` having
 #     been run from inside this cluster. Nothing in this file needs a mesh exception.
 #
-# PRE-FLIGHT, STILL OWED: measure the source volume on the host path its PV names —
-# /opt/k3s/volumes/pvc-21879166-bb63-4c16-a2d2-9f99120058d4_apps_investing-agent-pv-claim on the
-# techdelivery host. The first `du -sh /opt/data` returned 11M and measured the wrong directory:
-# /opt/data is the *container* mount path, and the two clusters use different nodePathMap roots
-# (/opt/k3s/volumes there, /var/lib/rancher/k3s/storage here). The number matters because
-# local-path-retain sets allowVolumeExpansion: false (apply/20-infra/storage-retain.yaml), so the
-# claim cannot be grown later. 10Gi is the source's own value and is kept rather than trimmed.
+# PRE-FLIGHT, DONE 2026-10-26: the source volume is 161M against this 10Gi claim (~64x headroom),
+# measured at the path its own PV names — /opt/k3s/volumes/pvc-21879166-…_apps_investing-agent-pv-claim
+# on the techdelivery host. Not /opt/data: that is the container mount path, and the first
+# du -sh measured a different directory entirely. The number mattered because local-path-retain
+# sets allowVolumeExpansion: false (apply/20-infra/storage-retain.yaml), so the claim cannot be
+# grown later; 10Gi is the source's own value and is kept rather than trimmed.
 #
 # THE STATE MOVE, and the one thing that is easy to get wrong.
 # The state move is being done by hand. `local-path-retain` is volumeBindingMode: WaitForFirstConsumer,
