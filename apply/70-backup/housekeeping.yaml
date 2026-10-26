@@ -1,0 +1,209 @@
+# Retention and integrity, centralised in two jobs instead of folded into every volume job.
+#
+# Ported from k8s-techdelivery apply/30-backup/apps/backup-housekeeping.yaml, including the
+# two things that are not obvious and were each learned the hard way there:
+#
+#   1. `restic prune` takes an EXCLUSIVE repository lock and full-scans the S3 backend. Running
+#      it after each nightly volume job would mean one expensive prune per volume per day against
+#      one repo, with real lock contention if any backup overran into the next window. So the
+#      volume jobs run `restic backup` only and forget/prune happen here, once.
+#   2. restic's cache directory is NOT TMPDIR -- it resolves from $XDG_CACHE_HOME or $HOME.
+#      These jobs run as uid 65534, which has no writable HOME, so forget/prune/check abort with
+#      "unable to open cache: mkdir /.cache: permission denied" BEFORE they ever reach MinIO.
+#      RESTIC_CACHE_DIR is pointed at the mounted emptyDir. The per-volume jobs do not need
+#      this because they run as root, for whom /.cache is writable -- a difference that is
+#      invisible until it is missing.
+#
+# Neither job mounts a volume; they talk only to MinIO. Both live in `apps` because that is
+# where the credential's source Secret lives, and because a repo-wide job has no more claim to
+# a workload's namespace than to any other.
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: backup-housekeeping
+  namespace: apps
+  labels:
+    app: backup
+    app.kubernetes.io/name: backup
+    app.kubernetes.io/component: pv-backup-retention
+    app.kubernetes.io/part-of: pv-backup
+spec:
+  # 09:00 UTC. Clear of the volume block (18:30-21:00 starts, longest deadline ending 02:30)
+  # so prune never meets a live backup, and clear of the 03:00-08:00 window the spec keeps
+  # everything out of.
+  schedule: "0 9 * * *"
+  timeZone: "UTC"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      # Prune can be slow on S3 -- it lists and rewrites the whole backend. Give it room; a
+      # killed prune leaves the repo intact and simply retries tomorrow.
+      activeDeadlineSeconds: 14400
+      ttlSecondsAfterFinished: 172800
+      template:
+        metadata:
+          labels:
+            app: backup
+            app.kubernetes.io/component: pv-backup-retention
+            app.kubernetes.io/part-of: pv-backup
+        spec:
+          restartPolicy: Never
+          # Bare SA, no token: this job talks to MinIO and nothing else.
+          serviceAccountName: backup-job
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65534
+            runAsGroup: 65534
+            fsGroup: 65534
+            allowPrivilegeEscalation: false
+            seccompProfile:
+              type: RuntimeDefault
+            capabilities:
+              drop: ["ALL"]
+          containers:
+          - name: restic
+            image: restic/restic@sha256:136600b6ff6843d61d355f7f71f460a166429f35de6fd11b568fece3c9a4d510
+            command: ["/bin/sh", "-c"]
+            args:
+            - |
+              set -eu
+              export TMPDIR=/tmp
+              export RESTIC_CACHE_DIR=/tmp/restic-cache
+              sh /preflight/preflight.sh || {
+                echo "ABORT: preflight failed -- S3 endpoint unreachable, not starting restic" >&2
+                exit 1
+              }
+              echo "expiring snapshots past retention policy"
+              restic forget --keep-daily 7 --keep-weekly 5 --keep-monthly 3
+              echo "reclaiming unreferenced pack data"
+              restic prune
+              echo "repo stats after prune:"
+              restic stats
+            envFrom:
+            - secretRef:
+                name: backup-minio-secrets
+            securityContext:
+              allowPrivilegeEscalation: false
+              seccompProfile:
+                type: RuntimeDefault
+              capabilities:
+                drop: ["ALL"]
+            resources:
+              requests:
+                cpu: 100m
+                memory: 512Mi
+              limits:
+                cpu: 500m
+                memory: 1Gi
+            volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            - name: preflight
+              mountPath: /preflight
+              readOnly: true
+          volumes:
+          - name: tmp
+            emptyDir:
+              sizeLimit: 2Gi
+          - name: preflight
+            configMap:
+              name: backup-preflight
+              defaultMode: 0555
+---
+# Weekly deep integrity check. `--read-data-subset` reads actual pack data rather than trusting
+# metadata, which is the only thing that distinguishes "snapshots are listed" from "backups are
+# restorable". Until this has run green on titan, nothing in this stage is proven -- see the
+# spec's own out-of-scope note that a written backup proves nothing.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: backup-integrity
+  namespace: apps
+  labels:
+    app: backup
+    app.kubernetes.io/name: backup
+    app.kubernetes.io/component: pv-backup-integrity
+    app.kubernetes.io/part-of: pv-backup
+spec:
+  # Sunday 10:00 UTC. techdelivery's copy of this sat at 07:00, which was inside its nightly
+  # blackout and could never have succeeded; the same trap here would be invisible, because a
+  # check that never runs looks identical to a check that always passes.
+  schedule: "0 10 * * 0"
+  timeZone: "UTC"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      activeDeadlineSeconds: 21600
+      ttlSecondsAfterFinished: 604800
+      template:
+        metadata:
+          labels:
+            app: backup
+            app.kubernetes.io/component: pv-backup-integrity
+            app.kubernetes.io/part-of: pv-backup
+        spec:
+          restartPolicy: Never
+          serviceAccountName: backup-job
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65534
+            runAsGroup: 65534
+            fsGroup: 65534
+            allowPrivilegeEscalation: false
+            seccompProfile:
+              type: RuntimeDefault
+            capabilities:
+              drop: ["ALL"]
+          containers:
+          - name: restic
+            image: restic/restic@sha256:136600b6ff6843d61d355f7f71f460a166429f35de6fd11b568fece3c9a4d510
+            command: ["/bin/sh", "-c"]
+            args:
+            - |
+              set -eu
+              export TMPDIR=/tmp
+              export RESTIC_CACHE_DIR=/tmp/restic-cache
+              sh /preflight/preflight.sh || {
+                echo "ABORT: preflight failed -- S3 endpoint unreachable, not starting restic" >&2
+                exit 1
+              }
+              echo "deep integrity check (reads ~2% of stored data)"
+              restic check --read-data-subset=2%
+              echo "CHECK PASSED"
+            envFrom:
+            - secretRef:
+                name: backup-minio-secrets
+            securityContext:
+              allowPrivilegeEscalation: false
+              seccompProfile:
+                type: RuntimeDefault
+              capabilities:
+                drop: ["ALL"]
+            resources:
+              requests:
+                cpu: 100m
+                memory: 512Mi
+              limits:
+                cpu: 500m
+                memory: 1Gi
+            volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            - name: preflight
+              mountPath: /preflight
+              readOnly: true
+          volumes:
+          - name: tmp
+            emptyDir:
+              sizeLimit: 2Gi
+          - name: preflight
+            configMap:
+              name: backup-preflight
+              defaultMode: 0555

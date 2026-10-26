@@ -1,0 +1,377 @@
+# Per-namespace identity for the backup runners, and for the child jobs they create.
+#
+# This is the one support object Reflector cannot mirror: RBAC is namespace-local by design.
+# Everything else the jobs need (backup-minio-secrets, backup-preflight) is mirrored into these
+# same namespaces, so the list below and the reflector-auto-namespaces annotation on those two
+# objects have to agree. Nothing in the gate set proves they do yet; the spec names that as the
+# hole to close next.
+#
+# TWO service accounts per namespace, not one:
+#
+#   backup-runner  -- the discovery loop. It needs the API token, and exactly two permissions:
+#                     read this namespace's PVCs, and create jobs in it. Not cluster-wide, and
+#                     deliberately not `get secrets`: the child job references the credential
+#                     by name through envFrom, which kubelet resolves, so the runner never has
+#                     to read it. Widening this to secrets would turn a compromised runner pod
+#                     into a credential theft instead of a namespace job-spam problem.
+#
+#   backup-job     -- the child jobs' identity. Bare, no token mounted. Mounting a PVC needs no
+#                     RBAC at all, because kubelet performs the mount with node credentials.
+#                     That is why k8s-techdelivery's backup SA is empty and carries a comment
+#                     saying not to add permissions; that comment still holds and this SA is
+#                     its direct port.
+#
+# PSA: observability carries pod-security.kubernetes.io/warn: restricted, so
+# the child jobs' root + DAC_OVERRIDE pods produce audit warnings there. Warnings, not blocks --
+# measured 2026-10-22, and worth knowing before someone reads a warning as a failure.
+
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: backup-runner
+  namespace: apps
+  labels:
+    app: backup
+    app.kubernetes.io/name: backup
+    app.kubernetes.io/component: pv-backup-discovery
+    app.kubernetes.io/part-of: pv-backup
+# The runner talks to the API server, so it needs its token mounted. This is true by default;
+# it is written out because every other identity in this stage sets it false, so a reader
+# asking "which pods hold a token" should get a complete answer from one grep.
+automountServiceAccountToken: true
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: backup-job
+  namespace: apps
+  labels:
+    app: backup
+    app.kubernetes.io/name: backup
+    app.kubernetes.io/component: pv-backup-job
+    app.kubernetes.io/part-of: pv-backup
+automountServiceAccountToken: false
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: backup-runner
+  namespace: apps
+  labels:
+    app: backup
+    app.kubernetes.io/part-of: pv-backup
+rules:
+# Discovery: read this namespace's PVCs and look at their annotations. No watch, no write --
+# the runner reads the opt-in and never sets it.
+- apiGroups: [""]
+  resources: ["persistentvolumeclaims"]
+  verbs: ["get", "list"]
+# Fan-out: create one Job per opted-in volume, then read them back for the overlap guard and
+# the summary. No delete: child jobs expire through ttlSecondsAfterFinished, so a compromised
+# runner cannot erase the record that a backup ran.
+#
+# `kubectl apply` against a name that already exists would need patch/update and would fail
+# with 403 instead of a conflict. Job names carry a minute stamp and the CronJob fires once a
+# day, so that cannot happen in normal operation; if it ever does the runner counts a failure
+# and exits non-zero rather than overwriting a live job.
+- apiGroups: ["batch"]
+  resources: ["jobs"]
+  verbs: ["create", "get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: backup-runner
+  namespace: apps
+  labels:
+    app: backup
+    app.kubernetes.io/part-of: pv-backup
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: backup-runner
+subjects:
+- kind: ServiceAccount
+  name: backup-runner
+  namespace: apps
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: backup-runner
+  namespace: mealie
+  labels:
+    app: backup
+    app.kubernetes.io/name: backup
+    app.kubernetes.io/component: pv-backup-discovery
+    app.kubernetes.io/part-of: pv-backup
+# The runner talks to the API server, so it needs its token mounted. This is true by default;
+# it is written out because every other identity in this stage sets it false, so a reader
+# asking "which pods hold a token" should get a complete answer from one grep.
+automountServiceAccountToken: true
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: backup-job
+  namespace: mealie
+  labels:
+    app: backup
+    app.kubernetes.io/name: backup
+    app.kubernetes.io/component: pv-backup-job
+    app.kubernetes.io/part-of: pv-backup
+automountServiceAccountToken: false
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: backup-runner
+  namespace: mealie
+  labels:
+    app: backup
+    app.kubernetes.io/part-of: pv-backup
+rules:
+# Discovery: read this namespace's PVCs and look at their annotations. No watch, no write --
+# the runner reads the opt-in and never sets it.
+- apiGroups: [""]
+  resources: ["persistentvolumeclaims"]
+  verbs: ["get", "list"]
+# Fan-out: create one Job per opted-in volume, then read them back for the overlap guard and
+# the summary. No delete: child jobs expire through ttlSecondsAfterFinished, so a compromised
+# runner cannot erase the record that a backup ran.
+#
+# `kubectl apply` against a name that already exists would need patch/update and would fail
+# with 403 instead of a conflict. Job names carry a minute stamp and the CronJob fires once a
+# day, so that cannot happen in normal operation; if it ever does the runner counts a failure
+# and exits non-zero rather than overwriting a live job.
+- apiGroups: ["batch"]
+  resources: ["jobs"]
+  verbs: ["create", "get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: backup-runner
+  namespace: mealie
+  labels:
+    app: backup
+    app.kubernetes.io/part-of: pv-backup
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: backup-runner
+subjects:
+- kind: ServiceAccount
+  name: backup-runner
+  namespace: mealie
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: backup-runner
+  namespace: observability
+  labels:
+    app: backup
+    app.kubernetes.io/name: backup
+    app.kubernetes.io/component: pv-backup-discovery
+    app.kubernetes.io/part-of: pv-backup
+# The runner talks to the API server, so it needs its token mounted. This is true by default;
+# it is written out because every other identity in this stage sets it false, so a reader
+# asking "which pods hold a token" should get a complete answer from one grep.
+automountServiceAccountToken: true
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: backup-job
+  namespace: observability
+  labels:
+    app: backup
+    app.kubernetes.io/name: backup
+    app.kubernetes.io/component: pv-backup-job
+    app.kubernetes.io/part-of: pv-backup
+automountServiceAccountToken: false
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: backup-runner
+  namespace: observability
+  labels:
+    app: backup
+    app.kubernetes.io/part-of: pv-backup
+rules:
+# Discovery: read this namespace's PVCs and look at their annotations. No watch, no write --
+# the runner reads the opt-in and never sets it.
+- apiGroups: [""]
+  resources: ["persistentvolumeclaims"]
+  verbs: ["get", "list"]
+# Fan-out: create one Job per opted-in volume, then read them back for the overlap guard and
+# the summary. No delete: child jobs expire through ttlSecondsAfterFinished, so a compromised
+# runner cannot erase the record that a backup ran.
+#
+# `kubectl apply` against a name that already exists would need patch/update and would fail
+# with 403 instead of a conflict. Job names carry a minute stamp and the CronJob fires once a
+# day, so that cannot happen in normal operation; if it ever does the runner counts a failure
+# and exits non-zero rather than overwriting a live job.
+- apiGroups: ["batch"]
+  resources: ["jobs"]
+  verbs: ["create", "get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: backup-runner
+  namespace: observability
+  labels:
+    app: backup
+    app.kubernetes.io/part-of: pv-backup
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: backup-runner
+subjects:
+- kind: ServiceAccount
+  name: backup-runner
+  namespace: observability
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: backup-runner
+  namespace: open-webui
+  labels:
+    app: backup
+    app.kubernetes.io/name: backup
+    app.kubernetes.io/component: pv-backup-discovery
+    app.kubernetes.io/part-of: pv-backup
+# The runner talks to the API server, so it needs its token mounted. This is true by default;
+# it is written out because every other identity in this stage sets it false, so a reader
+# asking "which pods hold a token" should get a complete answer from one grep.
+automountServiceAccountToken: true
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: backup-job
+  namespace: open-webui
+  labels:
+    app: backup
+    app.kubernetes.io/name: backup
+    app.kubernetes.io/component: pv-backup-job
+    app.kubernetes.io/part-of: pv-backup
+automountServiceAccountToken: false
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: backup-runner
+  namespace: open-webui
+  labels:
+    app: backup
+    app.kubernetes.io/part-of: pv-backup
+rules:
+# Discovery: read this namespace's PVCs and look at their annotations. No watch, no write --
+# the runner reads the opt-in and never sets it.
+- apiGroups: [""]
+  resources: ["persistentvolumeclaims"]
+  verbs: ["get", "list"]
+# Fan-out: create one Job per opted-in volume, then read them back for the overlap guard and
+# the summary. No delete: child jobs expire through ttlSecondsAfterFinished, so a compromised
+# runner cannot erase the record that a backup ran.
+#
+# `kubectl apply` against a name that already exists would need patch/update and would fail
+# with 403 instead of a conflict. Job names carry a minute stamp and the CronJob fires once a
+# day, so that cannot happen in normal operation; if it ever does the runner counts a failure
+# and exits non-zero rather than overwriting a live job.
+- apiGroups: ["batch"]
+  resources: ["jobs"]
+  verbs: ["create", "get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: backup-runner
+  namespace: open-webui
+  labels:
+    app: backup
+    app.kubernetes.io/part-of: pv-backup
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: backup-runner
+subjects:
+- kind: ServiceAccount
+  name: backup-runner
+  namespace: open-webui
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: backup-runner
+  namespace: sure
+  labels:
+    app: backup
+    app.kubernetes.io/name: backup
+    app.kubernetes.io/component: pv-backup-discovery
+    app.kubernetes.io/part-of: pv-backup
+# The runner talks to the API server, so it needs its token mounted. This is true by default;
+# it is written out because every other identity in this stage sets it false, so a reader
+# asking "which pods hold a token" should get a complete answer from one grep.
+automountServiceAccountToken: true
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: backup-job
+  namespace: sure
+  labels:
+    app: backup
+    app.kubernetes.io/name: backup
+    app.kubernetes.io/component: pv-backup-job
+    app.kubernetes.io/part-of: pv-backup
+automountServiceAccountToken: false
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: backup-runner
+  namespace: sure
+  labels:
+    app: backup
+    app.kubernetes.io/part-of: pv-backup
+rules:
+# Discovery: read this namespace's PVCs and look at their annotations. No watch, no write --
+# the runner reads the opt-in and never sets it.
+- apiGroups: [""]
+  resources: ["persistentvolumeclaims"]
+  verbs: ["get", "list"]
+# Fan-out: create one Job per opted-in volume, then read them back for the overlap guard and
+# the summary. No delete: child jobs expire through ttlSecondsAfterFinished, so a compromised
+# runner cannot erase the record that a backup ran.
+#
+# `kubectl apply` against a name that already exists would need patch/update and would fail
+# with 403 instead of a conflict. Job names carry a minute stamp and the CronJob fires once a
+# day, so that cannot happen in normal operation; if it ever does the runner counts a failure
+# and exits non-zero rather than overwriting a live job.
+- apiGroups: ["batch"]
+  resources: ["jobs"]
+  verbs: ["create", "get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: backup-runner
+  namespace: sure
+  labels:
+    app: backup
+    app.kubernetes.io/part-of: pv-backup
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: backup-runner
+subjects:
+- kind: ServiceAccount
+  name: backup-runner
+  namespace: sure
