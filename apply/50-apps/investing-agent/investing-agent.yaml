@@ -5,6 +5,9 @@
 # /v2/repositories/nousresearch/hermes-agent/tags/v2026.9.24/); upstream has since moved to
 # semver (`v0.22.5`), which is a separate change.
 #
+# The bring-up record — what was measured before merging, what has run, and what is still unproven —
+# is docs/investing-agent-bringup-2026-10-26.md. This header is the design; that file is the log.
+#
 # WHAT CHANGED ON THE WAY ACROSS, and why:
 #   * storageClassName local-path -> local-path-retain. Every PVC in this repo uses the Retain
 #     class (apply/20-infra/storage-retain.yaml); it is this cluster's only deletion mitigation,
@@ -25,6 +28,10 @@
 #     llm.titan front door, whose header records `curl http://192.168.0.29:8731/health` having
 #     been run from inside this cluster. Nothing in this file needs a mesh exception.
 #
+# BEFORE ANY OF IT: `du -sh /opt/data` on the source host, and write the number in the bring-up
+# file. `local-path-retain` sets allowVolumeExpansion: false (apply/20-infra/storage-retain.yaml),
+# so 10Gi here is not a soft target — if the tree is bigger, the fix is PV surgery, not a resize.
+#
 # THE STATE MOVE, and the one thing that is easy to get wrong.
 # The 10 Gi is being copied by hand. `local-path-retain` is volumeBindingMode: WaitForFirstConsumer,
 # so the PVC does not bind and the backing directory does not exist until a pod schedules — an
@@ -44,6 +51,11 @@
 # git, and a pod delete is unambiguous. Do NOT `kubectl scale` anything here: replicas is
 # git-managed and Flux reverts it at the next sync.
 # Then the source teardown is a separate change, not part of this one.
+#
+# `make dry-run DRYRUN_CONTEXT=<admin context>` is not covered by `make check` and has to be run
+# before merge. The PVC is the object class that took this stage red live once already
+# (apply/50-apps/coder/workspaces.yaml:41-47 records it), and no offline gate can see a live
+# admission rule.
 #
 # NOT BACKED UP ON TITAN. techdelivery protected this claim with the `backup-investing-agent`
 # restic CronJob (apply/30-backup/apps/backup-apps.yaml there). This cluster ships no generic PV
@@ -140,8 +152,8 @@ spec:
             value: /opt/data/.hermes
           - name: HERMES_CRON_TIMEOUT
             value: "3600"
-          # readOnlyRootFilesystem leaves /tmp read-only; SQLite spills FTS/temp files
-          # there and fails with SQLITE_IOERR. Point temp at a writable emptyDir.
+          # Explicit rather than inherited — /tmp is already the default. The emptyDir mounted at
+          # /tmp below is what actually makes it writable; see its comment.
           - name: TMPDIR
             value: /tmp
         envFrom:
@@ -197,6 +209,11 @@ spec:
         persistentVolumeClaim:
           claimName: investing-agent-pv-claim
       # Writable scratch for SQLite temp/FTS spill under readOnlyRootFilesystem.
+      #
+      # The cap is hard and the failure mode is not a write error: kubelet EVICTS the pod when an
+      # emptyDir goes over, and on a single node that takes the gateway down with it. 512Mi is the
+      # source's value, kept because the node's free space has not been measured here. If spill
+      # ever grows into it, raise this before chasing a corrupt-looking database.
       - name: scratch
         emptyDir:
           sizeLimit: 512Mi
