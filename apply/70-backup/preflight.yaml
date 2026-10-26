@@ -44,9 +44,9 @@ metadata:
     # deliberate edit here, in the same commit as its RBAC, and not something that happens
     # because a namespace appeared.
     reflector.v1.k8s.emberstack.com/reflection-allowed: "true"
-    reflector.v1.k8s.emberstack.com/reflection-allowed-namespaces: "mealie,observability,open-webui,sure"
+    reflector.v1.k8s.emberstack.com/reflection-allowed-namespaces: "mealie,open-webui,sure"
     reflector.v1.k8s.emberstack.com/reflection-auto-enabled: "true"
-    reflector.v1.k8s.emberstack.com/reflection-auto-namespaces: "mealie,observability,open-webui,sure"
+    reflector.v1.k8s.emberstack.com/reflection-auto-namespaces: "mealie,open-webui,sure"
 data:
   preflight.sh: |
     #!/bin/sh

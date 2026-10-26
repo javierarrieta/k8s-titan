@@ -76,15 +76,17 @@ because a file copy of a live datadir can restore corrupt and CNPG owns that pat
 `files/opencloud-data`, because OpenCloud's state is a metadata tree plus a blob bucket and
 restoring one without the other is a restore that looks healthy and is corrupt — so with no
 capacity to mirror the bucket, **files uploaded to `files.titan.arrieta.eu` have no backup of any
-kind**; and `coder-workspaces`, by operator decision — a coder workspace must be reproducible
+kind**; `coder-workspaces`, by operator decision — a coder workspace must be reproducible
 from its image and from git, so **anything in a workspace home that is neither is not
-recoverable**. Neither path is monitored yet: casa owns the Prometheus that would alert on a stale
+recoverable**; and both Grafana volumes, because every provider sets `allowUiUpdates: false`, the
+datasources and the admin credentials are in git, and a wiped PVC rebuilds itself — what it loses
+is anything built by hand in the UI. Neither path is monitored yet: casa owns the Prometheus that would alert on a stale
 snapshot and no such alert exists for titan, so a week of failed backups currently looks exactly
 like a week of successful ones. The restic side has also never been restored — the spec's §10 is
 that list.
 
 That covers TeslaMate's driving history and TeslaMate's settings,
-which are rows in that same cluster and are not in git; Grafana's PVC is not. The runbook at
+which are rows in that same cluster and are not in git. The runbook at
 `docs/authentik-runbook.md` records what has actually been drilled (a scratch-cluster
 restore and a point-in-time recovery, both passing), and the two credentials with special
 rules: `AUTHENTIK_SECRET_KEY` (never rotate casually — it signs sessions and derives user IDs,

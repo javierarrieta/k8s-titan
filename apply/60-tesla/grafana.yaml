@@ -16,12 +16,11 @@ kind: PersistentVolumeClaim
 metadata:
   name: tesla-grafana
   namespace: apps
-  annotations:
-    # Opted in to restic PV backup. This annotation IS the scope decision -- apply/70-backup/
-    # discovers annotated PVCs at runtime rather than enumerating them in git, so a volume with
-    # no annotation is not backed up and adding one is a one-line commit here. Retention and
-    # schedule come from the class, not from this file.
-    backup.titan.arrieta.eu/class: daily
+  # Deliberately NOT annotated, so apply/70-backup/ leaves this volume alone. Same reasoning as
+  # observability/grafana and checked the same way: the TeslaMate dashboards ship inside the
+  # teslamate/grafana image, the datasource is built from DATABASE_* in teslamate-secrets at
+  # boot, and the admin credentials are in tesla-grafana-admin.yaml. Nothing here is unique to
+  # the volume except what someone made by hand in the UI.
 spec:
   accessModes:
   - ReadWriteOnce

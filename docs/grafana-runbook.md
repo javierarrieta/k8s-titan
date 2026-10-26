@@ -240,10 +240,13 @@ was a second worker restart: `kubectl -n auth rollout restart deploy/authentik-w
 
 ## 8. Not proven
 
-- **The PVC has no backup and no restore has been drilled.** This cluster backs up the Postgres
-  cluster and nothing else. With `allowUiUpdates: false` the volume holds only Grafana's sqlite —
-  users, preferences, API keys — so losing it means re-login, not lost dashboards. That is an
-  argument, not a test.
+- **The PVC is deliberately outside the backup stage and no restore has ever been drilled.**
+  `apply/70-backup/` backs up whatever carries `backup.titan.arrieta.eu/class`, and this PVC does
+  not carry it: every provider here sets `allowUiUpdates: false`, the datasources are a ConfigMap,
+  and the admin credentials are in `observability-grafana-admin.yaml`, so a wiped volume rebuilds
+  itself and costs only what someone built by hand in the UI. That is the argument for the
+  exclusion, and it is still only an argument — nobody has wiped the volume to find out what else
+  was in the sqlite file.
 - **Grafana's gating is coupled to a Tesla-owned blueprint.** The proxy provider that gates this host
   is `forward_domain` over `titan.arrieta.eu` and lives in
   `apply/50-apps/auth/tesla-outpost-blueprint.yaml`. Narrowing it later silently locks the homelab's

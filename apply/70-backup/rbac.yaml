@@ -21,9 +21,12 @@
 #                     saying not to add permissions; that comment still holds and this SA is
 #                     its direct port.
 #
-# PSA: observability carries pod-security.kubernetes.io/warn: restricted, so
-# the child jobs' root + DAC_OVERRIDE pods produce audit warnings there. Warnings, not blocks --
-# measured 2026-10-22, and worth knowing before someone reads a warning as a failure.
+# PSA: a namespace carrying pod-security.kubernetes.io/warn: restricted emits audit warnings for
+# the child jobs, which run as root with DAC_OVERRIDE. No namespace in scope today does. The two
+# that carry the label -- coder-workspaces and observability -- are both out of scope by decision
+# (coder volumes because a workspace should be reproducible from its image and from git; grafana's
+# volume because git already holds it). Warnings, not blocks, measured 2026-10-22, and worth
+# knowing before someone reads one as a failure after adding either namespace back.
 
 ---
 apiVersion: v1
@@ -165,76 +168,6 @@ subjects:
 - kind: ServiceAccount
   name: backup-runner
   namespace: mealie
----
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: backup-runner
-  namespace: observability
-  labels:
-    app: backup
-    app.kubernetes.io/name: backup
-    app.kubernetes.io/component: pv-backup-discovery
-    app.kubernetes.io/part-of: pv-backup
-# The runner talks to the API server, so it needs its token mounted. This is true by default;
-# it is written out because every other identity in this stage sets it false, so a reader
-# asking "which pods hold a token" should get a complete answer from one grep.
-automountServiceAccountToken: true
----
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: backup-job
-  namespace: observability
-  labels:
-    app: backup
-    app.kubernetes.io/name: backup
-    app.kubernetes.io/component: pv-backup-job
-    app.kubernetes.io/part-of: pv-backup
-automountServiceAccountToken: false
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
-metadata:
-  name: backup-runner
-  namespace: observability
-  labels:
-    app: backup
-    app.kubernetes.io/part-of: pv-backup
-rules:
-# Discovery: read this namespace's PVCs and look at their annotations. No watch, no write --
-# the runner reads the opt-in and never sets it.
-- apiGroups: [""]
-  resources: ["persistentvolumeclaims"]
-  verbs: ["get", "list"]
-# Fan-out: create one Job per opted-in volume, then read them back for the overlap guard and
-# the summary. No delete: child jobs expire through ttlSecondsAfterFinished, so a compromised
-# runner cannot erase the record that a backup ran.
-#
-# `kubectl apply` against a name that already exists would need patch/update and would fail
-# with 403 instead of a conflict. Job names carry a minute stamp and the CronJob fires once a
-# day, so that cannot happen in normal operation; if it ever does the runner counts a failure
-# and exits non-zero rather than overwriting a live job.
-- apiGroups: ["batch"]
-  resources: ["jobs"]
-  verbs: ["create", "get", "list"]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata:
-  name: backup-runner
-  namespace: observability
-  labels:
-    app: backup
-    app.kubernetes.io/part-of: pv-backup
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: Role
-  name: backup-runner
-subjects:
-- kind: ServiceAccount
-  name: backup-runner
-  namespace: observability
 ---
 apiVersion: v1
 kind: ServiceAccount

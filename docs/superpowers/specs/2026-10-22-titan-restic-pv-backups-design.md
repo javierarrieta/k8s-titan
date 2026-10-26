@@ -64,18 +64,19 @@ Live inventory measured 2026-10-26 (`kubectl get pvc -A`, `kubectl get pv`):
 | PVC | Size | StorageClass | class | Why |
 |---|---|---|---|---|
 | `apps/investing-agent-pv-claim` | 10Gi | `local-path-retain` | `daily` | agent state; also the volume `docs/investing-agent-pv-edits` records hand-edits inside, which no gate can see |
-| `apps/tesla-grafana` | 1Gi | `local-path` | `daily` | dashboards and provisioning not in git |
+| `apps/tesla-grafana` | 1Gi | `local-path` | **no — by decision, §7c** | reproducible: the TeslaMate dashboards ship inside `teslamate/grafana`, the datasource is built from `teslamate-secrets` at boot, the admin is in `tesla-grafana-admin.yaml` |
 | `coder-workspaces/coder-*-home` | 40Gi | `local-path-retain` | **no — by decision, §7c** | operator's rule: a workspace should be reproducible from its image and from git, so a home that needs backing up is a workspace doing something it should not |
 | `mealie/mealie-data` | 5Gi | `local-path-retain` | `daily` | recipe uploads; the relational half is in CNPG |
-| `observability/grafana-data` | 1Gi | `local-path-retain` | `daily` | same as tesla's, different namespace |
+| `observability/grafana-data` | 1Gi | `local-path-retain` | **no — by decision, §7c** | reproducible: every provider sets `allowUiUpdates: false`, datasources are `grafana-datasources.yaml`, admin is `observability-grafana-admin.yaml`, Admin role comes from the authentik claim |
 | `open-webui/open-webui-data` | 10Gi | `local-path-retain` | `daily` | uploads and local index |
 | `sure/sure-storage` | 5Gi | `local-path-retain` | `daily` | Active Storage uploads |
 | `files/opencloud-data` | 5Gi | `local-path-retain` | **none — see §4** | half a backup is worse than none |
 | `databases/postgres-1` | 10Gi | `local-path` | **no** | CNPG owns it. A file-level copy of a live Postgres datadir can restore corrupt, and CNPG's own path is drilled. |
 
-~32Gi annotated and in effect. coder's 40Gi home is excluded by decision (§7c), which is the
-difference between a 32Gi nightly set and a 72Gi one. The first draft's "~51Gi across 4 PVCs" was
-a different cluster: three of those volumes did not exist yet.
+~30Gi annotated and in effect, across 4 PVCs in 4 namespaces. Three exclusions are decisions
+rather than omissions and all three are §7c: coder's 40Gi home, and both Grafana volumes (2Gi),
+because git already holds everything they were argued to be backing up. The first draft's "~51Gi
+across 4 PVCs" was a different cluster: three of those volumes did not exist yet.
 
 `kubectl get pvc -A -L backup.titan.arrieta.eu/class` is the answer to "what is backed up", asked
 of the cluster rather than of this file.
@@ -213,9 +214,10 @@ opposite — uid 65534, no capabilities, no volume mounted — because they only
 
 Measured 2026-10-22 and re-read 2026-10-26: no titan namespace carries a PSA `enforce` label, so
 this is permitted. `coder-workspaces` and `observability` carry
-`pod-security.kubernetes.io/warn: restricted`, which means the child pods generate audit
-warnings there. Noise, not a block — but worth knowing before someone reads a warning as a
-failure.
+`pod-security.kubernetes.io/warn: restricted`, which would make the child pods generate audit
+warnings there — noise, not a block, and worth knowing before someone reads a warning as a failure.
+Neither namespace is in scope after §7c, so today no runner namespace carries the label; it comes
+back the moment either is added.
 
 `ReadWriteOnce` is not an obstacle: RWO restricts a volume to one *node*, not one pod, and this is
 single-node k3s, so the backup pod mounts alongside the running app.
@@ -325,6 +327,17 @@ vouching for which objects get mirrored. Both mirror lists are explicit namespac
    someone loses an afternoon. If it ever needs revisiting, the mechanism is a namespace added to
    two annotations plus an RBAC block, and the annotation on the workspace storage block in
    `coder-templates`. §7a records that this decision also weakens the case for discovery.
+3. **Are the Grafana volumes worth nightly bytes?** — **no, decided by the operator on
+   2026-10-26, and the argument was checked rather than accepted.** Both were annotated `daily`
+   in the first cut on the assumption that dashboards and datasources needed protecting. They do
+   not: every provider in `grafana-dashboard-provisioning.yaml` sets `allowUiUpdates: false`, the
+   observability datasources are `grafana-datasources.yaml`, tesla-boards' datasource is built
+   from `teslamate-secrets` at boot with the dashboards baked into its image, and both local admin
+   credentials are sops Secrets. A wiped PVC rebuilds itself on boot. What it loses is only what
+   someone built by hand in the UI — an ad-hoc dashboard, a folder, an alert contact point, an API
+   key — plus preferences and dashboard version history, and that was judged not worth a nightly
+   backup. `observability` therefore has no runner, no RBAC and no mirror entry. The honest limit:
+   nobody has wiped the volume, so "rebuilds itself" is an argument, not a drilled restore.
 3. **The Released PVs** — still open, and now five rather than two (§2). Note the mechanism
    cannot help: a job mounts a PVC and a Released PV has none.
 
