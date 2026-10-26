@@ -108,10 +108,13 @@ the stream is rejected per-pod, silently, with promtail reporting healthy.
   `docs/ovh-dns-credential.md` for the staging flow (`sops --encrypt --in-place` on a
   git-ignored name under `apply/10-secrets/`), which exists because sops picks its
   recipients from the file's own path. Never write a plaintext Secret manifest anywhere
-  else. `make secrets-placement` enforces three halves: no `kind: Secret` outside
-  `apply/10-secrets/`, every file there actually carrying `ENC[`, and every file there
-  actually listed in that directory's `kustomization.yaml` — an unlisted Secret builds
-  fine and is silently never applied.
+  else. `make secrets-placement` enforces four halves: no `kind: Secret` outside
+  `apply/10-secrets/`, every file there actually carrying `ENC[`, every file there actually
+  listed in that directory's `kustomization.yaml` — an unlisted Secret builds fine and is
+  silently never applied — and no `data:` in a file there. That last one is not stylistic: a
+  Secret's `data:` values are base64 by contract, a sops ciphertext is not base64, and the API
+  server refuses the undecrypted tree on server-side dry-run, so `make dry-run` stops at
+  `10-secrets` and never reaches the stage you changed. Use `stringData`.
 - The cluster key is `titan-k8s`, not the titan host key. Do not "simplify" the two
   into one: the separation is what caps a pod compromise at titan's own secrets.
 - **sops matches creation rules against the path you hand it, not the path the output lands at.** So
