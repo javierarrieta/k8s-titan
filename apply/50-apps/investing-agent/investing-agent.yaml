@@ -122,11 +122,18 @@ spec:
       labels:
         app: investing-agent
     spec:
-      # Chosen, not inherited. The gateway is PID 1 now, so SIGTERM reaches it directly and this is
-      # how long it gets to flush SQLite before SIGKILL. 60s is headroom over the 30s default for a
-      # long write; if hermes ignores SIGTERM entirely the kill still lands here rather than at the
-      # node's default.
-      terminationGracePeriodSeconds: 60
+      # Chosen against the app's own drain window, not against the Kubernetes default. The gateway's
+      # config in the volume sets `agent.restart_drain_timeout: 180`; 60 here cut that drain short.
+      # Measured on 2026-10-26, every shutdown of this pod logged
+      #   WARNING gateway.lifecycle_ledger: Previous gateway life (pid=1) exited UNCLEANLY
+      #     (no exit path ran - SIGKILL / OOM / VM death ...) suspected_oom=False
+      # with suspected_oom=False, i.e. kubelet killing a drain that was still running, with SQLite
+      # on the volume. 200 clears 180 with margin.
+      #   Honest limit: necessary, not sufficient. If hermes does not begin its drain on SIGTERM, the
+      # kill still lands here, only later, and the same UNCLEANLY line persists - which would point at
+      # the entrypoint (the image warns about this override above) or a preStop hook, not at this
+      # number. Re-check the ledger line after the next rollout rather than assuming this fixed it.
+      terminationGracePeriodSeconds: 200
       securityContext:
         runAsNonRoot: true
         runAsUser: 10000
