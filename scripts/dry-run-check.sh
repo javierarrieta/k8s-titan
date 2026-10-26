@@ -15,7 +15,18 @@
 #   make dry-run DRYRUN_CONTEXT=<admin kube context>
 set -euo pipefail
 
-STAGES=(00-bootstrap 10-secrets 20-infra 40-certificates 50-apps)
+# Derived from the tree, never listed by hand.
+#
+# This was a hardcoded list, and it went stale twice without anyone noticing: `30-databases` and
+# `60-tesla` were added as stages and never added here, so the CNPG `Cluster`, the ScheduledBackup
+# and all of TeslaMate have never been asked whether the API server would accept them. Worse than
+# failing, the run printed `dry-run: 5 stage(s) built, 5 accepted by the API server` - a pass, over
+# a subset. That is the same class of bug `make kustomize-listing` exists for on the Flux side: a
+# gate whose input list is maintained by hand will be maintained by hand once too often.
+#
+# A stage is any directory under apply/ carrying a kustomization.yaml, which is exactly what Flux
+# builds, so the gate can no longer drift from the tree.
+STAGES=()
 
 # kubectl apply warns once per live object that predates this repo's use of apply ("missing
 # last-applied-configuration ... will be patched automatically"). Forty-odd warnings on a *passing*
@@ -52,6 +63,15 @@ python3 -c 'import yaml' 2>/dev/null || { \
   echo "FAIL:   install it:  nix-shell -p python3 python3Packages.pyyaml   (see also: make py-deps)" >&2; \
   exit 1; }
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+for k in "$root"/apply/*/kustomization.yaml; do
+  [ -e "$k" ] || continue
+  STAGES+=("$(basename "$(dirname "$k")")")
+done
+if [ "${#STAGES[@]}" -eq 0 ]; then
+  echo "dry-run: FAIL - no stage under $root/apply has a kustomization.yaml; refusing to report a clean run over nothing" >&2
+  exit 1
+fi
 
 err=$(mktemp); trap 'rm -f "$err"' EXIT
 checked=0
