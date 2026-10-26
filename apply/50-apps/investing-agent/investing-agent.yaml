@@ -33,22 +33,27 @@
 #     llm.titan front door, whose header records `curl http://192.168.0.29:8731/health` having
 #     been run from inside this cluster. Nothing in this file needs a mesh exception.
 #
-# PRE-FLIGHT, DONE 2026-10-26: `du -sh /opt/data` on the source host = **11M** against a 10Gi
-# request. That matters because `local-path-retain` sets allowVolumeExpansion: false
-# (apply/20-infra/storage-retain.yaml), so the claim cannot be grown later — 10Gi is the source's
-# own value and it is kept rather than trimmed to the 11M actually present.
+# PRE-FLIGHT, STILL OWED: measure the source volume on the host path its PV names —
+# /opt/k3s/volumes/pvc-21879166-bb63-4c16-a2d2-9f99120058d4_apps_investing-agent-pv-claim on the
+# techdelivery host. The first `du -sh /opt/data` returned 11M and measured the wrong directory:
+# /opt/data is the *container* mount path, and the two clusters use different nodePathMap roots
+# (/opt/k3s/volumes there, /var/lib/rancher/k3s/storage here). The number matters because
+# local-path-retain sets allowVolumeExpansion: false (apply/20-infra/storage-retain.yaml), so the
+# claim cannot be grown later. 10Gi is the source's own value and is kept rather than trimmed.
 #
 # THE STATE MOVE, and the one thing that is easy to get wrong.
-# The 10 Gi is being copied by hand. `local-path-retain` is volumeBindingMode: WaitForFirstConsumer,
+# The state move is being done by hand. `local-path-retain` is volumeBindingMode: WaitForFirstConsumer,
 # so the PVC does not bind and the backing directory does not exist until a pod schedules — an
 # app started at zero replicas would leave nowhere to copy into. Hence replicas: 1 here and
 # replicas: 0 on the source at the same time: the source stops writing, this side binds.
 #   1. source scaled to 0            -> the old pod stops, writes stop, the old bytes are quiescent
-#   2. this app merges at replicas: 1 -> PVC binds, /var/lib/rancher/k3s/storage/apps_investing-agent-pv-claim_*
-#                                        exists, the app boots on empty state (harmless, it is about
-#                                        to be overwritten — but it does mean the first minutes of
-#                                        cron runs are against nothing)
-#   3. rsync the old /opt/data into that directory, then chown -R 10000:10000 (the pod runs as
+#   2. this app merges at replicas: 1 -> PVC binds and the backing directory exists. Read its path
+#      off titan's own PV (kubectl get pv -o custom-columns=CLAIM:.spec.claimRef.name,PATH:.spec.local.path)
+#      — the name embeds the random PV name, so it cannot be guessed. The app boots on empty state
+#      (harmless, it is about to be overwritten — but it does mean the first minutes of cron runs
+#      are against nothing)
+#   3. rsync from the source PV's host path (see PRE-FLIGHT above — not /opt/data, which is the
+#      container path) into that directory, then chown -R 10000:10000 (the pod runs as
 #      uid/gid 10000 with fsGroup 10000; a tree owned by anything else reads as a corrupt DB)
 #   4. kubectl -n apps delete pod -l app=investing-agent
 # Step 4 is the one that gets missed: the running pod already has the old files open, so a copy
