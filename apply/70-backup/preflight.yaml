@@ -206,7 +206,11 @@ data:
     # targets a PVC that no longer exists fails at mount time in a pod nobody looks at.
     # Discovering at runtime makes the same question answerable from the cluster:
     #
-    #   kubectl get pvc -A -L backup.titan.arrieta.eu/class
+    #   kubectl get pvc -A -o custom-columns='NS:.metadata.namespace,NAME:.metadata.name,CLASS:.metadata.annotations.backup\.titan\.arrieta\.eu/class'
+    #   Not `-L backup.titan.arrieta.eu/class`: -L prints a LABEL and this is an ANNOTATION, so
+    #   the label column comes back <unset> for every volume -- which reads as "nothing is
+    #   backed up" and invites someone to add a label nothing here ever reads. Measured on the
+    #   live cluster 2026-10-26 after the first apply.
     #
     # WHAT THIS CANNOT DO
     # A pod cannot mount a volume discovered after the pod started, so the runner does not

@@ -78,7 +78,7 @@ rather than omissions and all three are §7c: coder's 40Gi home, and both Grafan
 because git already holds everything they were argued to be backing up. The first draft's "~51Gi
 across 4 PVCs" was a different cluster: three of those volumes did not exist yet.
 
-`kubectl get pvc -A -L backup.titan.arrieta.eu/class` is the answer to "what is backed up", asked
+`kubectl get pvc -A -o custom-columns='NS:.metadata.namespace,NAME:.metadata.name,CLASS:.metadata.annotations.backup\.titan\.arrieta\.eu/class'` is the answer to "what is backed up", asked
 of the cluster rather than of this file.
 
 ### Five Released PVs, still nobody's
