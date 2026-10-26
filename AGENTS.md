@@ -70,7 +70,7 @@ ships base backups and continuous WAL to S3, drilled for both a scratch-cluster 
 point-in-time recovery (`docs/authentik-runbook.md`). Everything else on a PVC goes through
 `apply/70-backup/` — restic to `titan-pv-backups` on casa's MinIO — and **a volume is only in
 scope if its PVC carries `backup.titan.arrieta.eu/class: daily`**. Ask the cluster, not this
-file: `kubectl get pvc -A -L backup.titan.arrieta.eu/class`. Two deliberate exclusions, both
+file: `kubectl get pvc -A -o custom-columns='NS:.metadata.namespace,NAME:.metadata.name,CLASS:.metadata.annotations.backup\.titan\.arrieta\.eu/class'` — and not `-L backup.titan.arrieta.eu/class`, because `-L` prints a label, this is an annotation, and the label column reads `<unset>` for every volume, which looks exactly like an empty backup set. Two deliberate exclusions, both
 argued in `docs/superpowers/specs/2026-10-22-titan-restic-pv-backups-design.md`: `postgres-1`,
 because a file copy of a live datadir can restore corrupt and CNPG owns that path; and
 `files/opencloud-data`, because OpenCloud's state is a metadata tree plus a blob bucket and
