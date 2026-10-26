@@ -57,11 +57,8 @@ spec:
             runAsNonRoot: true
             runAsUser: 65534
             runAsGroup: 65534
-            allowPrivilegeEscalation: false
             seccompProfile:
               type: RuntimeDefault
-            capabilities:
-              drop: ["ALL"]
           containers:
           - name: runner
             # kubectl, not restic: the runner never touches a volume. Two images in this stage,
@@ -141,11 +138,8 @@ spec:
             runAsNonRoot: true
             runAsUser: 65534
             runAsGroup: 65534
-            allowPrivilegeEscalation: false
             seccompProfile:
               type: RuntimeDefault
-            capabilities:
-              drop: ["ALL"]
           containers:
           - name: runner
             # kubectl, not restic: the runner never touches a volume. Two images in this stage,
@@ -225,11 +219,8 @@ spec:
             runAsNonRoot: true
             runAsUser: 65534
             runAsGroup: 65534
-            allowPrivilegeEscalation: false
             seccompProfile:
               type: RuntimeDefault
-            capabilities:
-              drop: ["ALL"]
           containers:
           - name: runner
             # kubectl, not restic: the runner never touches a volume. Two images in this stage,
@@ -309,11 +300,8 @@ spec:
             runAsNonRoot: true
             runAsUser: 65534
             runAsGroup: 65534
-            allowPrivilegeEscalation: false
             seccompProfile:
               type: RuntimeDefault
-            capabilities:
-              drop: ["ALL"]
           containers:
           - name: runner
             # kubectl, not restic: the runner never touches a volume. Two images in this stage,
@@ -393,11 +381,8 @@ spec:
             runAsNonRoot: true
             runAsUser: 65534
             runAsGroup: 65534
-            allowPrivilegeEscalation: false
             seccompProfile:
               type: RuntimeDefault
-            capabilities:
-              drop: ["ALL"]
           containers:
           - name: runner
             # kubectl, not restic: the runner never touches a volume. Two images in this stage,

@@ -30,6 +30,16 @@ VACUITY. Refuses to report clean when it found no annotated PVCs or no runners. 
 annotation was renamed, or where the backup stage was deleted, would otherwise pass by inspecting
 nothing - the failure mode this repo has already been bitten by twice.
 
+THE RUNTIME JOB, AND WHY IT IS CHECKED HERE. The runner shell script writes a Job manifest into
+`kubectl apply -f -` from a heredoc at 18:30 every night. `make dry-run` cannot see it - the
+manifest does not exist until the runner runs - so the one object in this feature that actually
+touches the data is invisible to the only gate that knows the Kubernetes schema. That is not
+hypothetical: the first version of this feature put `allowPrivilegeEscalation` and `capabilities`
+in the POD securityContext, where the schema does not declare them, and `make dry-run` caught it
+in the five static CronJobs and would have missed it in the child job forever. It is caught here
+instead, by rendering the heredoc with dummy values and validating it offline. See
+POD_SC_ALLOWED for what that check knows and why it knows it.
+
 WHAT IT DOES NOT PROVE, and the honest limit is wide here. It proves the wiring agrees in the tree.
 It cannot prove the annotation is on the live PVCs (coder's volumes are created at runtime and are
 annotated by coder-templates, in another repo), that Reflector is healthy, that the credential
@@ -37,6 +47,7 @@ inside the mirrored Secret is the right one, or that a backup ever ran. The firs
 cluster and belong beside `make dry-run`, which needs an admin context; the last needs the restore
 drill the spec says has not happened.
 """
+import re
 import sys
 
 import yaml
@@ -49,9 +60,80 @@ AUTO_NS = "reflector.v1.k8s.emberstack.com/reflection-auto-namespaces"
 KNOWN_CLASSES = {"daily"}
 SOURCE_NAMESPACE = "apps"
 
+# Fields the API server declares on a POD securityContext (core.v1.PodSecurityContext). Anything
+# else is a container-level field that landed one level too high, and the server-side-apply typed
+# patch builder rejects the whole object for it: "field not declared in schema". This list is
+# deliberately an allow-list and not a deny-list of the two fields that have already been gotten
+# wrong once - the next mistake will not be one of these two.
+POD_SC_ALLOWED = {
+    "runAsNonRoot", "runAsUser", "runAsGroup", "fsGroup", "fsGroupChangePolicy",
+    "supplementalGroups", "supplementalGroups", "seccompProfile", "seLinuxOptions",
+    "sysctls", "appArmorProfile", "hostUsers", "windowsOptions", "seLinuxOptions",
+}
+# Container-level fields (core.v1.SecurityContext) that must live on the container instead. The
+# child job drops ALL and adds DAC_OVERRIDE; if that ever migrates up to the pod it is both
+# rejected by the API server and silently not what the pod runs with.
+CONTAINER_SC_REQUIRED = {"allowPrivilegeEscalation", "capabilities"}
+
 
 def fail(problems, msg):
     problems.append(msg)
+
+
+def render_child_job(script):
+    """Extract the heredoc the runner pipes into `kubectl apply -f -` and render it as YAML.
+
+    Shell variables ($NS, $PVC, $DEADLINE, $RESTIC_IMAGE, ...) become a fixed dummy token: they
+    never change the shape of the manifest, and the shape is the only thing being checked here.
+    Escaped backslash-dollar sequences are the shell inside the rendered pod, not the runner's, and they
+    survive as ordinary scalar text.
+    """
+    lines = script.split("\n")
+    start = None
+    for i, ln in enumerate(lines):
+        if "<<EOF" in ln:
+            start = i + 1
+            break
+    if start is None:
+        return None, "no `<<EOF` heredoc found in runner.sh - the child job manifest is gone"
+    body = []
+    for ln in lines[start:]:
+        if ln.strip() == "EOF":
+            break
+        body.append(ln)
+    else:
+        return None, "the runner.sh heredoc is unterminated"
+    text = re.sub(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?", "RENDERED", "\n".join(body))
+    try:
+        return yaml.safe_load(text), None
+    except yaml.YAMLError as exc:
+        return None, f"the rendered child job is not valid YAML - {exc}"
+
+
+def check_child_job(job, problems):
+    """Validate the runtime-generated Job against the two schema facts dry-run cannot reach."""
+    if job is None or not isinstance(job, dict) or job.get("kind") != "Job":
+        fail(problems, "could not render the child job from runner.sh, so its schema is unproven")
+        return
+    pod = ((job.get("spec") or {}).get("template") or {}).get("spec") or {}
+    pod_sc = pod.get("securityContext") or {}
+    illegal = sorted(set(pod_sc) - POD_SC_ALLOWED)
+    if illegal:
+        fail(problems, f"the child job's POD securityContext declares {illegal}, which "
+                       "core.v1.PodSecurityContext does not declare. The API server rejects the "
+                       "whole Job with 'field not declared in schema' - and because this manifest "
+                       "is written at runtime, `make dry-run` never sees it: every backup would "
+                       "fail the same way, every night, invisibly to every gate.")
+    containers = pod.get("containers") or []
+    if len(containers) != 1:
+        fail(problems, f"the child job has {len(containers)} container(s), expected exactly 1")
+    for c in containers:
+        csc = c.get("securityContext") or {}
+        missing = sorted(CONTAINER_SC_REQUIRED - set(csc))
+        if missing:
+            fail(problems, f"the child job container {c.get('name')} has no "
+                           f"{', '.join(missing)} in ITS securityContext - those are container "
+                           "fields and belong here, not on the pod")
 
 
 def main():
@@ -86,6 +168,15 @@ def main():
         elif kind in ("Secret", "ConfigMap") and name in ("backup-minio-secrets", "backup-preflight"):
             raw = ((meta.get("annotations") or {}).get(AUTO_NS) or "").strip()
             mirrored[name] = {n.strip() for n in raw.split(",") if n.strip()}
+            # Not an `elif` of its own: this branch already owns backup-preflight, and a later
+            # `elif kind == "ConfigMap"` for the same object would be unreachable - which is how
+            # this check passed four mutations on its first run while looking like it worked.
+            if kind == "ConfigMap":
+                child, err = render_child_job(((doc.get("data") or {}).get("runner.sh") or ""))
+                if err:
+                    problems.append(f"backup-preflight: {err}")
+                else:
+                    check_child_job(child, problems)
 
         elif kind in ("ServiceAccount", "Role", "RoleBinding") and name == "backup-runner":
             identities.setdefault(ns, set()).add(kind)

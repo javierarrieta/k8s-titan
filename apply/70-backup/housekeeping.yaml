@@ -59,11 +59,8 @@ spec:
             runAsUser: 65534
             runAsGroup: 65534
             fsGroup: 65534
-            allowPrivilegeEscalation: false
             seccompProfile:
               type: RuntimeDefault
-            capabilities:
-              drop: ["ALL"]
           containers:
           - name: restic
             image: restic/restic@sha256:136600b6ff6843d61d355f7f71f460a166429f35de6fd11b568fece3c9a4d510
@@ -156,11 +153,8 @@ spec:
             runAsUser: 65534
             runAsGroup: 65534
             fsGroup: 65534
-            allowPrivilegeEscalation: false
             seccompProfile:
               type: RuntimeDefault
-            capabilities:
-              drop: ["ALL"]
           containers:
           - name: restic
             image: restic/restic@sha256:136600b6ff6843d61d355f7f71f460a166429f35de6fd11b568fece3c9a4d510

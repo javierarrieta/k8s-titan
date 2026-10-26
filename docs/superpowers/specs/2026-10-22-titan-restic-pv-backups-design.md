@@ -394,13 +394,24 @@ Proven by measurement, 2026-10-26:
 Not proven, and this is the long list:
 
 - **Nothing has run.** No pod, no snapshot, no restore. The first reconcile is the first test.
-- **`make dry-run` could not run.** It needs an admin context and `k8s-reader` is Forbidden for
-  it. This stage adds ~35 objects including 12 RBAC and 8 CronJobs, and dry-run is the only gate
-  that asks the API server — the same gap that let the mis-nested Mealie Ingress `spec:` (#140)
-  and a LimitRange with `default` and no `max` reach the cluster after green builds. Expect the
-  first apply to be where a core-type error surfaces.
-- **`make check` (full) was not run here**: `validate` and the sops-reading gates need the
-  `titan-k8s` age key, which is deliberately not on this machine.
+- **`make dry-run` ran with an admin context and rejected this stage — and it was right to.**
+  Seven objects came back `failed to create typed patch object ... .spec.jobTemplate.spec.template
+  .spec.securityContext.allowPrivilegeEscalation: field not declared in schema`. I had put
+  `allowPrivilegeEscalation` and `capabilities` in the **pod** securityContext; those are container
+  fields, and `PodSecurityContext` does not declare them. Every offline gate was green. The same
+  bug was in the child job the runner writes at runtime, where dry-run can never reach it, so the
+  fix came with a check in `backup-coverage` that renders the heredoc and validates it — see that
+  tool's `POD_SC_ALLOWED`. What is still unproven is everything the API server checks that this
+  stage has not yet been asked about on a re-run.
+- **The dry-run gate itself was silently skipping three stages.** `scripts/dry-run-check.sh`
+  hardcoded `STAGES=(00-bootstrap 10-secrets 20-infra 40-certificates 50-apps)`; `30-databases`,
+  `60-tesla` and this stage were never asked, while the run printed `5 stage(s) built, 5 accepted`
+  over the subset. It now derives the list from `apply/*/kustomization.yaml`. The honest
+  consequence for the record: the CNPG `Cluster`, the `ScheduledBackup` and all of TeslaMate had
+  never been dry-run before this PR, and still have not been asked about anything that PR changed.
+- **`make check` (full) does run on this machine** — it holds a sops recipient key, and one of the
+  five recipients decrypts every Secret in the tree, so `validate` and the agreement gates all
+  executed. That is a property of this workspace, not of CI, which correctly has no key.
 - The blackout avoidance in §5 is inherited from techdelivery, not measured on titan.
 - Whether Reflector actually mirrors both objects is untested; the mirror list is asserted by the
   gate only in the sense that the annotations are present and agree.
