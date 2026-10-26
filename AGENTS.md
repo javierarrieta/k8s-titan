@@ -16,8 +16,9 @@ made and what was deliberately left out.
     apply/50-apps/          authentik with its declarative `Database`/`DatabaseRole` in
                             namespace `auth`, coder with its own, open-webui with its own in
                             namespace `open-webui`, grafana with its own in namespace
-                            `observability`, and any future app that passes the admission
-                            test below
+                            `observability`, the `llm` front door for the halogen endpoint on
+                            llm01 with its bearer token, and any future app that passes the
+                            admission test below
     apply/60-tesla/         TeslaMate with its own `Database`/`DatabaseRole`, Grafana and the
                             Tesla Fleet Telemetry intake, in namespace `apps`
 
@@ -107,12 +108,23 @@ the stream is rejected per-pod, silently, with promtail reporting healthy.
   `docs/ovh-dns-credential.md` for the staging flow (`sops --encrypt --in-place` on a
   git-ignored name under `apply/10-secrets/`), which exists because sops picks its
   recipients from the file's own path. Never write a plaintext Secret manifest anywhere
-  else. `make secrets-placement` enforces three halves: no `kind: Secret` outside
-  `apply/10-secrets/`, every file there actually carrying `ENC[`, and every file there
-  actually listed in that directory's `kustomization.yaml` — an unlisted Secret builds
-  fine and is silently never applied.
+  else. `make secrets-placement` enforces four halves: no `kind: Secret` outside
+  `apply/10-secrets/`, every file there actually carrying `ENC[`, every file there actually
+  listed in that directory's `kustomization.yaml` — an unlisted Secret builds fine and is
+  silently never applied — and no `data:` in a file there. That last one is not stylistic: a
+  Secret's `data:` values are base64 by contract, a sops ciphertext is not base64, and the API
+  server refuses the undecrypted tree on server-side dry-run, so `make dry-run` stops at
+  `10-secrets` and never reaches the stage you changed. Use `stringData`.
 - The cluster key is `titan-k8s`, not the titan host key. Do not "simplify" the two
   into one: the separation is what caps a pod compromise at titan's own secrets.
+- **sops matches creation rules against the path you hand it, not the path the output lands at.** So
+  `sops --encrypt /tmp/x.yaml > apply/10-secrets/y.yaml` dies with `no matching creation rules found`
+  *after* the shell redirect has already truncated `y.yaml` to zero bytes — the damage reads like the
+  encrypt failed, not like the redirect ate the file. Stage the plaintext inside `apply/10-secrets/`,
+  encrypt to a temp file, confirm it is non-empty, then move it into place. To change one key, the quiet
+  path is `sops set <file> '["stringData"]["KEY"]' --value-stdin` with the value JSON-encoded — file
+  before index, and `--value-file` errors with `Invalid set index format` in sops 3.13.3. Neither form
+  prints the secret, which is the point.
 - This repo is public. No credentials, and no concrete public IPv4 — write
   `<OVH_PUBLIC_IP>`.
 - Ingress class is k3s' bundled `traefik`, and its configuration is **not** managed
@@ -130,8 +142,9 @@ the stream is rejected per-pod, silently, with promtail reporting healthy.
   notify-only, and Helm's new-vs-old patching lets an out-of-band env var survive every later upgrade
   indefinitely — so `kubectl edit` on a Helm-managed Deployment makes a permanent change that git never
   sees and `make dry-run` cannot detect. Prefer a commit; if you must poke live, remove it explicitly
-  afterwards (`kubectl -n <ns> set env deploy/<name> FOO-`) and say so. See
-  `docs/authentik-runbook.md` §9, which is written because this was assumed false once.
+  afterwards (`kubectl -n <ns> set env deploy/<name> FOO-`) and say so. Forcing a sync does not undo
+  drift, and the `requestedAt` annotation only fires when its value changes — `docs/flux-manual-sync.md`.
+  See `docs/authentik-runbook.md` §9, which is written because this was assumed false once.
 - `make validate` deliberately fails when `apply/10-secrets` holds nothing. Do not
   soften that guard to make a check pass: a gate that passes vacuously is worse than
   no gate.
@@ -158,13 +171,23 @@ a skip. CI runs GitGuardian on every push and warns, rather than failing, when
 `GITGUARDIAN_API_KEY` is absent from the repo.
 
 What runs automatically is `make check-ci` — leak-check, kustomize-check, kustomize-listing,
-secrets-placement, release-secrets, crd-check and namespace-check, the gates provable from the
-tree alone,
+secrets-placement, release-secrets, secret-refs, crd-check and namespace-check, the gates
+provable from the tree alone,
 and the only control here that `--no-verify` cannot skip. `release-secrets` fails when a
 `HelmRelease` reaches for a Secret that is not in `apply/10-secrets` with a matching
 namespace, so a typo'd name surfaces on the laptop instead of as a red release three
 time zones away; its honest limit is that it proves a name and a namespace exist in the
-tree, not that the keys inside are what the chart wants. `crd-check` walks every built
+tree, not that the keys inside are what the chart wants. `secret-refs` is that gate for the
+hand-written half of the tree, because `release-secrets` walks `HelmRelease` objects and
+nothing else and `secrets-placement` never asks who consumes a Secret file: it fails when a
+built `Deployment`/`StatefulSet`/`DaemonSet`/`CronJob`/`Job` names a Secret — `envFrom`,
+`secretKeyRef`, a `secret` volume, a projected source, an `imagePullSecret` — that no `Secret`
+in the same namespace declares. Secrets the cluster itself produces are the one hole, listed by
+name and namespace with a producer in `PRODUCED_IN_CLUSTER` (today: `apps/titan-tls`, reflected in
+by Reflector); an entry there is a deliberate gap, not a fix. Same honest limit as
+`release-secrets`: a name and a namespace, never the keys inside. It was written because the
+investing-agent migration had to hand-check its `envFrom` name and nothing in the tree would
+have caught a typo. `crd-check` walks every built
 object against the CRDs vendored in `vendor/cnpg-crds/` and rejects any field the schema
 does not declare at that position — which is the class of error a normal schema validator
 waves through, because the CNPG CRDs set no `additionalProperties: false` anywhere, and
@@ -200,6 +223,19 @@ default locks every non-admin out of a login page that still looks healthy. `db-
 reference-driven across both `HelmRelease` and `Deployment` env — including a `DATABASE_URL` that
 arrives through `envFrom` rather than a named `secretKeyRef` — so a tree with no references reports
 zero instead of passing vacuously.
+
+`sure-check` is that class one app further on, and it exists because every older gate is shape-bound in a
+way that misses Sure: `db-url-check` walks a `HelmRelease` env named `*PG_CONNECTION_URL` or a
+`Deployment`'s `DATABASE_URL`, and Sure is a `HelmRelease` carrying `DATABASE_URL`, so that gate reports
+zero references and passes. `sure-check` reads the `values` block instead and ties the OIDC client across
+blueprint, mount and `sure-secrets`, the DB password across both files that hold it, the Redis password
+across the two keys and the pod that reads them, and the chart defaults that fail silently at
+`health=ok` — including the one where `rails.existingSecret` makes the chart emit only `SECRET_KEY_BASE`
+and the three Active Record encryption keys, so anything else in that Secret has to be named in
+`rails.extraEnvVars` or the Secret has it, the pod does not, and the feature stays off at `health=ok`. Its
+honest limit is written in its docstring: it proves `ALLOWED_OIDC_DOMAINS` is non-empty and cannot prove
+it contains the domain of the identity that will sign in, and a non-empty list is exclusive — a miss
+refuses that identity after a successful IdP login, with every gate green.
 
 `make kustomize-listing` is in both, and it is not stylistic: `apply/50-apps/coder/coder-db.yaml` was
 committed, built green, reviewed green, and named by no kustomization, so Flux would never have

@@ -1,0 +1,594 @@
+---
+# OpenCloud on titan: the file service, its WOPI collaboration service, and the edge that serves
+# files.titan.arrieta.eu. Replaces apply/50-apps/ocis/, which is deleted in this same commit.
+#
+# WHY THE HOSTNAME IS THE SAME ONE oCIS HAD
+# OpenCloud takes over files.titan.arrieta.eu rather than running beside it, so it reuses namespace
+# `files` and the titan-tls certificate Reflector already reflects into it. That also means the two
+# cannot coexist: two Ingresses in one namespace claiming one host on one Traefik gives a router
+# collision and undefined routing. Hence the teardown is atomic with this file.
+#
+# WHY THERE IS NOW ONE CONTAINER WHERE oCIS HAD TWO
+# oCIS could not start the collaboration service inside `ocis server`, so it ran a second container
+# wired to the first over loopback NATS, with MICRO_REGISTRY / MICRO_REGISTRY_ADDRESS telling it
+# where the registry was. OpenCloud registers collaboration as an *optional* supervised service
+# (opencloud/pkg/runtime/service/service.go:325, via `areg`, alongside antivirus/audit/policies) and
+# starts it when named in OC_ADD_RUN_SERVICES (pkg/config/config.go:56). One process, in-memory
+# registry, and MICRO_REGISTRY disappears from the configuration surface entirely - it is no longer a
+# config tag at all in 8.1.0, only an os.Getenv fallback in pkg/natsjsregistry/registry.go:25-27.
+#
+# The `idp` service is excluded (OC_EXCLUDE_RUN_SERVICES=idp) because authentik is the identity
+# provider; upstream's external-IdP guide says the same. `idm` still runs - it is the LDAP that
+# autoprovisioned users are written to, not the OIDC provider.
+#
+# WHY THE BLOBS ARE NOT IN THIS POD
+# Unchanged from oCIS, and still the reason this app fits on titan at all: the driver puts file bytes
+# in a MinIO bucket and keeps only the metadata tree on the PVC. The env names moved
+# (STORAGE_USERS_S3NG_* -> STORAGE_USERS_DECOMPOSEDS3_*) but the split did not. The bucket is new and
+# separate - docs/opencloud-minio.md explains why sharing ocis-blobs was not an option.
+#
+# THE RENAME IS VERIFIED PER NAME, NOT ASSUMED FROM A TABLE
+# Every variable below was checked against the 8.1.0 source. The ones that changed:
+#   OCIS_* -> OC_*        URL, INSECURE, HTTP_TLS_ENABLED, JWT_SECRET, MACHINE_AUTH_API_KEY,
+#                         TRANSFER_SECRET, SYSTEM_USER_ID, SYSTEM_USER_API_KEY, ADMIN_USER_ID,
+#                         SERVICE_ACCOUNT_ID, SERVICE_ACCOUNT_SECRET, LDAP_BIND_PASSWORD,
+#                         OIDC_ISSUER, OIDC_CLIENT_ID
+#   S3NG -> DECOMPOSEDS3  the six STORAGE_USERS_S3NG_* names
+#   gone                  OCIS_ADMIN_USER, OCIS_ADMIN_PASSWORD (no replacement - see
+#                         docs/opencloud-admin.md), MICRO_REGISTRY, MICRO_REGISTRY_ADDRESS
+#   new and required      OC_URL_SIGNING_SECRET - introduced in 4.0.0 and gated by the proxy
+#                         (services/proxy/pkg/config/parser/parse.go:78), so omitting it is a crash
+#                         loop, not a warning
+#   value changed, name same
+#                         STORAGE_SYSTEM_DRIVER: `ocis` is now the deprecated alias; `decomposed` is
+#                         the documented driver (services/storage-system/pkg/config/config.go:29)
+#                         FRONTEND_APP_HANDLER_SECURE_VIEW_APP_ADDR: the default moved from
+#                         com.owncloud.api.collaboration.CollaboraOnline to
+#                         eu.opencloud.api.collaboration (services/frontend/pkg/config/defaults/
+#                         defaultconfig.go:96). Carrying the oCIS value across would have pointed
+#                         secure-view at a service name that no longer exists.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: opencloud-data
+  namespace: files
+  labels:
+    app: opencloud
+spec:
+  accessModes:
+    - ReadWriteOnce
+  # Retain, not the default `local-path`, for the oCIS reason unchanged: this PVC holds the decomposed
+  # metadata tree and the NATS JetStream KV that describe every file in the bucket. Delete-reclaim
+  # deletes the app's knowledge of its own contents.
+  storageClassName: local-path-retain
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: opencloud-csp
+  namespace: files
+data:
+  # The proxy's CSP has no way to append a directive through env; the only supported override is a
+  # whole file (PROXY_CSP_CONFIG_FILE_LOCATION). This is services/proxy/pkg/config/csp.yaml from the
+  # v8.1.0 tag with two origins added, marked ADDED below. Note the upstream file itself moved
+  # between products: awesome-ocis became awesome-apps, and update.opencloud.eu appeared. Keep it in
+  # step with the upstream file when the image moves.
+  csp.yaml: |
+    directives:
+      child-src:
+        - '''self'''
+      connect-src:
+        - '''self'''
+        - 'blob:'
+        - 'https://raw.githubusercontent.com/opencloud-eu/awesome-apps/'
+        - 'https://update.opencloud.eu/'
+        # ADDED. authentik: the SPA fetches the OIDC discovery document from the IdP origin. Without
+        # this the browser refuses the request before it reaches the network, so nothing appears in a
+        # HAR and the UI only says "We're having trouble connecting to the login service".
+        - 'https://auth.titan.arrieta.eu/'
+      default-src:
+        - '''none'''
+      font-src:
+        - '''self'''
+      frame-ancestors:
+        - '''self'''
+      frame-src:
+        - '''self'''
+        - 'blob:'
+        - 'https://embed.diagrams.net/'
+        # ADDED. Collabora's editor loads in an iframe from its own host.
+        - 'https://collabora.titan.arrieta.eu/'
+      img-src:
+        - '''self'''
+        - 'data:'
+        - 'blob:'
+        - 'https://raw.githubusercontent.com/opencloud-eu/awesome-apps/'
+      manifest-src:
+        - '''self'''
+      media-src:
+        - '''self'''
+      object-src:
+        - '''self'''
+        - 'blob:'
+      script-src:
+        - '''self'''
+        - '''unsafe-inline'''
+      style-src:
+        - '''self'''
+        - '''unsafe-inline'''
+        - 'blob:'
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: opencloud
+  namespace: files
+spec:
+  replicas: 1
+  strategy:
+    # RWO PVC; a rolling update would schedule a second pod that can never attach it.
+    type: Recreate
+  selector:
+    matchLabels:
+      app: opencloud
+  template:
+    metadata:
+      labels:
+        app: opencloud
+    spec:
+      # Upstream's warning carries over verbatim from oCIS: a hard stop leaves the decomposed
+      # metadata inconsistent, and SIGTERM plus STORAGE_USERS_GRACEFUL_SHUTDOWN_TIMEOUT is the
+      # mitigation. Kubernetes' 30s default is not a graceful shutdown for a process with open write
+      # requests, and until this PVC has a restore point an inconsistent tree is unrecoverable rather
+      # than merely annoying.
+      terminationGracePeriodSeconds: 120
+      # Web apps are files on the PVC, not database rows. The web service enumerates
+      # $OC_BASE_DATA_PATH/web/assets/apps at startup (WEB_ASSET_APPS_PATH, services/web/pkg/config/
+      # defaults/defaultconfig.go:84) and the App Store in the UI only hands you a zip - installing is
+      # a filesystem write. In a GitOps tree that needs a declared writer, or it becomes drift that
+      # `make dry-run` cannot see and a PVC restore silently loses.
+      #
+      # This container is that writer, and it is a no-op in steady state: each app gets a marker under
+      # web/assets/.installed and a matching marker means no network at all, so a GitHub outage never
+      # blocks a rollout. It reaches the network only when an app is new or its version changed, and
+      # then it FAILS rather than starting without the app - a silently missing app is worse than a pod
+      # that will not start, because the missing app is at least visible as one.
+      #
+      # Adding an app is one install_app line. The archive's own top-level directory must equal the app
+      # name, which it does for every release in opencloud-eu/web-extensions. Verify the checksum
+      # yourself before pasting it: the release's sha256sum.txt lists paths under apps/, so the hash
+      # has to be taken against the file, not the listed path.
+      initContainers:
+        - name: web-apps
+          image: alpine:3.20
+          command: ["/bin/sh", "-ec"]
+          args:
+            - |
+              install_app() {
+                name="$1"; ver="$2"; url="$3"; sha="$4"
+                apps=/var/lib/opencloud/web/assets/apps
+                marker="/var/lib/opencloud/web/assets/.installed/$name"
+                mkdir -p "$apps" "$(dirname "$marker")"
+                if [ -f "$marker" ] && [ "$(cat "$marker")" = "$ver" ]; then
+                  echo "web-app $name: already $ver"
+                  return 0
+                fi
+                echo "web-app $name: installing $ver"
+                apk add --no-cache curl unzip >/dev/null
+                curl -fsSL --retry 3 -o "/tmp/$name.zip" "$url"
+                echo "$sha  /tmp/$name.zip" | sha256sum -c -
+                rm -rf "$apps/$name"
+                unzip -q "/tmp/$name.zip" -d "$apps/"
+                echo "$ver" > "$marker"
+                echo "web-app $name: installed"
+              }
+              # draw.io editor for .drawio and .vsdx. The editor itself is NOT in this bundle - it is
+              # iframed from https://embed.diagrams.net by default, which means diagram content passes
+              # through a third party from the user's browser. That origin is already in frame-src in
+              # the csp ConfigMap above. To stop relying on it, deploy draw.io on the mesh and set
+              # draw-io.config.url in apps.yaml plus the matching frame-src entry.
+              install_app draw-io 2.2.0 \
+                https://github.com/opencloud-eu/web-extensions/releases/download/draw-io-v2.2.0/draw-io-2.2.0.zip \
+                49c3aa32aa517f2a90f249b5470b38dc18b7d006841c442f64335d660b551d0c
+              # Importer is ready to enable the same way - importer-v2.0.1, sha256
+              # 31cb34c825aeca5716dfc454bf85143a6035fe3153c29f0b43db904c027acb00 - but it is deliberately
+              # NOT installed: it does nothing without a Uppy Companion service to do the fetching, and
+              # companionUrl is a required config key. Installing it before Companion exists would put a
+              # broken button in the UI.
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/opencloud
+      containers:
+        - name: opencloud
+          # Pinned to a specific release, not a moving tag: opencloudeu/opencloud-rolling:8.1.0 on
+          # Docker Hub (verified present). The repository name is a trap in two ways. It is
+          # `opencloudeu/opencloud-rolling`, not `opencloud/opencloud` and not `ghcr.io/opencloud-eu/*`
+          # - upstream's own compose files use this name (deployments uses
+          # ${OC_DOCKER_IMAGE:-opencloudeu/opencloud-rolling}) - and the "rolling" in it describes the
+          # repository, not the tag: 8.1.0 is an immutable release tag alongside 8.1 and 8. Do not read
+          # the repo name as a licence to move off a pinned tag.
+          #
+          # 8.1.0 specifically because it is the release that introduced PROXY_OIDC_AUDIENCES, which is
+          # what keeps the audience pin below working. The pin and that setting are load-bearing on
+          # each other; moving to an earlier 8.x silently drops the audience check.
+          image: opencloudeu/opencloud-rolling:8.1.0
+          env:
+            - name: OC_URL
+              value: https://files.titan.arrieta.eu
+            # TLS terminates at traefik, so the mesh speaks plain http internally.
+            #
+            # The oCIS lesson is still true here and still costs a cycle if you get it wrong:
+            # OC_INSECURE is not a global switch, it is only ever the first name in per-service chains
+            # like PROXY_OIDC_INSECURE, and envdecode takes the LAST name set. Listener TLS is a
+            # different field - OC_HTTP_TLS_ENABLED. Leave that at its default and 9200 answers TLS,
+            # the kubelet's plain-http readiness probe gets a 400, and the log fills with
+            # "client sent an HTTP request to an HTTPS server".
+            - name: OC_INSECURE
+              value: "true"
+            - name: OC_HTTP_TLS_ENABLED
+              value: "false"
+            - name: PROXY_HTTP_ADDR
+              value: "0.0.0.0:9200"
+            # The proxy's own listener flag, separate from OC_HTTP_TLS_ENABLED, default true. With no
+            # cert on disk the proxy generates a self-signed one at startup.
+            - name: PROXY_TLS
+              value: "false"
+            # /healthz and /readyz live on the debug server, which binds 127.0.0.1 by default and so
+            # is unreachable to kubelet through the pod IP. Cluster-internal only: the Service exposes
+            # 9200 and 9300, never this port.
+            - name: PROXY_DEBUG_ADDR
+              value: "0.0.0.0:9205"
+            # Written down rather than left to the default, because the default is a fallback three
+            # conditions deep. defaults.BaseDataPathType is "homedir" (pkg/config/defaults/paths.go:17),
+            # so the real default is $HOME/.opencloud and /var/lib/opencloud is only reached when
+            # os.UserHomeDir() fails. Measured on the shipped image (registry config blob
+            # sha256:0b2e1d129db4): Env is PATH only - no HOME - and User is '1000', so UserHomeDir()
+            # does fail and the fallback does land on this PVC. That is correct but accidental: one
+            # upstream commit adding ENV HOME would move the IDM LDAP database, the sharing JSON, the
+            # thumbnail cache and the search index onto the container's ephemeral layer, where they
+            # silently vanish on every restart. Nothing downstream would notice.
+            - name: OC_BASE_DATA_PATH
+              value: /var/lib/opencloud
+            - name: PROXY_CSP_CONFIG_FILE_LOCATION
+              value: /etc/opencloud/csp.yaml
+            # authentik is the IdP, so the built-in OIDC provider does not run. idm still does - it is
+            # the LDAP autoprovisioning writes into.
+            - name: OC_EXCLUDE_RUN_SERVICES
+              value: idp
+            # The one-container change: collaboration is an optional supervised service in 8.1.0
+            # (opencloud/pkg/runtime/service/service.go:325) rather than a second container.
+            - name: OC_ADD_RUN_SERVICES
+              value: collaboration
+            # --- required secrets -------------------------------------------------------------
+            # Each of these is a startup gate, not a preference. Verified against the Validate()
+            # functions in 8.1.0: JWT secret (many services), machine-auth key, transfer secret,
+            # system-user API key, service account id+secret, LDAP bind password, WOPI secret, and
+            # OC_URL_SIGNING_SECRET which is new in 4.0.0 (services/proxy/pkg/config/parser/
+            # parse.go:78). A missing one is a crash loop naming the variable, which is at least loud.
+            - name: OC_JWT_SECRET
+              valueFrom: { secretKeyRef: { name: opencloud-secrets, key: jwt-secret } }
+            - name: OC_MACHINE_AUTH_API_KEY
+              valueFrom: { secretKeyRef: { name: opencloud-secrets, key: machine-auth-api-key } }
+            - name: OC_TRANSFER_SECRET
+              valueFrom: { secretKeyRef: { name: opencloud-secrets, key: transfer-secret } }
+            - name: OC_URL_SIGNING_SECRET
+              valueFrom: { secretKeyRef: { name: opencloud-secrets, key: url-signing-secret } }
+            # Two names, one value, same trap as oCIS: the unprefixed SYSTEM_USER_API_KEY is the reva
+            # shared section and reaches some services, while settings and storage-system declare
+            # OC_SYSTEM_USER_API_KEY with no alternative in the chain. Both must be set.
+            - name: SYSTEM_USER_API_KEY
+              valueFrom: { secretKeyRef: { name: opencloud-secrets, key: system-user-api-key } }
+            - name: OC_SYSTEM_USER_API_KEY
+              valueFrom: { secretKeyRef: { name: opencloud-secrets, key: system-user-api-key } }
+            - name: OC_SERVICE_ACCOUNT_SECRET
+              valueFrom: { secretKeyRef: { name: opencloud-secrets, key: service-account-secret } }
+            - name: THUMBNAILS_TRANSFER_TOKEN
+              valueFrom: { secretKeyRef: { name: opencloud-secrets, key: thumbnails-transfer-token } }
+            # --- the LDAP layer idm provisions -------------------------------------------------
+            # Not one bind password for the mesh. idm creates distinct service users and each service
+            # binds as a different one; the OC_LDAP_BIND_PASSWORD global only covers `reva`, which is
+            # what auth-basic, users and groups use. graph and idp need their own per-service
+            # override or they bind as uid=libregraph / uid=idp with the reva password and fail with
+            # LDAP Result Code 49 during first login, which the proxy flattens into "your account is
+            # either inactive or not yet authorized". That diagnosis is oCIS's, recorded in
+            # apply/50-apps/ocis/ocis.yaml at git history; the mechanism is unchanged here.
+            - name: IDM_SVC_PASSWORD
+              valueFrom: { secretKeyRef: { name: opencloud-secrets, key: idm-svc-password } }
+            - name: IDM_REVASVC_PASSWORD
+              valueFrom: { secretKeyRef: { name: opencloud-secrets, key: idm-reva-password } }
+            - name: IDM_IDPSVC_PASSWORD
+              valueFrom: { secretKeyRef: { name: opencloud-secrets, key: idp-svc-password } }
+            - name: OC_LDAP_BIND_PASSWORD
+              # MUST equal idm-reva-password - idm provisions the reva LDAP user from one and the
+              # other services authenticate with the other. Two keys, one value, on purpose.
+              valueFrom: { secretKeyRef: { name: opencloud-secrets, key: ldap-bind-password } }
+            - name: GRAPH_LDAP_BIND_PASSWORD
+              valueFrom: { secretKeyRef: { name: opencloud-secrets, key: idm-svc-password } }
+            - name: IDP_LDAP_BIND_PASSWORD
+              valueFrom: { secretKeyRef: { name: opencloud-secrets, key: idp-svc-password } }
+            # --- the admin grant ---------------------------------------------------------------
+            # Set this to YOUR account UUID after your first authentik login and OpenCloud will make
+            # you an administrator. The mechanism is services/settings/pkg/store/metadata/store.go:
+            # DefaultRoleAssignments appends {AccountUuid: OC_ADMIN_USER_ID, RoleId: admin} and
+            # userMustHaveAdminRole re-asserts it on EVERY settings startup ("for the adminUserID we
+            # need to check if the user has the admin role every time"), so it survives a rebuild and
+            # does not need a CLI. docs/opencloud-admin.md is the procedure.
+            #
+            # Empty is a valid state: with an empty value settings skips the grant and idm skips the
+            # password requirement. Filling it in is a one-line change with no Secret edit, because
+            # IDM_ADMIN_PASSWORD is already present.
+            # Proven 2026-10-23 by GET /graph/v1.0/me: this is ALSO authentik's own user UUID - the
+            # response's identities[].issuerAssignedId is the identical value - so it can be read in
+            # the authentik admin UI with no OpenCloud credential at all. Note the API version: the
+            # route is /graph/v1.0/me (services/graph/pkg/service/v0/service.go:241 mounts v1beta1,
+            # and the proxy at defaultconfig.go:283 names v1.0); /graph/v1/me is a 404.
+            - name: OC_ADMIN_USER_ID
+              value: "0240605d-bdae-40ca-bd48-d036daba0bc4"
+            # Required the moment OC_ADMIN_USER_ID is non-empty - services/idm/pkg/config/parser/
+            # parse.go:45 returns MissingServiceUserPassword("idm", "admin") otherwise, which is a
+            # crash loop that names neither the variable you changed nor the service that wants it.
+            # Minted and left unused until the line above is filled in.
+            - name: IDM_ADMIN_PASSWORD
+              valueFrom: { secretKeyRef: { name: opencloud-secrets, key: idm-admin-password } }
+            # --- stable identifiers, in git not in the Secret ---------------------------------
+            # Not credentials. They must be non-empty and must never change once data exists, so a
+            # rotation shows up as a diff rather than hiding in an encrypted file. Changing
+            # STORAGE_USERS_MOUNT_ID after files exist orphans the storage tree.
+            #
+            # Same mount, two variable names, same asymmetry as oCIS: storage-users gates on
+            # STORAGE_USERS_MOUNT_ID, gateway resolves it under GATEWAY_STORAGE_USERS_MOUNT_ID. These
+            # two must always hold the identical UUID.
+            #
+            # OC_ADMIN_USER_ID lives in its own block above, not here, because unlike these it is a
+            # grant rather than an identifier and it starts out empty on purpose.
+            - name: OC_SYSTEM_USER_ID
+              value: "a2e49479-0a07-4799-9377-a72025e3bd68"
+            - name: STORAGE_USERS_MOUNT_ID
+              value: "47363c69-98fe-4c4f-811a-3b8508489333"
+            - name: GATEWAY_STORAGE_USERS_MOUNT_ID
+              value: "47363c69-98fe-4c4f-811a-3b8508489333"
+            - name: OC_SERVICE_ACCOUNT_ID
+              value: "8639a6a7-09ce-49b9-946f-c27820c49400"
+            - name: GRAPH_APPLICATION_ID
+              value: "88258fb1-ee02-4e48-ac48-32e13d6a891f"
+            # --- authentik as the identity provider --------------------------------------------
+            # Pinning the local name is what keeps certificate verification ON for the connection to
+            # authentik. OC_INSECURE=true is correct for the loopback mesh and would silently disable
+            # it for a public IdP, because envdecode takes the last name in the chain.
+            - name: PROXY_OIDC_INSECURE
+              value: "false"
+            # per_provider issuer for the `opencloud` provider declared in
+            # apply/50-apps/auth/opencloud-blueprint.yaml. One variable moves proxy, web and webfinger
+            # because all three chain OC_URL;OC_OIDC_ISSUER;<SERVICE>_OIDC_ISSUER and OC_URL would win
+            # if OC_OIDC_ISSUER were unset - which is the silent failure: login quietly stays local.
+            - name: OC_OIDC_ISSUER
+              value: https://auth.titan.arrieta.eu/application/o/opencloud/
+            # Set once, read by four clients. See the blueprint header for the chains.
+            - name: OC_OIDC_CLIENT_ID
+              value: opencloud
+            - name: WEB_OIDC_SCOPE
+              value: openid profile email offline_access
+            # Explicit rather than inherited, because PROXY_OIDC_AUDIENCES only takes effect when the
+            # method is jwt (services/proxy/pkg/config/config.go:119 says so). It is the default
+            # (defaultconfig.go:55) but this pairing is the whole point of the setting, so both halves
+            # are written down.
+            - name: PROXY_OIDC_ACCESS_TOKEN_VERIFY_METHOD
+              value: jwt
+            # The pin PROXY_OIDC_ACCESS_TOKEN_VERIFY_AUD was under oCIS, preserved. The old name is
+            # gone in 8.1.0; this is its replacement, and upstream now warns when it is unset
+            # (services/proxy/pkg/command/server.go:278). Effect: a token issued to coder, Grafana or
+            # authentik itself on this same IdP cannot unlock OpenCloud.
+            - name: PROXY_OIDC_AUDIENCES
+              value: opencloud
+            - name: PROXY_AUTOPROVISION_ACCOUNTS
+              value: "true"
+            - name: PROXY_AUTOPROVISION_CLAIM_GROUPS
+              value: groups
+            # Desktop/Android/iOS discover the IdP through /.well-known; without this they are pointed
+            # at OpenCloud's own built-in issuer, which no longer has their credentials.
+            - name: PROXY_OIDC_REWRITE_WELLKNOWN
+              value: "true"
+            - name: PROXY_USER_OIDC_CLAIM
+              value: preferred_username
+            - name: PROXY_USER_CS3_CLAIM
+              value: username
+            # Safe default, and the reason is ordering rather than capability. `oidc` would map an
+            # authentik group onto the admin role and the whole claim path is already in place - the
+            # groups are declared in apply/50-apps/auth/opencloud-blueprint.yaml, `groups` rides the
+            # `profile` scope that web, Android, desktop and iOS all already request, and the shipped
+            # default RolesMap does the value-to-role mapping with no config file. Two env vars would
+            # switch it on. docs/opencloud-admin.md has the chain, the procedure and the reason it is
+            # parked: with `oidc` an absent or unmatched claim REFUSES the login rather than falling
+            # back, so the groups must be populated first; and assignments append, so leaving a group
+            # grants a second role instead of revoking the first. Flip it only after joining
+            # opencloudAdmin, and never in the same apply as the groups.
+            - name: PROXY_ROLE_ASSIGNMENT_DRIVER
+              value: default
+            - name: GRAPH_ASSIGN_DEFAULT_USER_ROLE
+              value: "true"
+            # --- S3 as primary storage ---------------------------------------------------------
+            - name: STORAGE_USERS_DRIVER
+              value: decomposeds3
+            - name: STORAGE_SYSTEM_DRIVER
+              value: decomposed
+            # Metadata tree only; the bytes are in the bucket.
+            - name: STORAGE_USERS_DECOMPOSEDS3_ROOT
+              value: /var/lib/opencloud/shares
+            - name: STORAGE_USERS_DECOMPOSEDS3_ENDPOINT
+              # Casa's MinIO over the WireGuard mesh. Deliberately http: the listener at
+              # 192.168.0.6:9000 serves plain HTTP and the transport is already encrypted by
+              # WireGuard. Do not "fix" this to https without checking the listener first.
+              value: http://192.168.0.6:9000
+            - name: STORAGE_USERS_DECOMPOSEDS3_REGION
+              # Must equal what the server reports in X-Amz-Bucket-Region. The driver passes Region
+              # straight to minio-go, so GetBucketLocation is never called and a wrong region looks
+              # like a 307 rather than an access error.
+              value: eu-west-1
+            - name: STORAGE_USERS_DECOMPOSEDS3_BUCKET
+              value: opencloud-blobs
+            - name: STORAGE_USERS_DECOMPOSEDS3_ACCESS_KEY
+              valueFrom: { secretKeyRef: { name: opencloud-secrets, key: s3-access-key } }
+            - name: STORAGE_USERS_DECOMPOSEDS3_SECRET_KEY
+              valueFrom: { secretKeyRef: { name: opencloud-secrets, key: s3-secret-key } }
+            # --- WOPI / Collabora ---------------------------------------------------------------
+            # The collaboration service runs in this container (OC_ADD_RUN_SERVICES), so its env lives
+            # here rather than in a sidecar.
+            - name: COLLABORATION_WOPI_SECRET
+              valueFrom: { secretKeyRef: { name: opencloud-secrets, key: wopi-secret } }
+            - name: COLLABORATION_GRPC_ADDR
+              value: "127.0.0.1:9301"
+            - name: COLLABORATION_HTTP_ADDR
+              value: "0.0.0.0:9300"
+            # WOPISrc, the URL Collabora calls back into. Stays inside the cluster; the browser only
+            # ever talks to collabora.titan.arrieta.eu. No ingress is published for it on purpose.
+            - name: COLLABORATION_WOPI_SRC
+              value: http://opencloud-collaboration:9300
+            - name: COLLABORATION_APP_NAME
+              value: CollaboraOnline
+            - name: COLLABORATION_APP_PRODUCT
+              value: Collabora
+            - name: COLLABORATION_APP_ADDR
+              value: https://collabora.titan.arrieta.eu
+            - name: COLLABORATION_APP_ICON
+              value: https://collabora.titan.arrieta.eu/favicon.ico
+            - name: COLLABORATION_APP_INSECURE
+              value: "false"
+            - name: COLLABORATION_CS3API_DATAGATEWAY_INSECURE
+              value: "true"
+            - name: COLLABORATION_LOG_LEVEL
+              value: info
+            # Makes Collabora the default handler for office documents. The value is the default in
+            # 8.1.0 and it CHANGED from oCIS - see the header - so it is spelled out rather than
+            # inherited from muscle memory.
+            - name: FRONTEND_APP_HANDLER_SECURE_VIEW_APP_ADDR
+              value: eu.opencloud.api.collaboration
+          ports:
+            - name: proxy
+              containerPort: 9200
+            - name: proxy-debug
+              containerPort: 9205
+            - name: wopi
+              containerPort: 9300
+          # /readyz on the debug server. Probing 9200 was wrong twice over under oCIS: the path does
+          # not exist there, and the listener was TLS.
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 9205
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 10
+          resources:
+            requests:
+              cpu: 200m
+              memory: 512Mi
+            limits:
+              cpu: "2"
+              memory: 2Gi
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/opencloud
+            # Mounted as a single file at exactly the path PROXY_CSP_CONFIG_FILE_LOCATION names, not as
+            # a directory. A ConfigMap mounted at /etc/opencloud/csp puts the key at
+            # /etc/opencloud/csp/csp.yaml, and the proxy treats a missing CSP file as fatal:
+            #   {"level":"fatal","service":"proxy","error":"open /etc/opencloud/csp.yaml: no such file
+            #    or directory","message":"Failed to load CSP configuration."}
+            # That was the first real startup failure of this port (2026-10-23), and it also explains
+            # the corrupt bleve index: the proxy died while search was mid-way through creating its
+            # index, leaving a half-written mapping on the PVC that then failed every later start.
+            # subPath means a ConfigMap edit does not reach a running pod - irrelevant here, because
+            # the proxy reads CSP once at startup and would need a restart anyway.
+            - name: csp
+              mountPath: /etc/opencloud/csp.yaml
+              subPath: csp.yaml
+              readOnly: true
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: opencloud-data
+        - name: csp
+          configMap:
+            name: opencloud-csp
+# HONEST LIMITS, read before trusting this file.
+# 1. THIS HAS RUN SINCE 2026-10-23. It shipped claiming "nothing here has run", and the first start
+#    found three defects: the CSP mounted one directory above where the proxy looks, IDM had
+#    half-bootstrapped behind an os.Stat guard, and mobile/desktop logins were refused by the source
+#    flow while web worked. All three are fixed and in git. docs/opencloud-bringup-2026-10-23.md is the
+#    record of what has been observed working - web and Android and desktop login, upload to S3, admin
+#    role, Collabora editing - and of what has NOT: no backup and no restore drill for this PVC above
+#    all, which is the largest remaining gap.
+# 2. The identifiers below were minted by scripts/setup-opencloud-secrets.sh, in the same run as the
+#    Secret they sit beside, and must never be edited by hand afterwards. A mount ID changed after files
+#    exist orphans the storage tree, which is why they are in git at all: the change has to be visible.
+# 3. The blobs live in casa's MinIO, across the WireGuard link. If the mesh drops the web UI still
+#    renders from the local metadata tree and every file body fails. That is the failure mode, not a
+#    crash loop, so nothing here will look unhealthy.
+# 4. Nothing in this repo backs up either half. titan backs up the CNPG Postgres and nothing else, so
+#    this PVC has no restore point, and casa has no MinIO runbook. The backup unit is
+#    {this PVC} + {opencloud-blobs} and they have to be taken together: the metadata tree addresses
+#    blobs by UUID, so a newer tree onto an older bucket renders happily and is empty in practice.
+# 5. THERE IS NO POSTGRES OPTION HERE, and this was true of oCIS rather than assumed for OpenCloud.
+#    Persistent state is the decomposed metadata tree, the NATS JetStream KV and the idp keys, all on
+#    the one PVC. Re-check before believing it still holds.
+# 6. With authentik as the IdP there is no local admin account that can sign in through the web UI, and
+#    OpenCloud 8.1.0 ships no `user role set` CLI - oCIS's escape hatch does not port. The grant is
+#    OC_ADMIN_USER_ID, which the settings service re-asserts on every startup. docs/opencloud-admin.md
+#    is the procedure, and the step that reads your own account UUID out of /graph/v1/me is the part
+#    that has not been observed working yet.
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: opencloud
+  namespace: files
+spec:
+  selector:
+    app: opencloud
+  ports:
+    - name: proxy
+      port: 9200
+      targetPort: proxy
+---
+# Internal only: the WOPI endpoint Collabora calls. Deliberately not exposed.
+apiVersion: v1
+kind: Service
+metadata:
+  name: opencloud-collaboration
+  namespace: files
+spec:
+  selector:
+    app: opencloud
+  ports:
+    - name: wopi
+      port: 9300
+      targetPort: wopi
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: opencloud
+  namespace: files
+spec:
+  ingressClassName: traefik
+  rules:
+    - host: files.titan.arrieta.eu
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: opencloud
+                port:
+                  name: proxy
+  tls:
+    - hosts:
+        - files.titan.arrieta.eu
+      # Reflected into `files` by Reflector; the allow-list lives in
+      # apply/40-certificates/titan-wildcard.yaml and already names this namespace, because OpenCloud
+      # took the namespace oCIS vacated rather than adding one.
+      secretName: titan-tls

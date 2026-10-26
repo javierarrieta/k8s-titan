@@ -144,16 +144,18 @@ metadata:
     kubernetes.io/metadata.name: observability
     kubernetes.io/description: "Grafana, reading casa's Prometheus and Loki over the mesh"
 ---
-# Infinite Scale (oCIS) and its Collabora editor. It fails the admission test in
+# OpenCloud (the Infinite Scale fork) and its Collabora editor. It fails the admission test in
 # docs/superpowers/specs/2026-10-19-titan-app-scale-out-design.md §3.1 on three counts at once - own
 # public hostname, own Secret set, and a store of its own - so it gets a namespace, and it stays in
 # the shared `apps` stage per §3.2.
 #
-# The name is `files`, not `ocis`, because the namespace is the domain rather than the product: the
-# WOPI collaboration service, the editor and the object-store client config all live here, and none
-# of them is called ocis.
+# The name is `files`, not the product's name, because the namespace is the domain rather than the
+# app: the WOPI collaboration service, the editor and the object-store client config all live here.
+# That turned out to be worth more than a tidy name - the product underneath this namespace has now
+# changed once, from PHP Nextcloud to Infinite Scale and from Infinite Scale to OpenCloud, and the
+# namespace, the certificate reflection and the hostname all survived the swap untouched.
 #
-# No pod-security warn label. The ocis and collabora/code images run as uids and with capabilities
+# No pod-security warn label. The opencloud and collabora/code images run as uids and with capabilities
 # (collabora needs MKNOD) that restricted would only warn about, and a warn that fires on every pod in
 # the namespace is noise that trains everyone to ignore the label.
 apiVersion: v1
@@ -165,3 +167,59 @@ metadata:
   annotations:
     kubernetes.io/metadata.name: files
     kubernetes.io/description: "Infinite Scale file sync and share, with Collabora as the editor"
+---
+# Mealie, the recipe manager. Fails the admission test in
+# docs/superpowers/specs/2026-10-19-titan-app-scale-out-design.md §3.1 on three counts at once — own
+# public hostname, own Secret set, and a database of its own — so it gets a namespace, and it stays in
+# the shared `apps` stage per §3.2: two hand-written manifests, no bulk authored here, so freezing its
+# neighbours on a malformed field is the accepted cost rather than a new one.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: mealie
+  labels:
+    name: mealie
+  annotations:
+    kubernetes.io/metadata.name: mealie
+    kubernetes.io/description: "Mealie recipe manager, authenticated by authentik, data in the shared CNPG cluster"
+---
+# The public LLM endpoint at llm.titan.arrieta.eu, which fronts halogen-flash on the llm01 box.
+# It fails the admission test in docs/superpowers/specs/2026-10-19-titan-app-scale-out-design.md
+# §3.1 on two counts — own public hostname, own Secret set — so it gets a namespace, and it stays
+# in the shared `apps` stage per §3.2: one hand-written manifest, no bulk authored here.
+#
+# The namespace holds a proxy target rather than an app: the only pod here is the nginx that answers
+# the bearer-token check, and the model itself runs on another host. That is why the description
+# names the hostname rather than a product.
+#
+# `restricted` warn, because the single pod in here can actually satisfy it: the bearer-auth container
+# is nginxinc/nginx-unprivileged at uid 101 with allowPrivilegeEscalation false, every capability
+# dropped and RuntimeDefault seccomp — the same shape apply/60-tesla/wellknown.yaml runs. That makes
+# this the observability case rather than the open-webui or files case: a warn the workload meets is a
+# signal, and one it can never meet is noise. If the image ever goes back to root nginx, this label is
+# the thing that has to come off, not the pod's securityContext.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: llm
+  labels:
+    name: llm
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: latest
+  annotations:
+    kubernetes.io/metadata.name: llm
+    kubernetes.io/description: "llm.titan.arrieta.eu - bearer-auth front for the halogen endpoint on llm01"
+---
+# Sure (personal-finance tracker, trialling as a Firefly III replacement). Fails §3.1 of the
+# 2026-10-19 scale-out design on four counts — four pods, its own database, its own public hostname,
+# its own Secret set — so it gets a namespace, and it stays in the shared `apps` stage per §3.2
+# because its bulk is a HelmRelease, which fails on its own rather than freezing coder and authentik.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: sure
+  labels:
+    name: sure
+  annotations:
+    kubernetes.io/metadata.name: sure
+    kubernetes.io/description: "Sure personal-finance tracker, authenticated by authentik, data in the shared CNPG cluster"

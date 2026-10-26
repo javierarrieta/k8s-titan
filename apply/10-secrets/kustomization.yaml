@@ -91,11 +91,50 @@ resources:
   - authentik-observability-blueprint.yaml
   - observability-grafana-oidc.yaml
   - observability-grafana-admin.yaml
-  # Infinite Scale. One file, nine values, all minted by scripts/setup-ocis-secrets.sh in one process.
-  # Two of the nine are not ours to mint and are prompted rather than generated: the S3 pair has to
-  # match the IAM user and bucket policy created on casa's MinIO with mc, so no script on titan can
-  # author both halves. The ninth is the Collabora WOPI proof key, which lives here rather than being
-  # generated at startup because collabora/code 26.x has no shell to generate it with - see the
-  # header of apply/50-apps/ocis/collabora.yaml. An unlisted file here builds green and is silently
-  # never applied, which is the lie `make secrets-placement` exists to catch.
-  - ocis-secrets.yaml
+  # Mealie. Three files, three values, all minted by scripts/setup-mealie-secrets.sh in one process so
+  # the duplicated halves cannot be authored apart: the DB password exists in CNPG's DatabaseRole
+  # (namespace databases) and in Mealie's env (namespace mealie), and the OIDC client exists in
+  # authentik's blueprint (namespace auth) and in Mealie's env. `make mealie-check` is what proves the
+  # pairs agree — and it has to, because Mealie takes POSTGRES_* rather than a DATABASE_URL, so the
+  # generic `make db-url-check` never looks at this app. An unlisted file here builds green and is
+  # silently never applied, which is the lie `make secrets-placement` exists to catch.
+  - authentik-mealie-blueprint.yaml
+  - mealie-db-credentials.yaml
+  - mealie-secrets.yaml
+  # Sure. Same three-file shape and the same duplication: the DB password exists in CNPG's
+  # DatabaseRole (namespace databases) and inside Sure's DATABASE_URL (namespace sure), and the OIDC
+  # client exists in authentik's blueprint (namespace auth) and in Sure's env. NOTE for the gate
+  # author: tools/db-url-check.py walks a HelmRelease env named *PG_CONNECTION_URL and a Deployment's
+  # DATABASE_URL. Sure is a HelmRelease carrying DATABASE_URL, which is neither shape, so the
+  # existing gate passes vacuously for this app. `make sure-check` has to cover it.
+  - authentik-sure-blueprint.yaml
+  - sure-db-credentials.yaml
+  - sure-secrets.yaml
+  # OpenCloud's own Secret. Namespace `files` is the namespace OpenCloud takes over from oCIS rather
+  # than a new one, because the hostname and the reflected certificate moved with it.
+  - opencloud-secrets.yaml
+  # The bearer token llm.titan.arrieta.eu checks every request against, read by the forwardAuth nginx
+  # in namespace `llm` (apply/50-apps/llm/llm.yaml). One value, one place, nothing duplicated — which
+  # is why there is no `*-check` gate for it, unlike coder's or Mealie's credentials: there is no
+  # second copy here to drift from.
+  #
+  # The copy that CAN drift is in another repo: ../k8s-techdelivery apply/10-secrets/bearer-auth-token
+  # .yaml holds the identical token for llm.v.arrieta.eu, and the two clusters are both live with it
+  # by decision. Rotating means editing both repos, and nothing in either tree detects the halves
+  # disagreeing — the spec for this endpoint names that as an accepted cost, not an oversight.
+  #
+  # Referenced by a Deployment's secretKeyRef, not by a HelmRelease, so `make release-secrets` cannot
+  # vouch for this name the way it does for the chart-consumed ones. An unlisted file here would build
+  # green and be silently never applied, which is the lie `make secrets-placement` exists to catch.
+  - llm-bearer-token.yaml
+  # Hermes, the Nous Research investing agent, re-encrypted on the way across from
+  # ../k8s-techdelivery rather than copied. The two repos share four age keys but NOT the cluster
+  # key, so techdelivery's ciphertext is unreadable to titan's kustomize-controller: copying the
+  # file would have produced a Pending pod naming a Secret that plainly exists. Decrypted here and
+  # re-encrypted through this repo's own .sops.yaml, so the recipient set is titan-k8s plus the four
+  # human/workspace keys. Values are unchanged — the app is the same app.
+  #
+  # Consumed by a Deployment's envFrom in namespace `apps`, not by a HelmRelease, so `make
+  # release-secrets` cannot vouch for this name; an unlisted file here would build green and be
+  # silently never applied, which is the lie `make secrets-placement` exists to catch.
+  - investing-agent-secrets.yaml

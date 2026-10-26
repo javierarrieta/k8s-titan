@@ -106,3 +106,41 @@ entries:
     attrs:
       sources:
         - !Find [authentik_sources_oauth.oauthsource, [slug, google]]
+
+  # WHY THIS EXISTS
+  # OpenCloud's desktop and Android clients send `prompt=login` on every authorization request - the
+  # Android app builds it into the URL and it is not a setting. prompt=login means "run the login flow
+  # even though this user already has a session", and authentik obliges: it re-enters the SOURCE flow
+  # with the session intact. default-source-authentication ships with authentication =
+  # require_unauthenticated, so authentik/flows/planner.py:218 raises FlowNonApplicableException and
+  # the user is told "this flow does not apply to the current user" *after* Google has accepted their
+  # password. Observed 2026-10-23 with opencloud-eu/android v1.2.5.
+  #
+  # WHERE THE LOG ACTUALLY IS, because it cost an hour of wrong theories: the exception is logged by
+  # `authentik.core.sources.flow_manager` with `source: <OAuthSource: google>`, not by the flow view,
+  # and it names no flow slug. So `default-authentication-flow` looks innocent - it is innocent, its
+  # authentication is `none` and its Policy/Group/User bindings are genuinely empty. The flow at fault
+  # is the one this source points at on the entry above.
+  #
+  # `none` is the API value for the UI's "Any users" (FlowAuthenticationRequirement.NONE,
+  # authentik/flows/models.py:37). default-authentication-flow already uses it.
+  #
+  # BLAST RADIUS: every social login that starts from an existing session. Google is the only source
+  # here, and that path is currently just broken, so this removes a failure rather than loosening a
+  # control - the flow still authenticates only the user the Google identity is already linked to
+  # (user_matching_mode: email_link, no enrollment_flow), it no longer refuses to run at all.
+  #
+  # THE ALTERNATIVE NOT TAKEN: a dedicated flow bound to this source's authentication_flow would
+  # change nothing else at all, but it needs the stages default-source-authentication already has and
+  # those cannot be enumerated from this repo. A flow with no stages raises EmptyFlowException, which
+  # would be a worse outage than the one being fixed.
+  #
+  # AFTER AN AUTHENTIK UPGRADE: system defaults are re-created by authentik's own blueprints, so this
+  # field can come back as require_unauthenticated. Ours re-asserts it on the next apply. If mobile
+  # logins break after an upgrade, check this field first.
+  - model: authentik_flows.flow
+    identifiers:
+      slug: default-source-authentication
+    state: present
+    attrs:
+      authentication: none

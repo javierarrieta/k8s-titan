@@ -40,7 +40,7 @@ resources:
   # sits Pending rather than converging. It is a ConfigMap and not a Secret because it carries no
   # credential — see the file's own header for why that distinction is the whole point.
   - auth/tesla-outpost-blueprint.yaml
-  - auth/ocis-blueprint.yaml
+  - auth/opencloud-blueprint.yaml
   - auth/authentik.yaml
   # Quota, limit range and the provisioner Role, all in coder-workspaces. The quota is the only
   # thing standing between a third workspace and the Postgres every other app here depends on.
@@ -74,14 +74,53 @@ resources:
   - grafana/grafana.yaml
   # Gatus probes casa through public DNS from titan and sends alerts directly to Telegram.
   - gatus/gatus.yaml
-  # Infinite Scale, replacing the PHP Nextcloud that runs in casa. Two files, and the split is the
-  # failure domain: `ocis.yaml` is the app plus its WOPI collaboration sidecar, `collabora.yaml` is
-  # the editor. A bad field in the editor takes down document opening and nothing else; a bad field in
-  # the app takes down the file service. Both freeze coder's and authentik's updates for the length of
-  # the failure, which is the accepted cost recorded at the top of this file.
+  # OpenCloud, the Infinite Scale fork, replacing the PHP Nextcloud that runs in casa. Two files, and
+  # the split is the failure domain: `opencloud.yaml` is the app (including its WOPI collaboration
+  # service, which since 8.1.0 runs inside the same process rather than in a sidecar), `collabora.yaml`
+  # is the editor. A bad field in the editor takes down document opening and nothing else; a bad field
+  # in the app takes down the file service. Both freeze coder's and authentik's updates for the length
+  # of the failure, which is the accepted cost recorded at the top of this file.
   #
   # Ordering here is intent, not mechanism (see the note at the top of this file): the app reads
-  # ocis-secrets from namespace `files` and titan-tls reflected into it, and a pod that starts before
-  # either exists crash-loops rather than converging.
-  - ocis/ocis.yaml
-  - ocis/collabora.yaml
+  # opencloud-secrets from namespace `files` and titan-tls reflected into it, and a pod that starts
+  # before either exists crash-loops rather than converging.
+  - opencloud/opencloud.yaml
+  - opencloud/collabora.yaml
+  # Mealie, the recipe manager. Two files and the split is the same one open-webui has: the CNPG
+  # Database and DatabaseRole live in namespace `databases` because that is where their Cluster is,
+  # while the app lives in `mealie`. Listed DB-first for intent, not mechanism — Flux sorts by kind
+  # and applies concurrently, and the pod retries until the role exists.
+  #
+  # The third Mealie artifact is not here: authentik/blueprints-mealie.yaml becomes a Secret in
+  # 10-secrets and is mounted by the authentik HelmRelease below, because authentik applies blueprints
+  # and Mealie does not.
+  - mealie/mealie-db.yaml
+  - mealie/mealie.yaml
+  # llm.titan.arrieta.eu: a bearer-auth front for the halogen endpoint on the llm01 box, duplicated
+  # from ../k8s-techdelivery rather than migrated — both clusters serve it now, with one token.
+  # One file holding the proxy target (Endpoints + Service with no selector), the forwardAuth nginx,
+  # the Middleware and the Ingress, all in namespace `llm`. It reads llm-bearer-token from
+  # 10-secrets and titan-tls reflected into `llm` via the allow-list on 40-certificates/titan-wildcard.yaml.
+  #
+  # A bad field here freezes coder's and authentik's updates for the length of the failure, which is
+  # the accepted cost recorded at the top of this file; one hand-written manifest is not bulk.
+  - llm/llm.yaml
+  # Sure, the personal-finance tracker trialled as a Firefly III replacement. Same two-file split as
+  # mealie: the CNPG Database and DatabaseRole must live in `databases` beside their Cluster while the
+  # app lives in `sure`. The third artifact is again not here — the OIDC client becomes a Secret in
+  # 10-secrets and is mounted by the authentik HelmRelease. Design:
+  # docs/superpowers/specs/2026-10-23-titan-sure-design.md.
+  - sure/sure-db.yaml
+  - sure/sure.yaml
+  # Hermes, the Nous Research investing agent, migrated from ../k8s-techdelivery with its object
+  # names intact. One hand-written manifest (PVC + Deployment + Service in namespace `apps`), so it
+  # is the shape §3.2 of the 2026-10-19 design keeps in this stage: no bulk authored here, and a bad
+  # field freezes coder's and authentik's *updates*, not coder. It passes the §3.1 admission test —
+  # one pod, no database, no public hostname, credentials only from its own Secret — which is why it
+  # lands in the existing `apps` namespace rather than buying a new one.
+  #
+  # It runs at replicas: 1 from the first merge, at the same moment ../k8s-techdelivery scales its
+  # copy to 0: `local-path-retain` is WaitForFirstConsumer, so a stopped app here would leave the
+  # PVC unbound and nowhere to rsync the hand-moved 10 Gi into. The file's own header is the
+  # sequence, and its last step is the pod delete that makes the copied files take effect.
+  - investing-agent/investing-agent.yaml

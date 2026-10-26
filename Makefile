@@ -13,12 +13,12 @@ KUSTOMIZE_DIRS := $(shell find apply -name kustomization.yaml 2>/dev/null | sed 
 # not be able to slip between the encryption rule and the validation glob.
 SECRET_FIND := find apply/10-secrets \( -name '*.yaml' -o -name '*.yml' \) ! -name kustomization.yaml
 
-.PHONY: check check-ci kustomize-check kustomize-listing dry-run py-deps validate update-keys scan leak-check secrets-placement secrets-list secrets-present release-secrets db-url-check oidc-check grafana-oidc-check observability-oidc-check open-webui-oidc-check crd-check namespace-check tesla-forwarder-test update-cnpg-crds update-crds
+.PHONY: check check-ci kustomize-check kustomize-listing dry-run py-deps validate update-keys scan leak-check secrets-placement secrets-list secrets-present release-secrets secret-refs db-url-check oidc-check grafana-oidc-check observability-oidc-check open-webui-oidc-check mealie-check sure-check crd-check namespace-check tesla-forwarder-test update-cnpg-crds update-crds
 
 # leak-check runs FIRST: make has no -k, so it stops at the first failing prerequisite.
 # validate needs the age key, so an operator who forgot SOPS_AGE_KEY_FILE would never
 # reach a leak gate placed behind it.
-check: py-deps leak-check kustomize-check kustomize-listing validate secrets-placement release-secrets db-url-check oidc-check grafana-oidc-check observability-oidc-check open-webui-oidc-check crd-check namespace-check tesla-forwarder-test
+check: py-deps leak-check kustomize-check kustomize-listing validate secrets-placement release-secrets secret-refs db-url-check oidc-check grafana-oidc-check observability-oidc-check open-webui-oidc-check mealie-check sure-check crd-check namespace-check tesla-forwarder-test
 	@echo "check: all offline gates passed"
 
 # The subset provable from the tree alone - no age key, no cluster, no network.
@@ -38,7 +38,7 @@ check: py-deps leak-check kustomize-check kustomize-listing validate secrets-pla
 # Secret values, every Secret here is sops-encrypted, and the age key does not go in CI.
 check-ci:
 	@rc=0; \
-	for t in py-deps leak-check kustomize-check kustomize-listing secrets-placement release-secrets crd-check namespace-check tesla-forwarder-test; do \
+	for t in py-deps leak-check kustomize-check kustomize-listing secrets-placement release-secrets secret-refs crd-check namespace-check tesla-forwarder-test; do \
 	  echo "--- $$t ---"; \
 	  $(MAKE) --no-print-directory $$t || rc=1; \
 	done; \
@@ -221,6 +221,13 @@ update-keys: secrets-present
 # .github/ is exactly as public. Depends on secrets-present so it cannot pass vacuously
 # when run on its own.
 #
+# It also rejects `data:` inside apply/10-secrets, which is a fourth thing and not obvious.
+# A Secret's `data:` values are base64 by contract and a sops ciphertext is not base64, so the
+# API server refuses the undecrypted tree on server-side dry-run: `make dry-run` stops at
+# 10-secrets and never reaches the stage you changed. Flux decrypts before it applies, so the
+# cluster never sees this, and only the live gate does. `stringData` takes an arbitrary string,
+# which is why every other Secret here already used it (measured: 30 of 32).
+#
 # One exemption: a Secret that is a ServiceAccount token REQUEST -- typed
 # kubernetes.io/service-account-token and carrying no data/stringData. The
 # controller fills those in-cluster, so nothing secret is in git. The exemption is
@@ -244,6 +251,7 @@ secrets-placement: secrets-present
 	for f in $$($(SECRET_FIND)); do \
 	  if git check-ignore -q "$$f" 2>/dev/null; then continue; fi; \
 	  if ! grep -q 'ENC\[' "$$f"; then echo "FAIL: $$f is not sops-encrypted (no ENC[)"; fail=1; fi; \
+	  if grep -q '^data:' "$$f"; then echo "FAIL: $$f uses data: - a sops ciphertext is not valid base64, so the API server rejects it on server-side dry-run; use stringData"; fail=1; fi; \
 	  base=$$(basename "$$f"); \
 	  if ! grep -qE "^ *- *(\./)?$$base$$" apply/10-secrets/kustomization.yaml; then \
 	    echo "FAIL: $$f is not listed in apply/10-secrets/kustomization.yaml - it builds fine and is silently never applied"; fail=1; fi; \
@@ -472,6 +480,26 @@ release-secrets:
 	if [ -n "$$missing" ]; then echo "FAIL: HelmRelease references Secrets absent from apply/10-secrets:"; printf '%s\n' "$$missing" | sed 's/^/  /'; exit 1; fi; \
 	echo "release-secrets: $$n HelmRelease(s), $$refs Secret reference(s) scanned; every referenced Secret present with a matching namespace"
 
+# secret-refs: every Secret a hand-written workload names has to exist in this tree.
+#
+# release-secrets walks HelmRelease objects and nothing else - its own output line says so - and
+# secrets-placement proves a Secret file's placement, encryption and listing but never who consumes
+# it, so the Secret references of every hand-written Deployment here were checked by nobody. A typo'd
+# name builds green, passes crd-check and namespace-check, and ships a pod stuck in
+# CreateContainerConfigError naming a Secret that plainly does not exist. The gap was found while
+# reviewing the investing-agent migration, which had to reason about exactly that failure for a
+# different reason and checked the name by hand.
+#
+# Keyless, so it runs in check-ci too: it reads Secret NAMES off the built tree, and a name is not a
+# credential - the same line release-secrets already sits on.
+secret-refs:
+	@command -v python3 >/dev/null 2>&1 \
+	  || { echo "secret-refs: python3 is missing - refusing to report clean"; exit 1; }; \
+	python3 -c 'import yaml' >/dev/null 2>&1 \
+	  || { echo "secret-refs: PyYAML is missing (pip install pyyaml) - refusing to report clean"; exit 1; }; \
+	{ for d in $(KUSTOMIZE_DIRS); do kubectl kustomize "$$d" || exit 1; printf -- '---\n'; done; } \
+	  | python3 tools/secret-refs-check.py
+
 # py-deps: fail with an instruction instead of a traceback.
 #
 # Five gates - kustomize-listing, crd-field-check, oidc-check, db-url-check and the sopsload module
@@ -560,3 +588,32 @@ observability-oidc-check:
 # no authentik group name. Reads Secrets, so a local gate, not a CI one.
 open-webui-oidc-check:
 	@python3 tools/open-webui-oidc-check.py --root apply
+
+# mealie-check: Mealie's OIDC client lives in the reviewed template, the rendered blueprint and the
+# app's own Secret, the HelmRelease must mount it, and the redirect URI Mealie sends is derived from
+# its BASE_URL rather than configured — so a host edit on one side silently breaks the other. On top of
+# the OIDC half this gate also compares the database password across two namespaces, which no existing
+# gate does: `db-url-check` is reference-driven and looks for DATABASE_URL / PG_CONNECTION_URL, and
+# Mealie takes POSTGRES_* instead, so the generic gate never sees this app at all. It also rejects
+# OIDC_REQUIRES_EMAIL_VERIFICATION's v3.21.0 default, which authentik's own email scope mapping
+# contradicts (see authentik/blueprints-coder.yaml). Reads Secrets, so a local gate, not a CI one.
+mealie-check:
+	@python3 tools/mealie-check.py --root apply
+
+# sure-check: Sure is a HelmRelease, and every existing gate is shape-bound in a way that misses it.
+# `db-url-check` walks a HelmRelease env named *PG_CONNECTION_URL or a Deployment's DATABASE_URL — Sure
+# is a HelmRelease carrying DATABASE_URL, so that gate reports zero references and passes vacuously.
+# `crd-check` walks vendored CRDs and `namespace-check` walks namespaces; neither looks inside a
+# HelmRelease values block, which is where all of Sure's configuration lives. So this gate reads the
+# values directly: the OIDC client across blueprint/Secret/mount, DATABASE_URL against CNPG's copy and
+# against the `sure` role rather than the CNPG superuser, and the chart defaults that fail silently —
+# existingSecret not wiring OPENAI_ACCESS_TOKEN, /rails/storage not mounted or mounted from a volume or
+# a claim that does not exist, the PVC left on the deleting storage class, a wrong ingress className, a
+# Redis with no --requirepass or no probe, Reloader reading only podAnnotations, the subcharts that must
+# stay off, and the reasoning-model token budget. ONBOARDING_STATE is checked with an acknowledgement
+# marker rather than a bare ban, because the documented bring-up sequence needs it open for exactly one
+# reconcile. Its honest limit is in its docstring: it proves ALLOWED_OIDC_DOMAINS is non-empty and cannot
+# prove it names the domain of the identity that will sign in — and a non-empty list is exclusive.
+# Reads Secrets, so a local gate, not a CI one.
+sure-check:
+	@python3 tools/sure-check.py --root apply
