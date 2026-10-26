@@ -17,6 +17,11 @@
 #     line from casa for the same reason.
 #   * the Secret is re-encrypted, not copied: the two repos share four age keys but not the
 #     cluster key, so techdelivery's ciphertext is unreadable to titan's kustomize-controller.
+#   * the Secret uses stringData, not data:. A Secret's `data:` values are base64 by contract and
+#     a sops ciphertext is not base64, so the API server refuses the tree while it is still
+#     encrypted — invisible in the cluster, because Flux decrypts before it applies, and fatal to
+#     `make dry-run`, which submits it undecrypted. 30 of the 32 Secrets here already used
+#     stringData; `make secrets-placement` now rejects `data:` so it stays that way.
 #   * the container's process tree changed, and this is the one deviation that is NOT a port. The
 #     source's `gateway & dashboard & wait` left a dead gateway invisible (the args block below is
 #     why); `exec` fixes that and changes what PID 1 is. It is its own commit on this branch so it
@@ -52,10 +57,12 @@
 # git-managed and Flux reverts it at the next sync.
 # Then the source teardown is a separate change, not part of this one.
 #
-# `make dry-run DRYRUN_CONTEXT=<admin context>` is not covered by `make check` and has to be run
-# before merge. The PVC is the object class that took this stage red live once already
-# (apply/50-apps/coder/workspaces.yaml:41-47 records it), and no offline gate can see a live
-# admission rule.
+# `make dry-run DRYRUN_CONTEXT=<admin context>` was run on this branch and all five stages were
+# accepted (50-apps with 73 objects). It is not covered by `make check`, and the PVC is the object
+# class that took this stage red live once already (apply/50-apps/coder/workspaces.yaml:41-47
+# records it) — no offline gate can see a live admission rule. The first attempt rejected
+# `10-secrets`, which is how the `data:`/base64 problem below got found; the log is
+# docs/investing-agent-bringup-2026-10-26.md.
 #
 # NOT BACKED UP ON TITAN. techdelivery protected this claim with the `backup-investing-agent`
 # restic CronJob (apply/30-backup/apps/backup-apps.yaml there). This cluster ships no generic PV
