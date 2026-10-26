@@ -14,6 +14,11 @@
 #     line from casa for the same reason.
 #   * the Secret is re-encrypted, not copied: the two repos share four age keys but not the
 #     cluster key, so techdelivery's ciphertext is unreadable to titan's kustomize-controller.
+#   * the container's process tree changed, and this is the one deviation that is NOT a port. The
+#     source's `gateway & dashboard & wait` left a dead gateway invisible (the args block below is
+#     why); `exec` fixes that and changes what PID 1 is. It is its own commit on this branch so it
+#     can be reverted on its own, and docs/investing-agent-bringup-2026-10-26.md records the test
+#     that proves it.
 #   * OPENAI_BASE_URL is unchanged and still reachable: it is http://192.168.0.29:8731, casa's
 #     halogen on llm01, a home-LAN address. Titan pods reach it over the WireGuard mesh — this
 #     repo already sends the identical endpoint to Sure (apply/50-apps/sure/sure.yaml) and to the
@@ -93,6 +98,11 @@ spec:
       labels:
         app: investing-agent
     spec:
+      # Chosen, not inherited. The gateway is PID 1 now, so SIGTERM reaches it directly and this is
+      # how long it gets to flush SQLite before SIGKILL. 60s is headroom over the 30s default for a
+      # long write; if hermes ignores SIGTERM entirely the kill still lands here rather than at the
+      # node's default.
+      terminationGracePeriodSeconds: 60
       securityContext:
         runAsNonRoot: true
         runAsUser: 10000
@@ -102,8 +112,29 @@ spec:
       containers:
       - name: investing-agent
         image: docker.io/nousresearch/hermes-agent:v2026.9.24
+        # PID 1 has to be the worker, not a shell waiting on two backgrounded children.
+        #
+        # The source ran `gateway run & dashboard & wait`, and both of its failure modes read as
+        # healthy: `wait` returns only when BOTH children are gone, so a gateway that exits leaves
+        # the container Running and Ready — the probes below watch the dashboard's port and never
+        # the gateway — with every cron run silently stopped; and `sh` does not forward SIGTERM to
+        # background children, so each Recreate rollout sat out the whole grace period and then
+        # SIGKILLed SQLite mid-write on a claim with no restore point. opencloud.yaml:144-147
+        # makes the same argument about its own PVC.
+        #
+        # `exec` puts the gateway at PID 1: the container exits with the gateway's status, so
+        # kubelet restarts the pod the moment the worker dies, and SIGTERM lands on the process
+        # that owns the writes. The dashboard stays a background child; if it dies the pod goes Not
+        # Ready and the liveness probe restarts it.
+        #
+        # Residual gap, named rather than probed: a gateway that is alive but wedged is still
+        # invisible, because it exposes no health endpoint of its own.
         command: ["/bin/sh", "-c"]
-        args: ["rm -f /opt/data/gateway.lock; hermes gateway run & hermes dashboard --host 0.0.0.0 --no-open & wait"]
+        args:
+        - |
+          rm -f /opt/data/gateway.lock
+          hermes dashboard --host 0.0.0.0 --no-open &
+          exec hermes gateway run
         env:
           - name: HERMES_HOME
             value: /opt/data/.hermes
@@ -125,6 +156,24 @@ spec:
             port: 9119
           initialDelaySeconds: 10
           periodSeconds: 15
+        # Startup first so a cold start against a just-restored 10 Gi can never race liveness:
+        # liveness only begins once this has succeeded at least once. 10 + 19*15s ≈ 5 minutes of
+        # allowed cold start, generous on purpose — the alternative to that is a restart loop.
+        startupProbe:
+          tcpSocket:
+            port: 9119
+          initialDelaySeconds: 10
+          periodSeconds: 15
+          failureThreshold: 20
+        # The dashboard is a background child, so its death does not end the container. Without
+        # this the pod would sit Running with a dead UI and a live gateway forever. ~2 minutes of
+        # dead dashboard before a restart, which is also the worst-case detection time for it.
+        livenessProbe:
+          tcpSocket:
+            port: 9119
+          periodSeconds: 20
+          timeoutSeconds: 5
+          failureThreshold: 3
         resources:
           limits:
             cpu: 1500m
