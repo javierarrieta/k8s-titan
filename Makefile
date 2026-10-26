@@ -13,12 +13,12 @@ KUSTOMIZE_DIRS := $(shell find apply -name kustomization.yaml 2>/dev/null | sed 
 # not be able to slip between the encryption rule and the validation glob.
 SECRET_FIND := find apply/10-secrets \( -name '*.yaml' -o -name '*.yml' \) ! -name kustomization.yaml
 
-.PHONY: check check-ci kustomize-check kustomize-listing dry-run py-deps validate update-keys scan leak-check secrets-placement secrets-list secrets-present release-secrets db-url-check oidc-check grafana-oidc-check observability-oidc-check open-webui-oidc-check mealie-check sure-check crd-check namespace-check tesla-forwarder-test update-cnpg-crds update-crds
+.PHONY: check check-ci kustomize-check kustomize-listing dry-run py-deps validate update-keys scan leak-check secrets-placement secrets-list secrets-present release-secrets secret-refs db-url-check oidc-check grafana-oidc-check observability-oidc-check open-webui-oidc-check mealie-check sure-check crd-check namespace-check tesla-forwarder-test update-cnpg-crds update-crds
 
 # leak-check runs FIRST: make has no -k, so it stops at the first failing prerequisite.
 # validate needs the age key, so an operator who forgot SOPS_AGE_KEY_FILE would never
 # reach a leak gate placed behind it.
-check: py-deps leak-check kustomize-check kustomize-listing validate secrets-placement release-secrets db-url-check oidc-check grafana-oidc-check observability-oidc-check open-webui-oidc-check mealie-check sure-check crd-check namespace-check tesla-forwarder-test
+check: py-deps leak-check kustomize-check kustomize-listing validate secrets-placement release-secrets secret-refs db-url-check oidc-check grafana-oidc-check observability-oidc-check open-webui-oidc-check mealie-check sure-check crd-check namespace-check tesla-forwarder-test
 	@echo "check: all offline gates passed"
 
 # The subset provable from the tree alone - no age key, no cluster, no network.
@@ -38,7 +38,7 @@ check: py-deps leak-check kustomize-check kustomize-listing validate secrets-pla
 # Secret values, every Secret here is sops-encrypted, and the age key does not go in CI.
 check-ci:
 	@rc=0; \
-	for t in py-deps leak-check kustomize-check kustomize-listing secrets-placement release-secrets crd-check namespace-check tesla-forwarder-test; do \
+	for t in py-deps leak-check kustomize-check kustomize-listing secrets-placement release-secrets secret-refs crd-check namespace-check tesla-forwarder-test; do \
 	  echo "--- $$t ---"; \
 	  $(MAKE) --no-print-directory $$t || rc=1; \
 	done; \
@@ -479,6 +479,26 @@ release-secrets:
 	  END { for (i=1; i<=cnt; i++) if (!(w[i] in have)) { split(w[i], a, "\t"); print a[1] "/" a[2] } }'); \
 	if [ -n "$$missing" ]; then echo "FAIL: HelmRelease references Secrets absent from apply/10-secrets:"; printf '%s\n' "$$missing" | sed 's/^/  /'; exit 1; fi; \
 	echo "release-secrets: $$n HelmRelease(s), $$refs Secret reference(s) scanned; every referenced Secret present with a matching namespace"
+
+# secret-refs: every Secret a hand-written workload names has to exist in this tree.
+#
+# release-secrets walks HelmRelease objects and nothing else - its own output line says so - and
+# secrets-placement proves a Secret file's placement, encryption and listing but never who consumes
+# it, so the Secret references of every hand-written Deployment here were checked by nobody. A typo'd
+# name builds green, passes crd-check and namespace-check, and ships a pod stuck in
+# CreateContainerConfigError naming a Secret that plainly does not exist. The gap was found while
+# reviewing the investing-agent migration, which had to reason about exactly that failure for a
+# different reason and checked the name by hand.
+#
+# Keyless, so it runs in check-ci too: it reads Secret NAMES off the built tree, and a name is not a
+# credential - the same line release-secrets already sits on.
+secret-refs:
+	@command -v python3 >/dev/null 2>&1 \
+	  || { echo "secret-refs: python3 is missing - refusing to report clean"; exit 1; }; \
+	python3 -c 'import yaml' >/dev/null 2>&1 \
+	  || { echo "secret-refs: PyYAML is missing (pip install pyyaml) - refusing to report clean"; exit 1; }; \
+	{ for d in $(KUSTOMIZE_DIRS); do kubectl kustomize "$$d" || exit 1; printf -- '---\n'; done; } \
+	  | python3 tools/secret-refs-check.py
 
 # py-deps: fail with an instruction instead of a traceback.
 #
