@@ -171,13 +171,23 @@ a skip. CI runs GitGuardian on every push and warns, rather than failing, when
 `GITGUARDIAN_API_KEY` is absent from the repo.
 
 What runs automatically is `make check-ci` — leak-check, kustomize-check, kustomize-listing,
-secrets-placement, release-secrets, crd-check and namespace-check, the gates provable from the
-tree alone,
+secrets-placement, release-secrets, secret-refs, crd-check and namespace-check, the gates
+provable from the tree alone,
 and the only control here that `--no-verify` cannot skip. `release-secrets` fails when a
 `HelmRelease` reaches for a Secret that is not in `apply/10-secrets` with a matching
 namespace, so a typo'd name surfaces on the laptop instead of as a red release three
 time zones away; its honest limit is that it proves a name and a namespace exist in the
-tree, not that the keys inside are what the chart wants. `crd-check` walks every built
+tree, not that the keys inside are what the chart wants. `secret-refs` is that gate for the
+hand-written half of the tree, because `release-secrets` walks `HelmRelease` objects and
+nothing else and `secrets-placement` never asks who consumes a Secret file: it fails when a
+built `Deployment`/`StatefulSet`/`DaemonSet`/`CronJob`/`Job` names a Secret — `envFrom`,
+`secretKeyRef`, a `secret` volume, a projected source, an `imagePullSecret` — that no `Secret`
+in the same namespace declares. Secrets the cluster itself produces are the one hole, listed by
+name and namespace with a producer in `PRODUCED_IN_CLUSTER` (today: `apps/titan-tls`, reflected in
+by Reflector); an entry there is a deliberate gap, not a fix. Same honest limit as
+`release-secrets`: a name and a namespace, never the keys inside. It was written because the
+investing-agent migration had to hand-check its `envFrom` name and nothing in the tree would
+have caught a typo. `crd-check` walks every built
 object against the CRDs vendored in `vendor/cnpg-crds/` and rejects any field the schema
 does not declare at that position — which is the class of error a normal schema validator
 waves through, because the CNPG CRDs set no `additionalProperties: false` anywhere, and
