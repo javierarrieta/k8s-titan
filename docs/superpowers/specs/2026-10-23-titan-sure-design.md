@@ -330,6 +330,8 @@ kubectl --context titan -n sure exec deploy/sure-web -- \
 - Trade Republic account connection, until the Enable Banking application exists.
 - Multi-user. One human, one account.
 - The casa spike directory, which is deleted rather than maintained.
+- Automatic transaction history backfill. What the provider feed does not carry has to be imported by hand, and the
+  rules for doing that without creating undeduplicable duplicates are in `docs/sure-import-runbook.md`.
 
 ## 10. Found while implementing (2026-10-23), all verified by rendering or by the cluster
 
