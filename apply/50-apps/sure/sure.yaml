@@ -30,6 +30,12 @@ kind: PersistentVolumeClaim
 metadata:
   name: sure-storage
   namespace: sure
+  annotations:
+    # Opted in to restic PV backup. This annotation IS the scope decision -- apply/70-backup/
+    # discovers annotated PVCs at runtime rather than enumerating them in git, so a volume with
+    # no annotation is not backed up and adding one is a one-line commit here. Retention and
+    # schedule come from the class, not from this file.
+    backup.titan.arrieta.eu/class: daily
 spec:
   accessModes:
   - ReadWriteOnce

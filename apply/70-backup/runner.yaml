@@ -1,0 +1,340 @@
+# One discovery CronJob per participating namespace. Each runs runner.sh (from the
+# backup-preflight ConfigMap, mirrored in by Reflector), which finds the PVCs in its own
+# namespace carrying backup.titan.arrieta.eu/class and creates one restic Job per volume.
+#
+# SCHEDULES, and why they sit where they do.
+# Every start is placed so that even the largest volume's deadline ends before 03:00 UTC. The
+# spec refuses to assume titan has no nightly blackout like techdelivery's (03:06-07:10 on the
+# VPS, reproduced over four consecutive nights) and says to stay clear of 03:00-08:00 anyway,
+# because a shared cause -- OVH egress, the mesh, the home-side VIP -- would surface in the
+# same window here. The largest volume in scope is 10Gi, whose derived deadline is 2.5h, so the
+# last start (21:00) ends by 23:30 with hours to spare.
+#
+# None of this is measured on titan. The first week of these schedules is provisional, exactly
+# as spec 5 says, and the thing that makes them provisional is `restic check` plus job
+# completion, not an opinion.
+
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: backup-discovery
+  namespace: apps
+  labels:
+    app: backup
+    app.kubernetes.io/name: backup
+    # component is deliberately NOT pv-backup-job: runner.sh's overlap guard selects on that
+    # label, and if the runner matched its own guard every run would find a live job (itself)
+    # and conclude there was nothing to do.
+    app.kubernetes.io/component: pv-backup-discovery
+    app.kubernetes.io/part-of: pv-backup
+spec:
+  schedule: "30 19 * * *"
+  timeZone: "UTC"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      # The runner only lists PVCs and POSTs jobs, so minutes is generous. The long work is in
+      # the child jobs, whose deadlines runner.sh derives from each volume's size.
+      activeDeadlineSeconds: 900
+      ttlSecondsAfterFinished: 172800
+      template:
+        metadata:
+          labels:
+            app: backup
+            app.kubernetes.io/component: pv-backup-discovery
+            app.kubernetes.io/part-of: pv-backup
+        spec:
+          restartPolicy: Never
+          serviceAccountName: backup-runner
+          # Unprivileged. This pod reads the API and creates Job objects; it mounts no volume,
+          # so the root + DAC_OVERRIDE reasoning that applies to the child jobs does not apply
+          # here.
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65534
+            runAsGroup: 65534
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+          - name: runner
+            # kubectl, not restic: the runner never touches a volume. Two images in this stage,
+            # each pinned by digest, which is the rule the spec carries from techdelivery -- its
+            # restore image's CI once let `restic snapshots --last 1` misparse in 0.19.x and
+            # every tag-based restore claimed no snapshot existed.
+            image: alpine/k8s@sha256:18bc02c1e0df04451f4f9194eb7b7341c1165da5495459b52f85f72fb9545032
+            command: ["/bin/sh", "-c"]
+            args: ["sh /preflight/runner.sh"]
+            env:
+            # Pinned here rather than baked into the script so the image a backup runs is
+            # visible in the pod spec, where a reviewer and `kubectl describe` both see it.
+            - name: RESTIC_IMAGE
+              value: "restic/restic@sha256:136600b6ff6843d61d355f7f71f460a166429f35de6fd11b568fece3c9a4d510"
+            securityContext:
+              allowPrivilegeEscalation: false
+              seccompProfile:
+                type: RuntimeDefault
+              capabilities:
+                drop: ["ALL"]
+            resources:
+              requests:
+                cpu: 50m
+                memory: 128Mi
+              limits:
+                cpu: 200m
+                memory: 256Mi
+            volumeMounts:
+            - name: preflight
+              mountPath: /preflight
+              readOnly: true
+          volumes:
+          - name: preflight
+            configMap:
+              name: backup-preflight
+              defaultMode: 0555
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: backup-discovery
+  namespace: mealie
+  labels:
+    app: backup
+    app.kubernetes.io/name: backup
+    # component is deliberately NOT pv-backup-job: runner.sh's overlap guard selects on that
+    # label, and if the runner matched its own guard every run would find a live job (itself)
+    # and conclude there was nothing to do.
+    app.kubernetes.io/component: pv-backup-discovery
+    app.kubernetes.io/part-of: pv-backup
+spec:
+  schedule: "30 20 * * *"
+  timeZone: "UTC"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      # The runner only lists PVCs and POSTs jobs, so minutes is generous. The long work is in
+      # the child jobs, whose deadlines runner.sh derives from each volume's size.
+      activeDeadlineSeconds: 900
+      ttlSecondsAfterFinished: 172800
+      template:
+        metadata:
+          labels:
+            app: backup
+            app.kubernetes.io/component: pv-backup-discovery
+            app.kubernetes.io/part-of: pv-backup
+        spec:
+          restartPolicy: Never
+          serviceAccountName: backup-runner
+          # Unprivileged. This pod reads the API and creates Job objects; it mounts no volume,
+          # so the root + DAC_OVERRIDE reasoning that applies to the child jobs does not apply
+          # here.
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65534
+            runAsGroup: 65534
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+          - name: runner
+            # kubectl, not restic: the runner never touches a volume. Two images in this stage,
+            # each pinned by digest, which is the rule the spec carries from techdelivery -- its
+            # restore image's CI once let `restic snapshots --last 1` misparse in 0.19.x and
+            # every tag-based restore claimed no snapshot existed.
+            image: alpine/k8s@sha256:18bc02c1e0df04451f4f9194eb7b7341c1165da5495459b52f85f72fb9545032
+            command: ["/bin/sh", "-c"]
+            args: ["sh /preflight/runner.sh"]
+            env:
+            # Pinned here rather than baked into the script so the image a backup runs is
+            # visible in the pod spec, where a reviewer and `kubectl describe` both see it.
+            - name: RESTIC_IMAGE
+              value: "restic/restic@sha256:136600b6ff6843d61d355f7f71f460a166429f35de6fd11b568fece3c9a4d510"
+            securityContext:
+              allowPrivilegeEscalation: false
+              seccompProfile:
+                type: RuntimeDefault
+              capabilities:
+                drop: ["ALL"]
+            resources:
+              requests:
+                cpu: 50m
+                memory: 128Mi
+              limits:
+                cpu: 200m
+                memory: 256Mi
+            volumeMounts:
+            - name: preflight
+              mountPath: /preflight
+              readOnly: true
+          volumes:
+          - name: preflight
+            configMap:
+              name: backup-preflight
+              defaultMode: 0555
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: backup-discovery
+  namespace: open-webui
+  labels:
+    app: backup
+    app.kubernetes.io/name: backup
+    # component is deliberately NOT pv-backup-job: runner.sh's overlap guard selects on that
+    # label, and if the runner matched its own guard every run would find a live job (itself)
+    # and conclude there was nothing to do.
+    app.kubernetes.io/component: pv-backup-discovery
+    app.kubernetes.io/part-of: pv-backup
+spec:
+  schedule: "0 19 * * *"
+  timeZone: "UTC"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      # The runner only lists PVCs and POSTs jobs, so minutes is generous. The long work is in
+      # the child jobs, whose deadlines runner.sh derives from each volume's size.
+      activeDeadlineSeconds: 900
+      ttlSecondsAfterFinished: 172800
+      template:
+        metadata:
+          labels:
+            app: backup
+            app.kubernetes.io/component: pv-backup-discovery
+            app.kubernetes.io/part-of: pv-backup
+        spec:
+          restartPolicy: Never
+          serviceAccountName: backup-runner
+          # Unprivileged. This pod reads the API and creates Job objects; it mounts no volume,
+          # so the root + DAC_OVERRIDE reasoning that applies to the child jobs does not apply
+          # here.
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65534
+            runAsGroup: 65534
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+          - name: runner
+            # kubectl, not restic: the runner never touches a volume. Two images in this stage,
+            # each pinned by digest, which is the rule the spec carries from techdelivery -- its
+            # restore image's CI once let `restic snapshots --last 1` misparse in 0.19.x and
+            # every tag-based restore claimed no snapshot existed.
+            image: alpine/k8s@sha256:18bc02c1e0df04451f4f9194eb7b7341c1165da5495459b52f85f72fb9545032
+            command: ["/bin/sh", "-c"]
+            args: ["sh /preflight/runner.sh"]
+            env:
+            # Pinned here rather than baked into the script so the image a backup runs is
+            # visible in the pod spec, where a reviewer and `kubectl describe` both see it.
+            - name: RESTIC_IMAGE
+              value: "restic/restic@sha256:136600b6ff6843d61d355f7f71f460a166429f35de6fd11b568fece3c9a4d510"
+            securityContext:
+              allowPrivilegeEscalation: false
+              seccompProfile:
+                type: RuntimeDefault
+              capabilities:
+                drop: ["ALL"]
+            resources:
+              requests:
+                cpu: 50m
+                memory: 128Mi
+              limits:
+                cpu: 200m
+                memory: 256Mi
+            volumeMounts:
+            - name: preflight
+              mountPath: /preflight
+              readOnly: true
+          volumes:
+          - name: preflight
+            configMap:
+              name: backup-preflight
+              defaultMode: 0555
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: backup-discovery
+  namespace: sure
+  labels:
+    app: backup
+    app.kubernetes.io/name: backup
+    # component is deliberately NOT pv-backup-job: runner.sh's overlap guard selects on that
+    # label, and if the runner matched its own guard every run would find a live job (itself)
+    # and conclude there was nothing to do.
+    app.kubernetes.io/component: pv-backup-discovery
+    app.kubernetes.io/part-of: pv-backup
+spec:
+  schedule: "0 20 * * *"
+  timeZone: "UTC"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      # The runner only lists PVCs and POSTs jobs, so minutes is generous. The long work is in
+      # the child jobs, whose deadlines runner.sh derives from each volume's size.
+      activeDeadlineSeconds: 900
+      ttlSecondsAfterFinished: 172800
+      template:
+        metadata:
+          labels:
+            app: backup
+            app.kubernetes.io/component: pv-backup-discovery
+            app.kubernetes.io/part-of: pv-backup
+        spec:
+          restartPolicy: Never
+          serviceAccountName: backup-runner
+          # Unprivileged. This pod reads the API and creates Job objects; it mounts no volume,
+          # so the root + DAC_OVERRIDE reasoning that applies to the child jobs does not apply
+          # here.
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65534
+            runAsGroup: 65534
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+          - name: runner
+            # kubectl, not restic: the runner never touches a volume. Two images in this stage,
+            # each pinned by digest, which is the rule the spec carries from techdelivery -- its
+            # restore image's CI once let `restic snapshots --last 1` misparse in 0.19.x and
+            # every tag-based restore claimed no snapshot existed.
+            image: alpine/k8s@sha256:18bc02c1e0df04451f4f9194eb7b7341c1165da5495459b52f85f72fb9545032
+            command: ["/bin/sh", "-c"]
+            args: ["sh /preflight/runner.sh"]
+            env:
+            # Pinned here rather than baked into the script so the image a backup runs is
+            # visible in the pod spec, where a reviewer and `kubectl describe` both see it.
+            - name: RESTIC_IMAGE
+              value: "restic/restic@sha256:136600b6ff6843d61d355f7f71f460a166429f35de6fd11b568fece3c9a4d510"
+            securityContext:
+              allowPrivilegeEscalation: false
+              seccompProfile:
+                type: RuntimeDefault
+              capabilities:
+                drop: ["ALL"]
+            resources:
+              requests:
+                cpu: 50m
+                memory: 128Mi
+              limits:
+                cpu: 200m
+                memory: 256Mi
+            volumeMounts:
+            - name: preflight
+              mountPath: /preflight
+              readOnly: true
+          volumes:
+          - name: preflight
+            configMap:
+              name: backup-preflight
+              defaultMode: 0555

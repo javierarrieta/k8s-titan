@@ -21,6 +21,12 @@ made and what was deliberately left out.
                             admission test below
     apply/60-tesla/         TeslaMate with its own `Database`/`DatabaseRole`, Grafana and the
                             Tesla Fleet Telemetry intake, in namespace `apps`
+    apply/70-backup/        restic PV backups to casa's MinIO: one discovery CronJob per
+                            participating namespace, repo-wide retention and integrity, and the
+                            RBAC Reflector cannot mirror. A volume is in scope only if its PVC
+                            carries `backup.titan.arrieta.eu/class` — there is no volume list in
+                            this directory, and `make backup-coverage` is what proves the
+                            annotation, the runner, the Reflector mirror lists and the RBAC agree.
 
 **One numbered directory is one stage is one Flux `Kustomization`.** That is the layout
 convention: a stage is a top-level numbered directory under `apply/`, never a subdirectory of
@@ -29,7 +35,7 @@ server-side dry-run means nothing in that unit is applied — so the directory b
 failure boundary, and nesting stages would collapse separate failure domains back into one.
 
 Stage order: `flux-system` → `secrets` → `infra` → `databases` → `certificates` → `apps` →
-`tesla`, wired by `dependsOn` in `apply/00-bootstrap/stage-*.yaml`. The numbers are build and
+`tesla` → `backup`, wired by `dependsOn` in `apply/00-bootstrap/stage-*.yaml`. The numbers are build and
 reading order; `dependsOn` is what actually orders reconciles. Add a stage as its own file there;
 do not merge stage objects into one file.
 
@@ -59,10 +65,28 @@ CRs reference Secrets by name only, so this discloses topology, never credential
 cannot read Secrets, and `docs/authentik-runbook.md` §5 remains the record of what the identity
 could prove by effect before that grant, which is still the stronger evidence when it is available.
 
-Backups: the Postgres cluster ships base backups and continuous WAL to S3 and **nothing
-else does** — the generic PV stream is still deferred, so a PVC that is not that database
-has no backup. That covers TeslaMate's driving history and TeslaMate's settings,
-which are rows in that same cluster and are not in git; Grafana's PVC is not. The runbook at
+Backups: two independent paths, and the split is the thing to get straight. The Postgres cluster
+ships base backups and continuous WAL to S3, drilled for both a scratch-cluster restore and a
+point-in-time recovery (`docs/authentik-runbook.md`). Everything else on a PVC goes through
+`apply/70-backup/` — restic to `titan-pv-backups` on casa's MinIO — and **a volume is only in
+scope if its PVC carries `backup.titan.arrieta.eu/class: daily`**. Ask the cluster, not this
+file: `kubectl get pvc -A -L backup.titan.arrieta.eu/class`. Two deliberate exclusions, both
+argued in `docs/superpowers/specs/2026-10-22-titan-restic-pv-backups-design.md`: `postgres-1`,
+because a file copy of a live datadir can restore corrupt and CNPG owns that path; and
+`files/opencloud-data`, because OpenCloud's state is a metadata tree plus a blob bucket and
+restoring one without the other is a restore that looks healthy and is corrupt — so with no
+capacity to mirror the bucket, **files uploaded to `files.titan.arrieta.eu` have no backup of any
+kind**; `coder-workspaces`, by operator decision — a coder workspace must be reproducible
+from its image and from git, so **anything in a workspace home that is neither is not
+recoverable**; and both Grafana volumes, because every provider sets `allowUiUpdates: false`, the
+datasources and the admin credentials are in git, and a wiped PVC rebuilds itself — what it loses
+is anything built by hand in the UI. Neither path is monitored yet: casa owns the Prometheus that would alert on a stale
+snapshot and no such alert exists for titan, so a week of failed backups currently looks exactly
+like a week of successful ones. The restic side has also never been restored — the spec's §10 is
+that list.
+
+That covers TeslaMate's driving history and TeslaMate's settings,
+which are rows in that same cluster and are not in git. The runbook at
 `docs/authentik-runbook.md` records what has actually been drilled (a scratch-cluster
 restore and a point-in-time recovery, both passing), and the two credentials with special
 rules: `AUTHENTIK_SECRET_KEY` (never rotate casually — it signs sessions and derives user IDs,
@@ -148,6 +172,15 @@ the stream is rejected per-pod, silently, with promtail reporting healthy.
 - `make validate` deliberately fails when `apply/10-secrets` holds nothing. Do not
   soften that guard to make a check pass: a gate that passes vacuously is worse than
   no gate.
+- **No attribution trailers in commit messages.** No `Co-Authored-By:`, no `Generated with`,
+  nothing naming a model, vendor or agent as a co-author or contributor. Written 2026-10-26,
+  after an agent session put `Co-Authored-By: Claude <noreply@anthropic.com>` on four commits of
+  a branch while its own `PI_MODEL` read `halogen-qwen3.8-flash-next` and `origin/main` had never
+  carried the trailer once. One trailer, two failures: it named a contributor who was not
+  involved, and it survived review, because a trailer is the sort of line an agent emits from
+  habit and a reviewer skims. The model behind a session is not a repo contributor and is not
+  always what it claims to be. If provenance has to be recorded, record the session id — it is in
+  `PI_SESSION_ID`, it is verifiable, and it does not invent a person.
 
 ## Before committing
 
@@ -171,8 +204,8 @@ a skip. CI runs GitGuardian on every push and warns, rather than failing, when
 `GITGUARDIAN_API_KEY` is absent from the repo.
 
 What runs automatically is `make check-ci` — leak-check, kustomize-check, kustomize-listing,
-secrets-placement, release-secrets, secret-refs, crd-check and namespace-check, the gates
-provable from the tree alone,
+secrets-placement, release-secrets, secret-refs, backup-coverage, crd-check and namespace-check,
+the gates provable from the tree alone,
 and the only control here that `--no-verify` cannot skip. `release-secrets` fails when a
 `HelmRelease` reaches for a Secret that is not in `apply/10-secrets` with a matching
 namespace, so a typo'd name surfaces on the laptop instead of as a red release three

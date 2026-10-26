@@ -1,0 +1,406 @@
+# The three shell scripts every backup job uses, mounted read-only at /preflight.
+#
+#   preflight.sh   -- fail-fast probe that the S3 endpoint is reachable at all.
+#   ensure-repo.sh -- decide whether the repository exists, and create it only when the
+#                     answer is genuinely "no".
+#   runner.sh      -- the discovery loop: find the PVCs in this namespace that opted in by
+#                     annotation, and create one child Job per volume.
+#
+# This is a port of k8s-techdelivery apply/30-backup/apps/preflight-configmap.yaml. The
+# preflight and ensure-repo logic is copied nearly verbatim because everything in it was
+# bought with a failed night: read that file's header before editing this one. Two things
+# changed on the way across -- the repository URL (s3.l.arrieta.eu/titan-pv-backups, not
+# vps-pv-backups) and the failure this stage is designed not to have (see runner.sh).
+#
+# WHY ONE ConfigMap AND NOT ONE PER NAMESPACE
+# Backup jobs have to run in the namespace that owns their PVC -- a pod cannot mount a
+# volume from another namespace -- so every support object they need is namespace-local.
+# Reflector mirrors this ConfigMap (and backup-minio-secrets) into each participating
+# namespace so the script text exists exactly once in git. That is a deliberate widening:
+# apply/20-infra/reflector/reflector.yaml records the earlier decision to keep Reflector
+# to TLS material, and the reason it gave was that duplicating one value was cheaper than
+# widening a cluster-wide syncer. Six namespaces changes that arithmetic, and the header
+# there says plainly that the TLS-only scope was a convention enforced by review rather
+# than by RBAC -- so what is being reversed here is the convention, and the review that
+# reverses it is this file.
+#
+# WHY A ConfigMap AND NOT AN IMAGE
+# The scripts are GitOps state: a schedule change or a retention change has to be a commit
+# that a gate can read. Baking them into a custom image would put the backup policy outside
+# the tree, which is where this repo puts things it cannot check.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: backup-preflight
+  namespace: apps
+  labels:
+    app: backup
+    app.kubernetes.io/name: backup
+    app.kubernetes.io/component: preflight
+    app.kubernetes.io/part-of: pv-backup
+  annotations:
+    # Reflector mirrors this ConfigMap into every namespace that runs a backup job. The
+    # list is explicit rather than "all namespaces": a new participating namespace is a
+    # deliberate edit here, in the same commit as its RBAC, and not something that happens
+    # because a namespace appeared.
+    reflector.v1.k8s.emberstack.com/reflection-allowed: "true"
+    reflector.v1.k8s.emberstack.com/reflection-allowed-namespaces: "mealie,open-webui,sure"
+    reflector.v1.k8s.emberstack.com/reflection-auto-enabled: "true"
+    reflector.v1.k8s.emberstack.com/reflection-auto-namespaces: "mealie,open-webui,sure"
+data:
+  preflight.sh: |
+    #!/bin/sh
+    # Fail-fast probe of the S3 backend before restic starts.
+    # Exit 0 = endpoint answered, caller may proceed.
+    # Exit 1 = endpoint blackholed, caller must abort.
+    #
+    # Ported from k8s-techdelivery. The reason it exists there -- a CrowdSec ban on the VPS
+    # egress IP that made backups hang for four nights with no log line, because the log
+    # shipper used the same dead path -- is a different cause than titan's, but the same
+    # shape: the nightly connectivity blackout this cluster's own spec refuses to assume the
+    # absence of (spec 5). Probing converts a hung job into one loud line in the first minute.
+    set -u
+
+    # RESTIC_REPOSITORY looks like: s3:s3.l.arrieta.eu/titan-pv-backups
+    # Also tolerate an explicit scheme: s3:https://host/bucket
+    REPO_HOST="${RESTIC_REPOSITORY#s3:}"
+    REPO_HOST="${REPO_HOST#*://}"
+    REPO_HOST="${REPO_HOST%%/*}"
+
+    if [ -z "$REPO_HOST" ]; then
+      echo "PREFLIGHT: cannot parse host from RESTIC_REPOSITORY='${RESTIC_REPOSITORY}'" >&2
+      exit 1
+    fi
+
+    ATTEMPTS=3
+    CONNECT_TIMEOUT=30
+    PAUSE=15
+
+    echo "preflight: probing ${REPO_HOST} with 'restic cat config'"
+
+    # 'restic cat config' is the smallest possible authenticated backend request: one GET for
+    # the repo config file. No index read, no snapshot listing, so it stays fast on a large
+    # repo over a slow uplink while still exercising DNS, TCP, TLS, the endpoint and the
+    # credentials. It is used instead of busybox wget because wget's HTTPS depends on an
+    # external ssl_client helper that has broken across Alpine releases -- a base-image change
+    # must not be able to make every backup abort spuriously.
+    i=1
+    while [ "$i" -le "$ATTEMPTS" ]; do
+      ERR=$(timeout "$CONNECT_TIMEOUT" restic cat config 2>&1 >/dev/null)
+      RC=$?
+      case "$RC" in
+        0)
+          echo "preflight: endpoint answered, repository exists -- proceeding"
+          exit 0
+          ;;
+        124|130|143)
+          # Killed by `timeout`. 124 is GNU coreutils; 130 (SIGINT) and 143 (SIGTERM) are what
+          # the busybox timeout in the restic image actually produces. Treating only 124 as a
+          # timeout was the bug this block exists to fix: a blackhole exited 130, fell through
+          # the test, and printed "endpoint answered -- proceeding" above a connection that was
+          # timing out.
+          echo "preflight: attempt ${i}/${ATTEMPTS} timed out after ${CONNECT_TIMEOUT}s (rc=${RC})"
+          ;;
+        *)
+          case "$ERR" in
+            *"i/o timeout"*|*"context deadline"*|*"dial tcp"*|*"no such host"*|*"connection refused"*|*"network is unreachable"*|*"connect: "* )
+              # restic's own Go client can give up before `timeout` does, exiting 1. Exit 1 is
+              # indistinguishable from "repository does not exist", so a blackhole has to be
+              # caught by its text and not only by its exit code.
+              echo "preflight: attempt ${i}/${ATTEMPTS} endpoint unreachable (rc=${RC}): ${ERR}"
+              ;;
+            *)
+              # restic reached the endpoint and got an answer we did not like: repo not yet
+              # initialised, auth rejected, TLS mismatch. Those must proceed so first-run
+              # repository creation still works.
+              echo "preflight: endpoint answered (rc=${RC}) -- proceeding"
+              exit 0
+              ;;
+          esac
+          ;;
+      esac
+      i=$((i + 1))
+      if [ "$i" -le "$ATTEMPTS" ]; then
+        sleep "$PAUSE"
+      fi
+    done
+
+    echo "PREFLIGHT FAILED: ${REPO_HOST} blackholed -- timed out ${ATTEMPTS}x${CONNECT_TIMEOUT}s" >&2
+    echo "  Aborting before restic so we do not burn the job deadline." >&2
+    echo "" >&2
+    DNS_OUT=$(nslookup "$REPO_HOST" 2>&1) || DNS_OUT="(nslookup unavailable)"
+    echo "  DNS lookup for ${REPO_HOST}:" >&2
+    printf '%s\n' "$DNS_OUT" | tail -n 5 | sed 's/^/    /' >&2
+    echo "" >&2
+    echo "  On titan the first suspect is the mesh, not the cluster: s3.l.arrieta.eu is casa's" >&2
+    echo "  Traefik VIP reached over WireGuard, and this host pins the name in /etc/hosts" >&2
+    echo "  (nixos-configurations hosts/titan/configuration.nix) so a pod resolves it through" >&2
+    echo "  the cluster resolver instead. If DNS resolves but the probe still fails, the path" >&2
+    echo "  is blocked, not down." >&2
+    exit 1
+  ensure-repo.sh: |
+    #!/bin/sh
+    # Decide whether the restic repository exists, and create it only when the answer is
+    # genuinely "no". Ported from k8s-techdelivery (#149); the header there is the reason.
+    #
+    # The naive form was `if ! restic snapshots >/dev/null 2>&1; then restic init; fi`, and it
+    # read every failure -- timeout, 5xx, lock contention, wrong password, wrong bucket -- as
+    # "no repository, let me create one". "The probe was inconclusive" and "the repository is
+    # absent" were one branch, so a WAN outage produced a log line blaming repository creation
+    # for a TCP timeout.
+    #
+    # Exit 0 = repository is present and readable, or was just created.
+    # Exit 1 = do not proceed. Either first-run init failed, or the probe never answered the
+    #          question and guessing is not allowed.
+    set -u
+
+    ERR=$(restic snapshots 2>&1 >/dev/null)
+    RC=$?
+
+    if [ "$RC" -eq 0 ]; then
+      exit 0
+    fi
+
+    case "$ERR" in
+      *"repository does not exist"*|*"unable to open config file"*|*"The specified key does not exist"*)
+        # The genuine first-run signal for this s3: backend: restic reached the endpoint and the
+        # endpoint answered that the config object is not there.
+        echo "no repository at $RESTIC_REPOSITORY -- initialising"
+        if restic init; then
+          exit 0
+        fi
+        # init failed. Most likely another nightly job won the race and created the repo between
+        # our probe and our init, so re-check rather than assume -- a lost race is not a failure.
+        if restic snapshots >/dev/null 2>&1; then
+          echo "init failed but the repository is now readable -- carrying on"
+          exit 0
+        fi
+        echo "ABORT: no repository at $RESTIC_REPOSITORY and 'restic init' failed" >&2
+        exit 1
+        ;;
+    esac
+
+    # Everything else: a held lock, a wrong password, a 403, a 5xx, or a DNS/TCP failure that
+    # surfaced as exit 1. Note what is deliberately NOT matched above -- restic prints "Is the
+    # repository exists, are the backend credentials or the env variables 'RESTIC_PASSWORD'
+    # correct?" for a missing repo AND for a wrong password. Treating that as first run would
+    # let a bad Secret attempt an init. The accepted cost: a genuine from-scratch bucket
+    # rebuild needs one manual `restic init`.
+    echo "ABORT: could not read the repository at $RESTIC_REPOSITORY (restic snapshots rc=$RC)" >&2
+    printf '%s\n' "$ERR" | sed 's/^/  restic: /' >&2
+    echo "  Not running 'restic init': a failed probe is not evidence of an absent repository." >&2
+    exit 1
+  runner.sh: |
+    #!/bin/sh
+    # Discovery loop. One runner per participating namespace. It lists the PVCs in its own
+    # namespace, keeps the ones that opted in by annotation, and creates one child Job per
+    # volume. The annotation is the whole scope decision -- see the spec, "the annotation is
+    # the contract".
+    #
+    # WHY DISCOVERY INSTEAD OF ONE CRONJOB PER VOLUME
+    # A static CronJob has to name its PVC. That is fine for the PVCs declared in git and
+    # impossible for the ones created at runtime -- coder names a workspace volume
+    # coder-<uuid>-home and recreates it whenever a workspace is rebuilt. A manifest naming
+    # one of those silently backs up nothing from the day the workspace is recreated, with
+    # every gate green and the CronJob still reporting Success, because a CronJob that
+    # targets a PVC that no longer exists fails at mount time in a pod nobody looks at.
+    # Discovering at runtime makes the same question answerable from the cluster:
+    #
+    #   kubectl get pvc -A -L backup.titan.arrieta.eu/class
+    #
+    # WHAT THIS CANNOT DO
+    # A pod cannot mount a volume discovered after the pod started, so the runner does not
+    # back anything up itself. It creates a child Job per volume, and the child mounts. That
+    # is why this namespace needs RBAC to create jobs while techdelivery's bare service
+    # account needed none.
+    set -eu
+
+    NS=$(cat /var/run/secrets/kubernetes.io/serviceaccount/namespace)
+    ANNOT=backup.titan.arrieta.eu/class
+    RESTIC_IMAGE=${RESTIC_IMAGE:?RESTIC_IMAGE must be pinned by digest}
+    # Restic's own repository lock makes two concurrent backups of one volume fail rather than
+    # corrupt, but failing loudly at 03:00 is still worse than not starting, so skip a volume
+    # that already has a live job.
+    # component=pv-backup-job and not part-of=pv-backup: the runner's own job and the
+    # housekeeping jobs carry the broader label, and a selector matching the runner would
+    # count it and make every run conclude it had nothing to do.
+    LIVE=$(kubectl get job -n "$NS" -l app.kubernetes.io/component=pv-backup-job \
+      -o jsonpath='{range .items[*]}{.status.active}{"\n"}{end}' | awk '{s+=$1} END {print s+0}')
+    if [ "${LIVE:-0}" -gt 0 ]; then
+      echo "runner[$NS]: $LIVE backup job(s) already active in this namespace -- nothing to do"
+      exit 0
+    fi
+
+    # jsonpath rather than jq: the runner image is pinned for kubectl, and a dependency the
+    # image happens to contain is a dependency nobody declared. The annotation key is spelled
+    # out with escaped dots (how a namespaced key is written in a jsonpath) rather than derived
+    # from $ANNOT, because ${VAR//pat/rep} is a bashism and /bin/sh in this image is busybox
+    # ash. Renaming the annotation means changing it here, on the PVCs, and in the spec.
+    JP='{range .items[*]}{.metadata.name}|{.status.phase}|{.metadata.annotations.backup\.titan\.arrieta\.eu/class}|{.spec.resources.requests.storage}{"\n"}{end}'
+    kubectl get pvc -n "$NS" -o jsonpath="$JP" > /tmp/pvcs.txt
+
+    CREATED=0
+    SKIPPED=0
+    FAILED=0
+    if [ ! -s /tmp/pvcs.txt ]; then
+      echo "runner[$NS]: no PVCs in this namespace"
+      exit 0
+    fi
+    # Redirect from a file rather than piping into the loop: a pipeline runs its loop in a
+    # subshell, so every counter incremented inside it dies with that subshell and the exit
+    # status below would read a variable that never left zero.
+    while IFS='|' read -r PVC PHASE CLASS SIZE; do
+      [ -n "$PVC" ] || continue
+      case "$CLASS" in
+        ""|none)
+          echo "runner[$NS]: $PVC not opted in (class='${CLASS}') -- skipped"
+          SKIPPED=$((SKIPPED + 1))
+          continue
+          ;;
+      esac
+      if [ "$PHASE" != "Bound" ]; then
+        # Loud, not silent: an unbound PVC is a real problem and "no backup ran" is the only
+        # way some of them get noticed.
+        echo "runner[$NS]: FAIL $PVC is $PHASE, not Bound -- no backup" >&2
+        FAILED=$((FAILED + 1))
+        continue
+      fi
+
+      # Deadline scales with the volume instead of being hand-tuned per volume: 15 min per GiB,
+      # floor 1h, ceiling 8h. A killed restic run leaves unindexed packs that the nightly prune
+      # reclaims, so a too-short deadline costs bandwidth and a too-long one costs the blackout
+      # window -- the tradeoff techdelivery documents in its README.
+      NUM=$(printf '%s' "$SIZE" | sed 's/[^0-9].*//')
+      case "$SIZE" in
+        *Ti*) NUM=$((NUM * 1024)) ;;
+        *Mi*) NUM=1 ;;
+      esac
+      [ -n "$NUM" ] || NUM=1
+      DEADLINE=$((NUM * 900))
+      [ "$DEADLINE" -lt 3600 ] && DEADLINE=3600
+      [ "$DEADLINE" -gt 28800 ] && DEADLINE=28800
+
+      # Job names are capped at 63 chars and coder's PVC names are already ~40, so the name is
+      # truncated and the full PVC name travels as a label and as an env var instead.
+      SHORT=$(printf '%s' "$PVC" | cut -c1-32)
+      JOB="backup-${SHORT}-$(date +%m%d%H%M)"
+
+      # The PVC name reaches the container only as a label and as BACKUP_TAG, never as text
+      # interpolated into the script the child runs. A volume name is user-visible input and
+      # this script is created with it, not run with it.
+      if kubectl apply -n "$NS" -f - <<EOF
+    apiVersion: batch/v1
+    kind: Job
+    metadata:
+      name: $JOB
+      namespace: $NS
+      labels:
+        app: backup
+        app.kubernetes.io/name: backup
+        app.kubernetes.io/part-of: pv-backup
+        app.kubernetes.io/component: pv-backup-job
+        backup/target: $PVC
+        backup/class: $CLASS
+    spec:
+      backoffLimit: 1
+      activeDeadlineSeconds: $DEADLINE
+      ttlSecondsAfterFinished: 172800
+      template:
+        metadata:
+          labels:
+            app: backup
+            app.kubernetes.io/part-of: pv-backup
+            backup/target: $PVC
+        spec:
+          restartPolicy: Never
+          serviceAccountName: backup-job
+          # WHY root, and why no fsGroup: the workload volumes here have heterogeneous owning
+          # uids, and setting fsGroup makes kubelet recursively chgrp a RUNNING workload's
+          # data directory. Reading as root with DAC_OVERRIDE and a read-only mount is the
+          # option that cannot damage a live pod. Ported from techdelivery's scar tissue.
+          securityContext:
+            runAsNonRoot: false
+            runAsUser: 0
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+          - name: restic
+            image: $RESTIC_IMAGE
+            command: ["/bin/sh", "-c"]
+            args:
+            - |
+              set -eu
+              export TMPDIR=/tmp
+              sh /preflight/preflight.sh || {
+                echo "ABORT: preflight failed -- S3 endpoint unreachable, not starting restic" >&2
+                exit 1
+              }
+              sh /preflight/ensure-repo.sh || {
+                echo "ABORT: repository check failed -- see its output above" >&2
+                exit 1
+              }
+              echo "backing up \$BACKUP_TAG (\$BACKUP_SIZE) -> \$RESTIC_REPOSITORY"
+              restic backup /volume --host titan --tag "\$BACKUP_TAG" --one-file-system
+              # No forget/prune here. Retention is centralised in backup-housekeeping: prune
+              # takes an exclusive repository lock and full-scans the backend, so one prune
+              # per night instead of one per volume.
+              restic snapshots --tag "\$BACKUP_TAG" | tail -5
+            env:
+            - name: BACKUP_TAG
+              value: $PVC
+            - name: BACKUP_SIZE
+              value: $SIZE
+            envFrom:
+            - secretRef:
+                name: backup-minio-secrets
+            securityContext:
+              allowPrivilegeEscalation: false
+              seccompProfile:
+                type: RuntimeDefault
+              capabilities:
+                drop: ["ALL"]
+                add: ["DAC_OVERRIDE"]
+            resources:
+              requests:
+                cpu: 100m
+                memory: 512Mi
+              limits:
+                cpu: 500m
+                memory: 1Gi
+            volumeMounts:
+            - name: source
+              mountPath: /volume
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+            - name: preflight
+              mountPath: /preflight
+              readOnly: true
+          volumes:
+          - name: source
+            persistentVolumeClaim:
+              claimName: $PVC
+              readOnly: true
+          - name: tmp
+            emptyDir:
+              sizeLimit: 2Gi
+          - name: preflight
+            configMap:
+              name: backup-preflight
+              defaultMode: 0555
+    EOF
+      then
+        echo "runner[$NS]: created $JOB for $PVC (class=$CLASS size=$SIZE deadline=${DEADLINE}s)"
+        CREATED=$((CREATED + 1))
+      else
+        echo "runner[$NS]: FAILED to create job for $PVC" >&2
+        FAILED=$((FAILED + 1))
+      fi
+    done < /tmp/pvcs.txt
+
+    echo "runner[$NS]: created=$CREATED skipped=$SKIPPED failed=$FAILED"
+    kubectl get job -n "$NS" -l app.kubernetes.io/component=pv-backup-job -o name
+    if [ "$FAILED" -gt 0 ]; then
+      exit 1
+    fi
+    exit 0
