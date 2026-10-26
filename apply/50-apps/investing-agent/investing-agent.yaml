@@ -33,9 +33,10 @@
 #     llm.titan front door, whose header records `curl http://192.168.0.29:8731/health` having
 #     been run from inside this cluster. Nothing in this file needs a mesh exception.
 #
-# BEFORE ANY OF IT: `du -sh /opt/data` on the source host, and write the number in the bring-up
-# file. `local-path-retain` sets allowVolumeExpansion: false (apply/20-infra/storage-retain.yaml),
-# so 10Gi here is not a soft target — if the tree is bigger, the fix is PV surgery, not a resize.
+# PRE-FLIGHT, DONE 2026-10-26: `du -sh /opt/data` on the source host = **11M** against a 10Gi
+# request. That matters because `local-path-retain` sets allowVolumeExpansion: false
+# (apply/20-infra/storage-retain.yaml), so the claim cannot be grown later — 10Gi is the source's
+# own value and it is kept rather than trimmed to the 11M actually present.
 #
 # THE STATE MOVE, and the one thing that is easy to get wrong.
 # The 10 Gi is being copied by hand. `local-path-retain` is volumeBindingMode: WaitForFirstConsumer,
