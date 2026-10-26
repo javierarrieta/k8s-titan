@@ -172,6 +172,15 @@ the stream is rejected per-pod, silently, with promtail reporting healthy.
 - `make validate` deliberately fails when `apply/10-secrets` holds nothing. Do not
   soften that guard to make a check pass: a gate that passes vacuously is worse than
   no gate.
+- **No attribution trailers in commit messages.** No `Co-Authored-By:`, no `Generated with`,
+  nothing naming a model, vendor or agent as a co-author or contributor. Written 2026-10-26,
+  after an agent session put `Co-Authored-By: Claude <noreply@anthropic.com>` on four commits of
+  a branch while its own `PI_MODEL` read `halogen-qwen3.8-flash-next` and `origin/main` had never
+  carried the trailer once. One trailer, two failures: it named a contributor who was not
+  involved, and it survived review, because a trailer is the sort of line an agent emits from
+  habit and a reviewer skims. The model behind a session is not a repo contributor and is not
+  always what it claims to be. If provenance has to be recorded, record the session id — it is in
+  `PI_SESSION_ID`, it is verifiable, and it does not invent a person.
 
 ## Before committing
 
