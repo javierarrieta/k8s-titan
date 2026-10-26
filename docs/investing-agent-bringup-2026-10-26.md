@@ -99,13 +99,49 @@ copy is a seconds-long transfer, not one to schedule. The lesson is in the metho
   SQLite FTS spill grows into it, kubelet evicts the pod and on a single node that takes the gateway
   with it.
 
-## Known gate gap this migration exposed
+## Gate gap this migration exposed — closed
 
-Nothing checks that a hand-written Deployment's `envFrom.secretRef.name` resolves to a Secret that
-exists. `make release-secrets` walks `HelmRelease` objects only — its own output says so — and
-`make secrets-placement` proves placement, encryption and listing, never consumers. A typo'd name
-builds green and produces a Pending pod naming a Secret that plainly exists, which is the same
-failure this PR had to reason about for the ciphertext. The name here was checked by hand against
-`apply/10-secrets/investing-agent-secrets.yaml`. Closing it properly is a gate change of its own,
-with an allow-list for in-cluster-produced Secrets (`titan-tls`, `coder-tls`, `tesla-streaming-tls`,
-`postgres-exporter-credentials`), not a line added to a migration PR.
+Nothing used to check that a hand-written Deployment's `envFrom.secretRef.name` resolves to a Secret
+that exists. `make release-secrets` walks `HelmRelease` objects only, and `make secrets-placement`
+proves placement, encryption and listing, never consumers. A typo'd name built green and produced a
+Pending pod naming a Secret that plainly exists.
+
+`make secret-refs` (#165) closes it: `envFrom`, `secretKeyRef`, volume mounts and the protected-Secret
+references of every hand-written workload, with an allow-list for in-cluster-produced Secrets that is
+`apps/titan-tls` and nothing else.
+
+## Live edits made inside the volume, 2026-10-26
+
+**Why this section exists.** Git pins an image, three env vars and a PVC. Everything hermes actually
+does is decided by files inside the claim — `config.yaml`, two `.env` files, a profile tree — and no
+gate in this repo can see any of them. Every check stayed green while two of those files were wrong.
+Anyone who copies this volume inherits all of the below silently, which is why it is written down
+rather than left in a terminal scrollback.
+
+| file | change | why | backup | proof it took |
+|---|---|---|---|---|
+| `profiles/invest/config.yaml` | `model.default` `Qwopus3.6-35B` → `halogen-qwen3.8-flash-next`; `model.base_url` `:8001` → `:8731` | `:8001` is decommissioned. `:8731` serves exactly one model, so the id was not a free choice — `/v1/models` returned `['halogen-qwen3.8-flash-next']` | `config.yaml.bak-20261026` | gateway up, and a conversation completed over Discord |
+| `profiles/invest/.env` | `DISCORD_BOT_TOKEN` commented out | the token there was revoked at Discord; replacing it with `default`'s live token produced `Profile 'default' and 'invest' both configure discord with the same credential — refusing to start the duplicate`. `discord:` in that config has no `enabled:` key, so the token's presence is the switch | `.env.bak-20261026` | `gateway_state.json`: `discord.state: connected`, `served_profiles: [default, invest]` |
+| `.hermes/.env.backup` | moved out of the volume; `ls "$HERMES_HOME"/.env*` no longer lists it. Intended destination `/root/hermes-env-backup-2026-10-26` on the titan host — not re-verified from here | held superseded tokens that made token-shaped grep forensics ambiguous — three matches, two of them dead ghosts | `/root/hermes-env-backup-2026-10-26` (unverified) | `ls "$HERMES_HOME"/.env*` no longer lists it |
+| `.hermes/active_profile` | created, then removed | experiment: making `invest` the launch profile. The gateway refused to start — `invest` was never folded into multiplex — and the pod crash-looped seven times | n/a, deleted | absent; pod healthy |
+| `profiles/invest/.env` ownership | restored to `hermes:hermes` | `kubectl exec` runs as root, so a file rewritten that way changes owner | n/a | `ls -la` shows `hermes hermes` |
+
+**Pre-existing, not from today:** `.hermes/.env.new` (18 B) and `.hermes/.env.tmp` (309 B), both dated
+May 29 — leftovers from someone's earlier in-place edit. They are credential-shaped files sitting next
+to the real one and are worth deleting on purpose rather than by accident.
+
+**What to re-check after any future copy of this volume.** The failure mode that bit was a service
+moving and a profile config not following it, which is invisible from outside and silent from inside:
+the pod is Ready, the dashboard answers, cron runs, and every model call fails.
+
+Read the endpoint the profile itself names, then ask it, and confirm the platform state:
+
+```
+kubectl --context titan -n apps exec deploy/investing-agent -- sh -c 'grep -A4 "^model:" "$HERMES_HOME/profiles/invest/config.yaml"'
+kubectl --context titan -n apps exec deploy/investing-agent -- sh -c 'grep -o "\"state\": \"[a-z]*\"" "$HERMES_HOME/gateway_state.json"'
+```
+
+Then curl the `base_url` that first command printed, at `/v1/models`, and expect `200`. Three
+commands, and they are the only ones that would have caught anything this section documents.
+
+
