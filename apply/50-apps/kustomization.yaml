@@ -112,3 +112,15 @@ resources:
   # docs/superpowers/specs/2026-10-23-titan-sure-design.md.
   - sure/sure-db.yaml
   - sure/sure.yaml
+  # Hermes, the Nous Research investing agent, migrated from ../k8s-techdelivery with its object
+  # names intact. One hand-written manifest (PVC + Deployment + Service in namespace `apps`), so it
+  # is the shape §3.2 of the 2026-10-19 design keeps in this stage: no bulk authored here, and a bad
+  # field freezes coder's and authentik's *updates*, not coder. It passes the §3.1 admission test —
+  # one pod, no database, no public hostname, credentials only from its own Secret — which is why it
+  # lands in the existing `apps` namespace rather than buying a new one.
+  #
+  # It runs at replicas: 1 from the first merge, at the same moment ../k8s-techdelivery scales its
+  # copy to 0: `local-path-retain` is WaitForFirstConsumer, so a stopped app here would leave the
+  # PVC unbound and nowhere to rsync the hand-moved 10 Gi into. The file's own header is the
+  # sequence, and its last step is the pod delete that makes the copied files take effect.
+  - investing-agent/investing-agent.yaml

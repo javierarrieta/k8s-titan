@@ -1,0 +1,248 @@
+# Hermes (the Nous Research investing agent), migrated from ../k8s-techdelivery
+# apply/50-apps/apps/investing-agent.yaml. Same object names, same namespace name (`apps`),
+# same image pin — deliberately not an upgrade: a move and a version bump in one change means a
+# regression has two suspects. The pin is verified live on Docker Hub (HTTP 200 on
+# /v2/repositories/nousresearch/hermes-agent/tags/v2026.9.24/); upstream has since moved to
+# semver (`v0.22.5`), which is a separate change.
+#
+# The bring-up record — what was measured before merging, what has run, and what is still unproven —
+# is docs/investing-agent-bringup-2026-10-26.md. This header is the design; that file is the log.
+#
+# WHAT CHANGED ON THE WAY ACROSS, and why:
+#   * storageClassName local-path -> local-path-retain. Every PVC in this repo uses the Retain
+#     class (apply/20-infra/storage-retain.yaml); it is this cluster's only deletion mitigation,
+#     and it is a deletion mitigation and NOT a backup.
+#   * nodeSelector kubernetes.io/arch: amd64 dropped. One amd64 node — open-webui's spec §
+#     (docs/superpowers/specs/2026-10-20-titan-open-webui-design.md) recorded dropping the same
+#     line from casa for the same reason.
+#   * the Secret is re-encrypted, not copied: the two repos share four age keys but not the
+#     cluster key, so techdelivery's ciphertext is unreadable to titan's kustomize-controller.
+#   * the Secret uses stringData, not data:. A Secret's `data:` values are base64 by contract and
+#     a sops ciphertext is not base64, so the API server refuses the tree while it is still
+#     encrypted — invisible in the cluster, because Flux decrypts before it applies, and fatal to
+#     `make dry-run`, which submits it undecrypted. 30 of the 32 Secrets here already used
+#     stringData; `make secrets-placement` now rejects `data:` so it stays that way.
+#   * the container's process tree changed, and this is the one deviation that is NOT a port. The
+#     source's `gateway & dashboard & wait` left a dead gateway invisible (the args block below is
+#     why); `exec` fixes that and changes what PID 1 is. It is its own commit on this branch so it
+#     can be reverted on its own, and docs/investing-agent-bringup-2026-10-26.md records the test
+#     that proves it.
+#   * OPENAI_BASE_URL is unchanged and still reachable: it is http://192.168.0.29:8731, casa's
+#     halogen on llm01, a home-LAN address. Titan pods reach it over the WireGuard mesh — this
+#     repo already sends the identical endpoint to Sure (apply/50-apps/sure/sure.yaml) and to the
+#     llm.titan front door, whose header records `curl http://192.168.0.29:8731/health` having
+#     been run from inside this cluster. Nothing in this file needs a mesh exception.
+#
+# PRE-FLIGHT, DONE 2026-10-26: the source volume is 161M against this 10Gi claim (~64x headroom),
+# measured at the path its own PV names — /opt/k3s/volumes/pvc-21879166-…_apps_investing-agent-pv-claim
+# on the techdelivery host. Not /opt/data: that is the container mount path, and the first
+# du -sh measured a different directory entirely. The number mattered because local-path-retain
+# sets allowVolumeExpansion: false (apply/20-infra/storage-retain.yaml), so the claim cannot be
+# grown later; 10Gi is the source's own value and is kept rather than trimmed.
+#
+# THE STATE MOVE, and the one thing that is easy to get wrong.
+# The state move is being done by hand. `local-path-retain` is volumeBindingMode: WaitForFirstConsumer,
+# so the PVC does not bind and the backing directory does not exist until a pod schedules — an
+# app started at zero replicas would leave nowhere to copy into. Hence replicas: 1 here and
+# replicas: 0 on the source at the same time: the source stops writing, this side binds.
+#   1. source scaled to 0            -> the old pod stops, writes stop, the old bytes are quiescent
+#   2. this app merges at replicas: 1 -> PVC binds and the backing directory exists. Read its path
+#      off titan's own PV (kubectl get pv -o custom-columns=CLAIM:.spec.claimRef.name,PATH:.spec.local.path)
+#      — the name embeds the random PV name, so it cannot be guessed. The app boots on empty state
+#      (harmless, it is about to be overwritten — but it does mean the first minutes of cron runs
+#      are against nothing)
+#   3. rsync from the source PV's host path (see PRE-FLIGHT above — not /opt/data, which is the
+#      container path) into that directory, then chown -R 10000:10000 (the pod runs as
+#      uid/gid 10000 with fsGroup 10000; a tree owned by anything else reads as a corrupt DB)
+#   4. kubectl -n apps delete pod -l app=investing-agent
+# Step 4 is the one that gets missed: the running pod already has the old files open, so a copy
+# that lands underneath it is not picked up until the process restarts. Prefer `delete pod` over
+# `kubectl rollout restart` — the restartedAt annotation rollout restart writes is not owned by
+# git, and a pod delete is unambiguous. Do NOT `kubectl scale` anything here: replicas is
+# git-managed and Flux reverts it at the next sync.
+# Then the source teardown is a separate change, not part of this one.
+#
+# `make dry-run DRYRUN_CONTEXT=<admin context>` was run on this branch and all five stages were
+# accepted (50-apps with 73 objects). It is not covered by `make check`, and the PVC is the object
+# class that took this stage red live once already (apply/50-apps/coder/workspaces.yaml:41-47
+# records it) — no offline gate can see a live admission rule. The first attempt rejected
+# `10-secrets`, which is how the `data:`/base64 problem below got found; the log is
+# docs/investing-agent-bringup-2026-10-26.md.
+#
+# NOT BACKED UP ON TITAN. techdelivery protected this claim with the `backup-investing-agent`
+# restic CronJob (apply/30-backup/apps/backup-apps.yaml there). This cluster ships no generic PV
+# backup — AGENTS.md, "Backups" — so the 10 Gi here is unprotected until that gap is closed or a
+# restic job is ported. Named exposure, not a surprise.
+#
+# NO INGRESS, same as the source: the dashboard is reachable in-cluster only, at
+# http://investing-agent.apps.svc:80 (Service 80 -> container 9119). It still carries its own
+# basic auth (HERMES_DASHBOARD_BASIC_AUTH_*), which is what makes a future public hostname safe
+# to add — adding one also means adding this namespace to the secretTemplate allow-list on
+# apply/40-certificates/titan-wildcard.yaml if it needs titan-tls.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: investing-agent-pv-claim
+  labels:
+    app: investing-agent
+  namespace: apps
+spec:
+  accessModes:
+  - ReadWriteOnce
+  storageClassName: local-path-retain
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: investing-agent
+  namespace: apps
+  # Live only because namespace `apps` is in Reloader's scope: it is the HelmRelease's own
+  # namespace, which the chart adds even with watchGlobally: false. An annotated workload in a
+  # NEW namespace needs a line in apply/20-infra/reloader/reloader.yaml or this annotation is
+  # inert — the defect that note in reloader.yaml records three times over.
+  annotations:
+    reloader.stakater.com/auto: "true"
+spec:
+  # 1, deliberately, and at the same moment the source goes to 0 — see the state-move sequence in
+  # the header. WaitForFirstConsumer means zero replicas here would leave the PVC unbound with
+  # nowhere to rsync the migrated bytes into.
+  replicas: 1
+  # RWO PVC: a RollingUpdate schedules pod 2 while pod 1 still holds the volume and the new pod
+  # sits Pending on a volume conflict forever.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: investing-agent
+  template:
+    metadata:
+      labels:
+        app: investing-agent
+    spec:
+      # Chosen, not inherited. The gateway is PID 1 now, so SIGTERM reaches it directly and this is
+      # how long it gets to flush SQLite before SIGKILL. 60s is headroom over the 30s default for a
+      # long write; if hermes ignores SIGTERM entirely the kill still lands here rather than at the
+      # node's default.
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10000
+        fsGroup: 10000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: investing-agent
+        image: docker.io/nousresearch/hermes-agent:v2026.9.24
+        # PID 1 has to be the worker, not a shell waiting on two backgrounded children.
+        #
+        # The source ran `gateway run & dashboard & wait`, and both of its failure modes read as
+        # healthy: `wait` returns only when BOTH children are gone, so a gateway that exits leaves
+        # the container Running and Ready — the probes below watch the dashboard's port and never
+        # the gateway — with every cron run silently stopped; and `sh` does not forward SIGTERM to
+        # background children, so each Recreate rollout sat out the whole grace period and then
+        # SIGKILLed SQLite mid-write on a claim with no restore point. opencloud.yaml:144-147
+        # makes the same argument about its own PVC.
+        #
+        # `exec` puts the gateway at PID 1: the container exits with the gateway's status, so
+        # kubelet restarts the pod the moment the worker dies, and SIGTERM lands on the process
+        # that owns the writes. The dashboard stays a background child; if it dies the pod goes Not
+        # Ready and the liveness probe restarts it.
+        #
+        # Residual gap, named rather than probed: a gateway that is alive but wedged is still
+        # invisible, because it exposes no health endpoint of its own.
+        command: ["/bin/sh", "-c"]
+        args:
+        - |
+          rm -f /opt/data/gateway.lock
+          hermes dashboard --host 0.0.0.0 --no-open &
+          exec hermes gateway run
+        env:
+          - name: HERMES_HOME
+            value: /opt/data/.hermes
+          - name: HERMES_CRON_TIMEOUT
+            value: "3600"
+          # Explicit rather than inherited — /tmp is already the default. The emptyDir mounted at
+          # /tmp below is what actually makes it writable; see its comment.
+          - name: TMPDIR
+            value: /tmp
+        envFrom:
+        - secretRef:
+            name: investing-agent-secrets
+        ports:
+        - name: http
+          containerPort: 9119
+          protocol: TCP
+        readinessProbe:
+          tcpSocket:
+            port: 9119
+          initialDelaySeconds: 10
+          periodSeconds: 15
+        # Startup first so a cold start against a just-restored 10 Gi can never race liveness:
+        # liveness only begins once this has succeeded at least once. 10 + 19*15s ≈ 5 minutes of
+        # allowed cold start, generous on purpose — the alternative to that is a restart loop.
+        startupProbe:
+          tcpSocket:
+            port: 9119
+          initialDelaySeconds: 10
+          periodSeconds: 15
+          failureThreshold: 20
+        # The dashboard is a background child, so its death does not end the container. Without
+        # this the pod would sit Running with a dead UI and a live gateway forever. ~2 minutes of
+        # dead dashboard before a restart, which is also the worst-case detection time for it.
+        livenessProbe:
+          tcpSocket:
+            port: 9119
+          periodSeconds: 20
+          timeoutSeconds: 5
+          failureThreshold: 3
+        resources:
+          limits:
+            cpu: 1500m
+            memory: 1.5Gi
+          requests:
+            cpu: 100m
+            memory: 250Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: [ALL]
+          readOnlyRootFilesystem: true
+        volumeMounts:
+        - name: investing-agent-data-volume
+          mountPath: /opt/data
+          readOnly: false
+        - name: scratch
+          mountPath: /tmp
+      volumes:
+      - name: investing-agent-data-volume
+        persistentVolumeClaim:
+          claimName: investing-agent-pv-claim
+      # Writable scratch for SQLite temp/FTS spill under readOnlyRootFilesystem.
+      #
+      # The cap is hard and the failure mode is not a write error: kubelet EVICTS the pod when an
+      # emptyDir goes over, and on a single node that takes the gateway down with it. 512Mi is the
+      # source's value, kept because the node's free space has not been measured here. If spill
+      # ever grows into it, raise this before chasing a corrupt-looking database.
+      - name: scratch
+        emptyDir:
+          sizeLimit: 512Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: investing-agent
+  namespace: apps
+  labels:
+    app: investing-agent
+spec:
+  type: ClusterIP
+  selector:
+    app: investing-agent
+  ports:
+    - port: 80
+      name: http
+      targetPort: 9119
+      protocol: TCP
