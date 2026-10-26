@@ -127,3 +127,14 @@ resources:
   # vouch for this name the way it does for the chart-consumed ones. An unlisted file here would build
   # green and be silently never applied, which is the lie `make secrets-placement` exists to catch.
   - llm-bearer-token.yaml
+  # Hermes, the Nous Research investing agent, re-encrypted on the way across from
+  # ../k8s-techdelivery rather than copied. The two repos share four age keys but NOT the cluster
+  # key, so techdelivery's ciphertext is unreadable to titan's kustomize-controller: copying the
+  # file would have produced a Pending pod naming a Secret that plainly exists. Decrypted here and
+  # re-encrypted through this repo's own .sops.yaml, so the recipient set is titan-k8s plus the four
+  # human/workspace keys. Values are unchanged — the app is the same app.
+  #
+  # Consumed by a Deployment's envFrom in namespace `apps`, not by a HelmRelease, so `make
+  # release-secrets` cannot vouch for this name; an unlisted file here would build green and be
+  # silently never applied, which is the lie `make secrets-placement` exists to catch.
+  - investing-agent-secrets.yaml
