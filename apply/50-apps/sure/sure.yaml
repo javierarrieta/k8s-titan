@@ -331,12 +331,33 @@ spec:
         # against 24,320 available, so the slicer never fires - which is also why raising
         # LLM_CONTEXT_WINDOW past 32768 buys nothing while this stays small.
         #
-        # Not higher than 25 deliberately: past this the limit is model quality, not tokens, and the
-        # failure is silent. halogen-qwen3.8-flash-next is a reasoning model, so a prompt it cannot
-        # finish returns finish_reason=length with content:"" - indistinguishable from "nothing to
-        # categorize" at health=ok. If categorization ever looks quiet, this is the first value to
-        # put back down.
-        LLM_MAX_ITEMS_PER_CALL: "25"
+        # Set to 15 on 2026-10-26, down from the 25 raised in #160. The merchant detector was failing
+        # 35 of 96 batches with
+        #   Failed to auto-detect merchants for family ...: Could not parse JSON from response:
+        #   {"merchants": [{"transaction_id": ...   <- starts as valid JSON, then fails all four
+        #                                             parse strategies, each of which needs a })
+        # i.e. the response ran out of budget mid-JSON. Output per item is larger for merchants than for
+        # categories (business_name and business_url, plus per-merchant reasoning), which is why
+        # categorization ran 77/77 clean at the same batch size while merchant detection did not.
+        #
+        # FALLBACK: if "Failed to auto-detect merchants" still appears after a run at 15, drop this to
+        # 10 - the tail of the output-length distribution reaches 8192 tokens at 15 and does not at 10.
+        # If it persists AT 10, the cause is not truncation and this knob is the wrong lever; the model
+        # was also seen emitting the string "null" where JSON null belonged, which would be a schema
+        # problem. Note Sure logs only raw.truncate(200) at the raise site, so the end of a bad response
+        # is never visible; AI_DEBUG_MODE=true is the only way to get more.
+        #
+        # This is the knob that bounds call count: the executors each_slice pending items by it FIRST
+        # (app/models/rule/action_executor/auto_categorize.rb:55, auto_detect_merchants.rb:28,
+        # provider_merchant/enhancer.rb:11) and only then hand each slice to BatchSlicer, which sub-splits
+        # solely when the slice exceeds max_input_tokens. At these sizes a slice is a few hundred to a few
+        # thousand tokens against 24,320 available, so the slicer never fires - which is also why raising
+        # LLM_CONTEXT_WINDOW past 32768 buys nothing while this stays small.
+        #
+        # It is a SHARED knob: categorization, merchant detection and the merchant enhancer all read it,
+        # so it cannot be tuned per action. Lowering it costs categorization throughput, which is cheap
+        # only because the backlog is already categorized.
+        LLM_MAX_ITEMS_PER_CALL: "15"
         # Raised 2026-10-25 from 120/180 to 300/360. The old ceiling sat ~30% above the slowest batch
         # that actually succeeded, so it was converting "slow" into "failed" for no protective reason:
         # five AutoCategorizeJob runs completed in 65.9 / 77.7 / 81.6 / 85.5 / 92.8s and two died at

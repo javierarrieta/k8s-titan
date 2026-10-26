@@ -238,7 +238,7 @@ So until upstream grows an `extra_body`, the mitigation is budget and batch size
 ```
 LLM_CONTEXT_WINDOW=32768          # Sure's own default is 2048
 LLM_MAX_RESPONSE_TOKENS=8192      # default is far smaller; reasoning eats it
-LLM_MAX_ITEMS_PER_CALL=25         # Sure's default; bounds call count before the token slicer does
+LLM_MAX_ITEMS_PER_CALL=15         # shared by categorize + merchant detection; 25 truncated merchant JSON
 LLM_JSON_MODE=auto
 OPENAI_REQUEST_TIMEOUT=300        # was 120; 25-item reasoning batches land at 90-110s
 AI_RESPONSE_TIMEOUT=360           # stays above the per-request budget
