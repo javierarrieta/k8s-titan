@@ -165,7 +165,7 @@ spec:
           type: RuntimeDefault
       containers:
       - name: investing-agent
-        image: docker.io/nousresearch/hermes-agent:v2026.9.24
+        image: docker.io/nousresearch/hermes-agent:v0.22.5
         # PID 1 has to be the worker, not a shell waiting on two backgrounded children.
         #
         # The source ran `gateway run & dashboard & wait`, and both of its failure modes read as
