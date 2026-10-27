@@ -19,7 +19,7 @@ spec:
       sourceRef:
         kind: HelmRepository
         name: cert-manager-webhook-ovh
-      version: "0.6.0"
+      version: "0.9.19"
   interval: 1h0s
   releaseName: cert-manager-webhook-ovh
   # The webhook chart templates cert-manager.io kinds (its serving Certificate and
@@ -57,7 +57,7 @@ spec:
           applicationSecretRef:
             name: ovh-domain-secrets
             key: OVH_APPLICATION_SECRET
-          consumerKeyRef:
+          applicationConsumerKeyRef:
             name: ovh-domain-secrets
             key: OVH_CONSUMER_KEY
       - name: le-staging-titan
@@ -75,6 +75,6 @@ spec:
           applicationSecretRef:
             name: ovh-domain-secrets
             key: OVH_APPLICATION_SECRET
-          consumerKeyRef:
+          applicationConsumerKeyRef:
             name: ovh-domain-secrets
             key: OVH_CONSUMER_KEY
