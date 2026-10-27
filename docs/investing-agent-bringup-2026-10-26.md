@@ -154,7 +154,7 @@ before merging. The add is deliberate and is now the design record at the bottom
   `*.titan.arrieta.eu`'s depth, so the add needed no new Certificate and no DNS record, and no edit
   to `apply/40-certificates/titan-wildcard.yaml`: the Secret arrives through the Reflector
   allow-list and `apps` was already on it.
-- **No forward-auth middleware** was added. The dashboard's own basic auth
+- **No forward-auth middleware** was added. The dashboard's own login
   (`HERMES_DASHBOARD_BASIC_AUTH_*`) is the gate, which is the property that made a public hostname
   safe to plan — and the credential behind it is machine-generated, operator-attested 2026-10-27, which
   is the half of that sentence the rate-limit decision turns on. Adding a proxy-side gate would have
@@ -162,12 +162,12 @@ before merging. The add is deliberate and is now the design record at the bottom
 - **The router is pinned to the `websecure` entrypoint** —
   `traefik.ingress.kubernetes.io/router.entrypoints: websecure` on the `Ingress` annotations, the
   same line `apply/50-apps/llm/llm.yaml` draws for its bearer token — so cleartext is refused rather
-  than redirected, because the static basic-auth credential is in play either way. There is no global
+  than redirected, because the dashboard's own credential is in play either way. There is no global
   HTTP→HTTPS redirect on this cluster's Traefik to lean on instead, which was measured, not assumed:
   `http://meals.titan.arrieta.eu/` (no pin) answers **200** over cleartext and
   `http://llm.titan.arrieta.eu/` (pinned) answers **404**. So the annotation is the whole mechanism
   and nothing in this repo notices it being removed.
-- **Nothing rate-limits the host.** The dashboard's basic auth is the only gate on a public hostname,
+- **Nothing rate-limits the host.** The dashboard's login is the only gate on a public hostname,
   so failed logins are unthrottled at the proxy. Traefik 3.7.8 ships an OSS `rateLimit` middleware and
   the `Middleware` CRD is already used by `observability-grafana-auth@kubernetescrd`, so it is a
   two-line add — deliberately not added. The decision, and the residual it leaves, are in
@@ -231,20 +231,47 @@ lockout, with the pod healthy and every gate green.
 The rule stays, for the next host that is not behind a machine-generated credential: **add the middleware
 if the password is human-chosen** — measure one console page load first and set the burst above it.
 
-After merge, the two commands that prove the add behaved:
+### Live check after merge, 2026-10-27 — run, and passing
 
-```sh
-# expect 404; a 200 means the websecure pin is gone and the host is serving over cleartext
-curl -o /dev/null -w '%{http_code}\n' http://investing-agent.titan.arrieta.eu/
-# expect the dashboard's own auth response, not a Traefik 404
-curl -o /dev/null -w '%{http_code}\n' https://investing-agent.titan.arrieta.eu/
+Merged as `3d780ea`. Flux applied it to the `apps` stage (`lastAppliedRevision: main@sha1:3d780ea…`,
+`ReconciliationSucceeded`) and the `Ingress` came up with the annotation intact:
+
+```console
+$ kubectl --context titan -n apps get ingress investing-agent -o jsonpath='{.metadata.annotations}'
+{"traefik.ingress.kubernetes.io/router.entrypoints":"websecure"}
 ```
 
-Before merge both answer 404 — Traefik's own 404, because no router matches the host yet — which is
-why the pair has to be run after the sync, not before.
+Then the pair that proves the add behaved:
+
+```console
+$ curl -o /dev/null -w '%{http_code}\n' http://investing-agent.titan.arrieta.eu/
+404
+$ curl -o /dev/null -w '%{http_code}\n' https://investing-agent.titan.arrieta.eu/
+302
+```
+
+- **The 404 on `http://` is the fix working** — refused, not redirected, as claimed. A 200 there is the
+  signature of the annotation having been deleted.
+- **The 302 on `https://` is the gate, not a fault**: `location: /login?next=%2F`, and following it
+  reaches a 200 login page. Before merge both hosts answered 404 — Traefik's own, no router matching the
+  host yet — which is why the pair has to be run after the sync rather than before.
+- **TLS is the wildcard**: `CN=titan.arrieta.eu`, notBefore 2026-10-03, notAfter 2027-01-01, served
+  through the reflected `titan-tls`. The handshake is the whole proof — the check ran as the read-only
+  `k8s-reader` identity, which is Forbidden on Secrets by design, so nothing here read the certificate.
+
+**The gate is a form login, not HTTP Basic.** The Secret's keys are named `HERMES_DASHBOARD_BASIC_AUTH_*`,
+but `GET /` answers 302 to `/login?next=%2F` and no response carries `WWW-Authenticate`; what
+`HERMES_DASHBOARD_BASIC_AUTH_SECRET` signs is the session cookie that follows a successful login. The
+manifest said "basic auth" and now says login. The posture is unchanged — and a session cookie loose in
+cleartext is a worse outcome than one basic-auth header, which is one more reason the entrypoint pin is
+the line that matters.
+
+**Not set, deliberately left that way:** no HSTS header on this host. Harmless while `http://` answers 404
+— a downgrade needs an active attacker, not a stale bookmark — so a nit, not a finding.
 
 `make dry-run` on this branch now builds and accepts `50-apps` with **74** objects (the Ingress is
-one of them). Nothing about the add is covered by an offline gate that did not exist before — the
+one of them); the stage builds to **77** on main as of 2026-10-27, three up from main-side merges rather
+than anything here. Nothing about the add is covered by an offline gate that did not exist before — the
 `Ingress` is a core type and `crd-check`'s scope is custom resources only, and the live API server
 was the one that accepted it (the same gate that caught the `data:`/base64 Secret defect). Two
 Ingress fields sit outside every gate here and are worth naming: `spec.tls[].secretName` —
