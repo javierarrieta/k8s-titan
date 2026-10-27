@@ -270,6 +270,21 @@ honest limit is written in its docstring: it proves `ALLOWED_OIDC_DOMAINS` is no
 it contains the domain of the identity that will sign in, and a non-empty list is exclusive — a miss
 refuses that identity after a successful IdP login, with every gate green.
 
+`make chart-values-check` is in `check` and in its own CI job, and it is deliberately not in
+`check-ci`: it pulls every pinned chart over the network, and `check-ci`'s contract is the tree
+alone. It exists because PR #176 bumped `cert-manager-webhook-ovh` `0.6.0` → `0.9.19`, every
+keyless gate went green, and the chart cannot render those values at all — chart 0.7.0 added
+`values.schema.json`, which requires `issuers[].ovhAuthenticationMethod` and rejects the older
+`consumerKeyRef`, so helm fails before it applies anything and the `HelmRelease` sits red while
+the old pod keeps solving challenges. Nothing here could see it: the `HelmRelease` object is
+legal, its `values` map is `x-kubernetes-preserve-unknown-fields` in the Flux CRD, and
+`release-secrets` never looks at the shape around a Secret name. The only authority on a chart's
+value contract is the chart. Its honest limits are in `tools/chart-values-check.py`: it proves
+the values render, not that the rendered manifest is what was meant; a `HelmRelease` using
+`valuesFrom` or a range pin is skipped out loud and a clean result does not cover it; and it
+renders the pinned version, so it catches an automated bump after it is proposed and never
+before.
+
 `make kustomize-listing` is in both, and it is not stylistic: `apply/50-apps/coder/coder-db.yaml` was
 committed, built green, reviewed green, and named by no kustomization, so Flux would never have
 applied it. A manifest nobody lists is a manifest that does not exist.
