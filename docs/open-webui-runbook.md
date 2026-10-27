@@ -125,6 +125,66 @@ Not covered by any of that: the four human checks above, and forcing the bluepri
 proves the app starts and answers, not that a person can sign in — the OIDC client was mounted and
 not yet applied at that point (§5).
 
+## 6a. Web search (SearXNG) — and why the env vars may not be enough
+
+Web search runs through the SearXNG in `apply/50-apps/searxng/searxng.yaml`: one pod, namespace
+`apps`, ClusterIP only, no Ingress and no hostname. open-webui asks it questions at
+`http://searxng.apps.svc.cluster.local/search` — see that file's header for why the FQDN is
+required and why `formats: [html, json]` is the line that makes the whole thing work.
+
+**The trap.** `ENABLE_WEB_SEARCH`, `WEB_SEARCH_ENGINE` and `SEARXNG_QUERY_URL` are *persistent*
+config. At startup open-webui seeds every known key into the `config` table and, from then on, the
+row wins over the environment: `Config.seed_defaults` (`backend/open_webui/models/config.py:248-271`
+at v0.12.3) inserts a key **only when it is absent**, and `Config.get` prefers the row. So merging
+the env vars into the Deployment does not, by itself, turn search on for an instance that has already
+booted once — which is every instance of this deployment after 2026-10-20.
+
+Check which world you are in before touching anything:
+
+```sh
+curl -s https://open-webui.titan.arrieta.eu/config | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("web_search"))'
+```
+
+If that shows `enable: True` with the searxng URL, git is the source of truth and there is nothing to
+do. If it shows `enable: False`, the seeded rows are in charge. Two ways out:
+
+1. **Delete the rows and let the environment re-seed** (preferred — git stays authoritative):
+
+   ```sh
+   # admin context. Target the PRIMARY: a DELETE on a CNPG replica succeeds and vanishes on
+   # the next failover, or fails read-only — either way it reads as the fix not landing.
+   kubectl -n databases get cluster postgres -o jsonpath='{.status.targetPrimaryInstance}'; echo
+   kubectl -n databases exec -it <that-pod> -- psql -U postgres -d open_webui -c \
+     "DELETE FROM config WHERE key IN ('web.search.enable','web.search.engine','web.search.searxng_query_url','web.search.result_count');"
+   kubectl -n open-webui delete pod -l app=open-webui
+   ```
+
+   `-U postgres` and not the app role on purpose: the open-webui `DatabaseRole` is deliberately not a
+   superuser (`apply/50-apps/open-webui/open-webui-db.yaml:34`), and the `config` table belongs to the
+   app user, so either works — but the CNPG superuser is the one that does not depend on how the role
+   was granted. The restart re-seeds from the env vars. Confirm with the `curl` above.
+
+2. **Set it in Admin → Settings → Web Search.** Faster, and it works, but the value then lives in
+   Postgres and not in git, and every later edit there silently outranks the manifest. If this path is
+   taken, record it here.
+
+Either way: **a later click in the Admin UI re-takes precedence over git.** A panel that says searxng
+and a manifest that says searxng can still disagree about `WEB_SEARCH_RESULT_COUNT`, and the panel is
+the one in charge.
+
+Proving the engine itself answers, from inside the cluster (needs an admin context — the read-only
+identity cannot `exec`):
+
+```sh
+kubectl -n apps exec deploy/searxng -- sh -c \
+  'wget -qO- "http://localhost:8080/search?q=titan&format=json" | head -c 200'
+```
+
+JSON back means `formats` took; a 403 means it did not. Empty `results` with a 200 means SearXNG is
+fine and the upstream engines are the problem — check egress with
+`kubectl -n apps exec deploy/searxng -- sh -c 'wget -qO- https://html.duckduckgo.com/ | head -c 80'`
+and look at `/engine_descriptions.json` plus the pod log for engine suspensions.
+
 ## 7. Not proven / not done
 
 - `uploads/` is unbacked (§1). No plan yet; the PV's `Retain` is a deletion mitigation, not a backup.
@@ -135,4 +195,8 @@ not yet applied at that point (§5).
   the default vector store is what makes the role sufficient, and a default that changes reopens it.
 - Inference is not wired: no llama.cpp endpoint is configured. It is reachable from the LAN; that has
   not been proven from inside a pod, so nobody should promise it works until something answers.
+- Web search (§6a) is configured, not yet end-to-end proven: no search has been run from the UI, titan
+  pods' outbound HTTPS to the upstream engines has not been measured from inside a pod, and no engine
+  has been tuned or disabled. A search that returns nothing with both pods healthy is that gap, not a
+  mystery.
 - The `local-path-retain` PVC has never been restored on this cluster.
