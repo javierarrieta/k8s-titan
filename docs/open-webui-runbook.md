@@ -231,13 +231,30 @@ PR #172 merged as `7d3adb0`. Observed with the read-only `k8s-reader` identity, 
 - `Deployment open-webui` rolled at 11:52:13, pod Ready, 0 restarts, and the live pod spec carries all
   four search env vars.
 
-Not proven by any of it, and all of it needs an admin context that `k8s-reader` does not have —
-`auth can-i create pods/exec` and `auth can-i create pods/portforward` both answer `no`, so neither a
-`kubectl exec` probe nor a port-forward is available to an agent:
+Not proven at the moment of that deploy, and none of it reachable to `k8s-reader` — `auth can-i create
+pods/exec` and `auth can-i create pods/portforward` both answer `no`, so neither a `kubectl exec` probe
+nor a port-forward is available to an agent. All three were closed later the same day, by the operator
+with an admin context:
 
-- SearXNG has not been shown to answer `format=json` from inside the cluster (the `wget` probe below).
-- titan pods' egress to the upstream engines has not been measured.
-- Nobody has run a search in the UI, and the `web.search.*` row state is unresolved (§6a).
+- The `SELECT` showed the trap exactly as predicted: `web.search.enable = false`, `engine = ""`,
+  `searxng_query_url = ""`, `result_count = 3` — 67 rows of `web.search.*`, four of them lying about
+  what git says.
+- The `DELETE` of those four keys plus a pod delete, and the proof it took is a log line, not a guess:
+  `12:08:18 open_webui.models.config:seed_defaults:273 - Seeded 4 new config defaults`. Four keys
+  missing, four inserted from the environment. Pod Ready, 0 restarts, `/health` true.
+- A search from the UI returned results and **fetched two of the result URLs**. That closes the
+  `format=json` question, the in-cluster FQDN, and titan's egress to an upstream engine in one action
+  — and it also disproved a claim made in the PR that shipped this. See below.
+
+**The claim that was wrong: page retrieval is not off.** The PR said leaving `WEB_LOADER_ENGINE` unset
+meant open-webui would return "titles and snippets only" and would not fetch arbitrary URLs from the
+pod. It does fetch them. `get_web_loader` (`backend/open_webui/retrieval/web/utils.py:1181-1183` at
+v0.12.3) maps `''` to `SafeWebBaseLoader` — unset is the default fetching path, not a disabled one —
+and `web.search.bypass_web_loader` is `false` in the live table, which the `SELECT` above shows. What
+`WEB_LOADER_ENGINE` chooses is the *renderer*, not whether to fetch. The two fetched URLs were the
+proof. The key that would actually turn retrieval off is `BYPASS_WEB_SEARCH_WEB_LOADER=true`; the
+SSRF guard in front of the loader is `safe_validate_urls` (same file, line 1159), not the absence of
+an engine. The manifest comment now says so.
 
 ## 7. Not proven / not done
 
@@ -249,10 +266,8 @@ Not proven by any of it, and all of it needs an admin context that `k8s-reader` 
   the default vector store is what makes the role sufficient, and a default that changes reopens it.
 - Inference is not wired: no llama.cpp endpoint is configured. It is reachable from the LAN; that has
   not been proven from inside a pod, so nobody should promise it works until something answers.
-- Web search (§6a) is deployed, not proven. As of 2026-10-27 the `web.search.*` rows are believed —
-  from the absent `Seeded` log line, not from a read — still to hold `enable: false`, so the env vars
-  in git are probably not what open-webui is using. No search has been run from the UI, titan pods'
-  outbound HTTPS to the upstream engines has not been measured from inside a pod, and no engine has
-  been tuned or disabled. A search that returns nothing with both pods healthy is that gap, not a
-  mystery.
+- Web search works: measured end to end on 2026-10-27 (§6a), including the row-delete the persistent
+  config needed. What is still open is tuning — no engine has been enabled, disabled or given a key, and
+  result quality on a default engine set has not been looked at. And remember the standing hazard: a
+  click in Admin → Settings → Web Search silently outranks git from then on.
 - The `local-path-retain` PVC has never been restored on this cluster.
