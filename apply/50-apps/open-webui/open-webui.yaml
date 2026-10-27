@@ -152,10 +152,17 @@ spec:
         # across engines puts a surprising amount of junk in the first three.
         - name: WEB_SEARCH_RESULT_COUNT
           value: "5"
-        # Page-content retrieval is deliberately NOT enabled here (WEB_LOADER_ENGINE stays unset):
-        # that would make open-webui fetch arbitrary URLs from the pod, which is a different
-        # exposure decision from asking a search engine a question. Search returns titles and
-        # snippets until someone decides otherwise.
+        # PAGE RETRIEVAL IS ON. This comment said the opposite when it landed and it was wrong, so it
+        # is corrected rather than quietly rewritten: leaving WEB_LOADER_ENGINE unset does NOT stop
+        # open-webui fetching the result URLs from inside this pod. get_web_loader
+        # (backend/open_webui/retrieval/web/utils.py:1181-1183 at v0.12.3) maps `''` to
+        # SafeWebBaseLoader — unset is the DEFAULT fetching path, not a disabled one — and
+        # web.search.bypass_web_loader is false in the live config table. Measured 2026-10-27: a search
+        # from the UI returned results and fetched two of those URLs.
+        # What WEB_LOADER_ENGINE actually picks is the renderer ('' = requests + readability,
+        # 'playwright' = a browser), not whether to fetch. If "snippets only" is ever the intent, the
+        # key is BYPASS_WEB_SEARCH_WEB_LOADER=true. The SSRF guard in front of the loader is
+        # safe_validate_urls (same file, line 1159), not the absence of an engine.
         # --- probes ---------------------------------------------------------------------------
         # startupProbe rather than a big initialDelay: startup runs Alembic migrations against
         # Postgres and initialises chroma, which is slow on a cold start and unbounded on a slow one.
