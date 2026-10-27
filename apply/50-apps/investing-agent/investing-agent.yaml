@@ -74,11 +74,13 @@
 # backup — AGENTS.md, "Backups" — so the 10 Gi here is unprotected until that gap is closed or a
 # restic job is ported. Named exposure, not a surprise.
 #
-# NO INGRESS, same as the source: the dashboard is reachable in-cluster only, at
-# http://investing-agent.apps.svc:80 (Service 80 -> container 9119). It still carries its own
-# basic auth (HERMES_DASHBOARD_BASIC_AUTH_*), which is what makes a future public hostname safe
-# to add — adding one also means adding this namespace to the secretTemplate allow-list on
-# apply/40-certificates/titan-wildcard.yaml if it needs titan-tls.
+# WITH INGRESS, added 2026-10-27: the dashboard is now reachable at
+# https://investing-agent.titan.arrieta.eu/ (Service 80 -> container 9119) through the Ingress at
+# the bottom of this file, and is no longer in-cluster only. The source had no ingress; the add
+# is deliberate. It still carries its own basic auth (HERMES_DASHBOARD_BASIC_AUTH_*), which is
+# what makes a public hostname safe to add — adding one also means adding this namespace to the
+# secretTemplate allow-list on apply/40-certificates/titan-wildcard.yaml if it needs titan-tls
+# (it does not: `apps` is already on that allow-list, so the reflected `titan-tls` lands here).
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -273,3 +275,50 @@ spec:
       name: http
       targetPort: 9119
       protocol: TCP
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: investing-agent
+  namespace: apps
+  # The public console for the agent. The source had no ingress and the add is deliberate: the
+  # operator needs the dashboard to configure the agent — profiles, model, cron — from a browser
+  # instead of `kubectl exec` into the volume. It still carries its own basic auth
+  # (HERMES_DASHBOARD_BASIC_AUTH_*), which is the gate and the reason a public hostname is safe to
+  # add.
+  #
+  # No forward-auth middleware on this host. The dashboard is its own gate — its static basic auth
+  # comes from its own Secret — so there is no proxy-side gate to add, and putting one in front
+  # would mean editing the Tesla-owned outpost blueprint that owns the provider list for no
+  # benefit. Same shape as open-webui, which gates in-app through its own OIDC rather than at the
+  # proxy.
+  #
+  # Cleartext is refused here, not redirected, and that is deliberate. The credential in play is
+  # the dashboard's static basic auth, and the repo has already drawn this exact line for a static
+  # credential served over the wire: the bearer token on llm.titan.arrieta.eu is pinned to the
+  # `websecure` entrypoint (apply/50-apps/llm/llm.yaml), because cleartext carries it. The
+  # dashboard's basic auth is the same shape. `http://investing-agent.titan.arrieta.eu/` now 404s
+  # instead of serving, rather than redirecting — a redirect would hand the credential to the
+  # cleartext origin before the judgment could be made.
+  #
+  # The TLS Secret is `titan-tls`, reflected into `apps` by Reflector; `apps` is already on the
+  # secretTemplate allow-list of apply/40-certificates/titan-wildcard.yaml, so the add needed no
+  # edit there. The wildcard is one label deep, which is exactly this host's depth, so no second
+  # Certificate was added — the same shape as llm.titan.arrieta.eu.
+spec:
+  ingressClassName: traefik
+  rules:
+  - host: investing-agent.titan.arrieta.eu
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: investing-agent
+            port:
+              number: 80
+  tls:
+  - hosts:
+    - investing-agent.titan.arrieta.eu
+    secretName: titan-tls

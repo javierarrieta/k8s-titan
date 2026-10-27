@@ -144,4 +144,27 @@ kubectl --context titan -n apps exec deploy/investing-agent -- sh -c 'grep -o "\
 Then curl the `base_url` that first command printed, at `/v1/models`, and expect `200`. Three
 commands, and they are the only ones that would have caught anything this section documents.
 
+## Ingress, added 2026-10-27
+
+The dashboard went from in-cluster-only to a public hostname during the bring-up follow-up, not
+before merging. The add is deliberate and is now the design record at the bottom of
+`apply/50-apps/investing-agent/investing-agent.yaml`; this section is the log of it.
+
+- **The host** is `investing-agent.titan.arrieta.eu` — one label deep, exactly the wildcard
+  `*.titan.arrieta.eu`'s depth, so the add needed no new Certificate and no DNS record, and no edit
+  to `apply/40-certificates/titan-wildcard.yaml`: the Secret arrives through the Reflector
+  allow-list and `apps` was already on it.
+- **No forward-auth middleware** was added. The dashboard's own basic auth
+  (`HERMES_DASHBOARD_BASIC_AUTH_*`) is the gate, which is the property that made a public hostname
+  safe to plan. Adding a proxy-side gate would have meant editing the Tesla-owned outpost
+  blueprint that owns the provider list for no benefit.
+- **The router is pinned to the `websecure` entrypoint**, so cleartext is refused rather than
+  redirected — the same line drawn for the bearer token on `llm.titan.arrieta.eu`, since the static
+  basic-auth credential is in play either way.
+
+`make dry-run` on this branch now builds and accepts `50-apps` with **74** objects (the Ingress is
+one of them). Nothing about the add is covered by an offline gate that did not exist before — the
+`Ingress` is a core type and `crd-check`'s scope is custom resources only, and the live API server
+was the one that accepted it (the same gate that caught the `data:`/base64 Secret defect).
+
 
