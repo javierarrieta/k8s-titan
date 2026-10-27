@@ -41,15 +41,24 @@ spec:
     certManager:
       namespace: cert-manager
       serviceAccountName: cert-manager
+    # Chart 0.7.0 rewrote the values layout (top-level securityContext/replicas/
+    # environment/port/resources/nodeSelector moved under `pod.`, image.repository
+    # split into image.registry + image.repository) and added a values.schema.json
+    # with additionalProperties: false on every object. Two things this file has to
+    # carry as a result: `ovhAuthenticationMethod` is required per issuer, and the
+    # consumer key is `applicationConsumerKeyRef`, not `consumerKeyRef`. Helm checks
+    # values against that schema before it renders anything, so either one wrong is a
+    # red release with nothing applied - and no gate in this repo can see it, because
+    # nothing here renders HelmRelease values. See docs/cert-manager-webhook-ovh.md.
     issuers:
       - name: le-prod-titan
         create: true
         kind: ClusterIssuer
-        namespace: default
         cnameStrategy: None
         acmeServerUrl: https://acme-v02.api.letsencrypt.org/directory
         email: javier@techdelivery.es
         ovhEndpointName: ovh-eu
+        ovhAuthenticationMethod: application
         ovhAuthenticationRef:
           applicationKeyRef:
             name: ovh-domain-secrets
@@ -63,11 +72,11 @@ spec:
       - name: le-staging-titan
         create: true
         kind: ClusterIssuer
-        namespace: default
         cnameStrategy: None
         acmeServerUrl: https://acme-staging-v02.api.letsencrypt.org/directory
         email: javier@techdelivery.es
         ovhEndpointName: ovh-eu
+        ovhAuthenticationMethod: application
         ovhAuthenticationRef:
           applicationKeyRef:
             name: ovh-domain-secrets
