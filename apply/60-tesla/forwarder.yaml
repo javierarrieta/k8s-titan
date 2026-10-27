@@ -181,7 +181,7 @@ spec:
         # Pinned by digest, not by tag: `22-alpine` is a moving tag and there is no exact-patch alpine
         # tag on Docker Hub to pin instead (the 22.20.x-alpine3.23 shape does not exist — it 404s), so
         # the digest is the only way this stays reproducible.
-        image: library/node:22-alpine@sha256:0a7108bf6c7bf5de370ffb1a3ed6be93d405b43ff159f681a8d18c0e2bc2e402
+        image: library/node:22-alpine@sha256:fe4f6d74e20370acb04ad889077d14d0f64a9c8ea6a42bc60cddf1e844699914
         command: ["node", "/app/tesla-forwarder.js"]
         env:
         - name: REDIS_HOST
