@@ -1,0 +1,57 @@
+name: Chart gate
+
+# Render every HelmRelease's values against the chart version it pins.
+#
+# This is not part of offline-gate. That job's contract is `make check-ci`: provable from
+# the tree alone, no age key, no cluster, no network. This gate needs network - it pulls
+# nine charts - and a gate that fails because a registry hiccupped must not be allowed to
+# turn the tree-only gates red. Separate job, separate verdict.
+#
+# Why it exists at all: PR #176 bumped cert-manager-webhook-ovh 0.6.0 -> 0.9.19, offline-gate
+# went green, and the chart cannot render those values. See
+# docs/cert-manager-webhook-ovh.md once that page exists on main; the tool's own docstring
+# carries the full story in the meantime.
+#
+# Triggers match offline-gate: pull_request covers branch work, push is only needed for main.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Least privilege: reads the repo, pulls public charts, needs nothing else.
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    name: Chart values render (no secrets, no cluster)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # The gate shells out to `helm pull` and `helm template`. ubuntu-latest does not
+      # guarantee helm, and a gate that dies on missing tooling reads like a broken chart -
+      # so install it if absent, the same way offline-gate does for kubectl.
+      - name: Ensure helm
+        run: |
+          if ! command -v helm >/dev/null 2>&1; then
+            curl -fsSL https://get.helm.sh/helm-v3.16.3-linux-amd64.tar.gz -o /tmp/helm.tgz
+            tar xzf /tmp/helm.tgz -C /tmp
+            install /tmp/linux-amd64/helm /usr/local/bin/helm
+          fi
+          helm version --short
+
+      - name: Ensure PyYAML (for chart-values-check)
+        run: python3 -c 'import yaml' 2>/dev/null || pip install --quiet pyyaml
+
+      # Every chart source in this tree is public, so this job needs no registry credential.
+      # If a private chart source is ever added, this job is where that credential gets
+      # granted - nowhere else, and not by widening offline-gate.
+      - name: make chart-values-check
+        run: make chart-values-check

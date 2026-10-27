@@ -13,6 +13,12 @@ kind: PersistentVolumeClaim
 metadata:
   name: open-webui-data
   namespace: open-webui
+  annotations:
+    # Opted in to restic PV backup. This annotation IS the scope decision -- apply/70-backup/
+    # discovers annotated PVCs at runtime rather than enumerating them in git, so a volume with
+    # no annotation is not backed up and adding one is a one-line commit here. Retention and
+    # schedule come from the class, not from this file.
+    backup.titan.arrieta.eu/class: daily
 spec:
   accessModes:
   - ReadWriteOnce
@@ -54,7 +60,7 @@ spec:
       # Python packages at runtime for optional features. Casa runs the same image unconfined.
       containers:
       - name: open-webui
-        image: ghcr.io/open-webui/open-webui:v0.12.3
+        image: ghcr.io/open-webui/open-webui:v0.12.4
         ports:
         - name: http
           containerPort: 8080
@@ -119,6 +125,44 @@ spec:
           value: "*"
         # The first user to sign in becomes admin regardless of all of the above
         # (utils/oauth.py:1598-1607). Do that on purpose and record it in the runbook.
+        # --- web search: SearXNG, in-cluster, no API key and no egress credential ---------------
+        # The engine is apply/50-apps/searxng/ (namespace `apps`), reached over the ClusterIP. The
+        # FQDN is required, not tidy: open-webui lives in namespace `open-webui` and a bare
+        # `http://searxng/search` only resolves inside the caller's own namespace.
+        #
+        # open-webui sends `format=json` on every request (backend/open_webui/retrieval/web/
+        # searxng.py:55-57 at v0.12.3) and SearXNG 403s any format its settings do not list, so the
+        # `formats:` list in searxng-settings is what makes these four lines work rather than
+        # silently return nothing.
+        #
+        # THESE THREE ARE PERSISTENT CONFIG, AND THAT IS A TRAP. `web.search.enable`,
+        # `web.search.engine` and `web.search.searxng_query_url` are seeded into the `config` table at
+        # startup and afterwards the DATABASE row wins over the environment — Config.seed_defaults
+        # (backend/open_webui/models/config.py:248-271) inserts a key only when it is absent, and
+        # Config.get reads the row when one exists. So on an instance that has already booted, editing
+        # these lines changes nothing on its own. What to do about it, and what was actually done,
+        # is recorded in docs/open-webui-runbook.md §6a; verify through /config rather than assuming.
+        - name: ENABLE_WEB_SEARCH
+          value: "true"
+        - name: WEB_SEARCH_ENGINE
+          value: searxng
+        - name: SEARXNG_QUERY_URL
+          value: http://searxng.apps.svc.cluster.local/search
+        # 5 rather than the upstream default of 3: the extra two are cheap, and SearXNG's own ranking
+        # across engines puts a surprising amount of junk in the first three.
+        - name: WEB_SEARCH_RESULT_COUNT
+          value: "5"
+        # PAGE RETRIEVAL IS ON. This comment said the opposite when it landed and it was wrong, so it
+        # is corrected rather than quietly rewritten: leaving WEB_LOADER_ENGINE unset does NOT stop
+        # open-webui fetching the result URLs from inside this pod. get_web_loader
+        # (backend/open_webui/retrieval/web/utils.py:1181-1183 at v0.12.3) maps `''` to
+        # SafeWebBaseLoader — unset is the DEFAULT fetching path, not a disabled one — and
+        # web.search.bypass_web_loader is false in the live config table. Measured 2026-10-27: a search
+        # from the UI returned results and fetched two of those URLs.
+        # What WEB_LOADER_ENGINE actually picks is the renderer ('' = requests + readability,
+        # 'playwright' = a browser), not whether to fetch. If "snippets only" is ever the intent, the
+        # key is BYPASS_WEB_SEARCH_WEB_LOADER=true. The SSRF guard in front of the loader is
+        # safe_validate_urls (same file, line 1159), not the absence of an engine.
         # --- probes ---------------------------------------------------------------------------
         # startupProbe rather than a big initialDelay: startup runs Alembic migrations against
         # Postgres and initialises chroma, which is slow on a cold start and unbounded on a slow one.

@@ -22,14 +22,21 @@ kind: PersistentVolumeClaim
 metadata:
   name: grafana-data
   namespace: observability
+  # Deliberately NOT annotated, so apply/70-backup/ leaves this volume alone. The backup stage's
+  # rule is "no annotation means git already has it", and here that is actually true, checked
+  # rather than assumed: every provider in grafana-dashboard-provisioning.yaml sets
+  # allowUiUpdates: false, the datasources are grafana-datasources.yaml, the local admin user and
+  # password are in observability-grafana-admin.yaml, and the Admin role comes from the authentik
+  # group claim in GF_AUTH_GENERIC_OAUTH_ROLE_ATTRIBUTE_PATH. A wiped PVC therefore costs only
+  # what someone built by hand in the UI -- an ad-hoc dashboard, a folder, an alert contact point,
+  # an API key -- plus preferences and dashboard version history. Decided 2026-10-26: not worth a
+  # nightly backup. Reversing it is one annotation line, but the observability runner was removed
+  # with this decision, so it is three edits and `make backup-coverage` names the three.
 spec:
   accessModes:
   - ReadWriteOnce
   # local-path-retain, the same class open-webui uses: it survives `kubectl delete pvc`, which
-  # local-path does not. Note this volume is NOT backed up — this cluster backs up the Postgres
-  # cluster and nothing else. With allowUiUpdates false on every provider the volume holds only
-  # Grafana's sqlite (users, preferences, API keys), so losing it means re-login, not lost
-  # dashboards. That is an argument, not a drilled restore.
+  # local-path does not.
   storageClassName: local-path-retain
   resources:
     requests:
@@ -71,7 +78,7 @@ spec:
           type: RuntimeDefault
       containers:
       - name: grafana
-        image: grafana/grafana:12.3.1@sha256:2175aaa91c96733d86d31cf270d5310b278654b03f5718c59de12a865380a31f
+        image: grafana/grafana:12.4.14@sha256:ae509d9ae8c1021ca32ec370a9ca975d40165eda9fccd1e1102d317ff8787cd7
         ports:
         - containerPort: 3000
           name: http

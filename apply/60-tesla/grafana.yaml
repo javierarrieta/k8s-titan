@@ -16,6 +16,11 @@ kind: PersistentVolumeClaim
 metadata:
   name: tesla-grafana
   namespace: apps
+  # Deliberately NOT annotated, so apply/70-backup/ leaves this volume alone. Same reasoning as
+  # observability/grafana and checked the same way: the TeslaMate dashboards ship inside the
+  # teslamate/grafana image, the datasource is built from DATABASE_* in teslamate-secrets at
+  # boot, and the admin credentials are in tesla-grafana-admin.yaml. Nothing here is unique to
+  # the volume except what someone made by hand in the UI.
 spec:
   accessModes:
   - ReadWriteOnce
@@ -54,7 +59,7 @@ spec:
           type: RuntimeDefault
       containers:
       - name: grafana
-        image: teslamate/grafana:4.3.0@sha256:7f5a119ad06c212c4122e12c957a6848b5718d9618826b5ce70a1ec12d84fed5
+        image: teslamate/grafana:4.4.0@sha256:2dd1fae85cd891e1d851350d13b547abf000efd602c8d0e5734eda6d43e22e01
         ports:
         - containerPort: 3000
           name: http

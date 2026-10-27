@@ -12,4 +12,10 @@ resources:
   - stage-certificates.yaml
   - stage-apps.yaml
   - stage-tesla.yaml
+  # The backup stage is 70-backup, not the 30-backup the spec proposed: apply/30-databases
+  # already owns that number, and one numbered directory is one stage, so the spec's name would
+  # have put two stages in the same slot. The number is reading order only -- dependsOn is what
+  # orders reconciles -- but a duplicate number is exactly the kind of thing a later reader
+  # spends an hour on.
+  - stage-backup.yaml
   - flux-system

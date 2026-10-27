@@ -13,12 +13,12 @@ KUSTOMIZE_DIRS := $(shell find apply -name kustomization.yaml 2>/dev/null | sed 
 # not be able to slip between the encryption rule and the validation glob.
 SECRET_FIND := find apply/10-secrets \( -name '*.yaml' -o -name '*.yml' \) ! -name kustomization.yaml
 
-.PHONY: check check-ci kustomize-check kustomize-listing dry-run py-deps validate update-keys scan leak-check secrets-placement secrets-list secrets-present release-secrets secret-refs db-url-check oidc-check grafana-oidc-check observability-oidc-check open-webui-oidc-check mealie-check sure-check crd-check namespace-check tesla-forwarder-test update-cnpg-crds update-crds
+.PHONY: check check-ci kustomize-check kustomize-listing dry-run py-deps validate update-keys scan leak-check secrets-placement secrets-list secrets-present release-secrets secret-refs backup-coverage db-url-check oidc-check grafana-oidc-check observability-oidc-check open-webui-oidc-check mealie-check sure-check crd-check namespace-check tesla-forwarder-test chart-values-check update-cnpg-crds update-crds
 
 # leak-check runs FIRST: make has no -k, so it stops at the first failing prerequisite.
 # validate needs the age key, so an operator who forgot SOPS_AGE_KEY_FILE would never
 # reach a leak gate placed behind it.
-check: py-deps leak-check kustomize-check kustomize-listing validate secrets-placement release-secrets secret-refs db-url-check oidc-check grafana-oidc-check observability-oidc-check open-webui-oidc-check mealie-check sure-check crd-check namespace-check tesla-forwarder-test
+check: py-deps leak-check kustomize-check kustomize-listing validate secrets-placement release-secrets secret-refs backup-coverage db-url-check oidc-check grafana-oidc-check observability-oidc-check open-webui-oidc-check mealie-check sure-check crd-check namespace-check chart-values-check tesla-forwarder-test
 	@echo "check: all offline gates passed"
 
 # The subset provable from the tree alone - no age key, no cluster, no network.
@@ -36,9 +36,13 @@ check: py-deps leak-check kustomize-check kustomize-listing validate secrets-pla
 #
 # db-url-check is absent from this list for the same reason validate is: it has to read
 # Secret values, every Secret here is sops-encrypted, and the age key does not go in CI.
+# chart-values-check is absent for a third reason: it needs network to pull the charts, and
+# this target's contract is the tree alone. It has its own CI job instead - see
+# .github/workflows/chart-gate.yml - because a gate that quietly stops running when the
+# network is unhappy is worse than one that is not here at all.
 check-ci:
 	@rc=0; \
-	for t in py-deps leak-check kustomize-check kustomize-listing secrets-placement release-secrets secret-refs crd-check namespace-check tesla-forwarder-test; do \
+	for t in py-deps leak-check kustomize-check kustomize-listing secrets-placement release-secrets secret-refs backup-coverage crd-check namespace-check tesla-forwarder-test; do \
 	  echo "--- $$t ---"; \
 	  $(MAKE) --no-print-directory $$t || rc=1; \
 	done; \
@@ -499,6 +503,48 @@ secret-refs:
 	  || { echo "secret-refs: PyYAML is missing (pip install pyyaml) - refusing to report clean"; exit 1; }; \
 	{ for d in $(KUSTOMIZE_DIRS); do kubectl kustomize "$$d" || exit 1; printf -- '---\n'; done; } \
 	  | python3 tools/secret-refs-check.py
+
+# backup-coverage: every PVC that opted in to backup is reachable by a runner, and the four
+# separate files that have to agree about it do agree.
+#
+# The backup stage discovers volumes by annotation instead of enumerating them, which is the only
+# way a coder workspace volume (named by a UUID that changes when the workspace is rebuilt) can be
+# covered at all. The cost is that scope now lives in an annotation, and a PVC in a namespace with
+# no runner, or no Reflector mirror, or no Role, is never backed up and never complains. secret-refs
+# cannot see this: the jobs that consume the mirrored Secret are created at runtime and are not in
+# the tree, so it passes correctly and sees nothing.
+#
+# Keyless, so it runs in check-ci. Its honest limit is in its docstring: it proves the tree agrees
+# with itself, not that a backup ran.
+backup-coverage:
+	@command -v python3 >/dev/null 2>&1 \
+	  || { echo "backup-coverage: python3 is missing - refusing to report clean"; exit 1; }; \
+	python3 -c 'import yaml' >/dev/null 2>&1 \
+	  || { echo "backup-coverage: PyYAML is missing (pip install pyyaml) - refusing to report clean"; exit 1; }; \
+	{ for d in $(KUSTOMIZE_DIRS); do kubectl kustomize "$$d" || exit 1; printf -- '---\n'; done; } \
+	  | python3 tools/backup-coverage-check.py
+
+# chart-values-check: ask each chart whether this tree's values would render.
+#
+# PR #176 bumped cert-manager-webhook-ovh 0.6.0 -> 0.9.19 and every gate here went green on
+# values the chart refuses. Chart 0.7.0 added values.schema.json, which requires
+# issuers[].ovhAuthenticationMethod and rejects the old consumerKeyRef name, so helm fails
+# before it applies anything and the HelmRelease sits red while the old pod keeps serving.
+# No existing gate could see it: the HelmRelease object is legal, its `values` map is
+# x-kubernetes-preserve-unknown-fields in the Flux CRD, and dry-run asks the API server about
+# the object rather than about the chart. The only authority on a chart's value contract is
+# the chart.
+#
+# Needs helm and network, so it is in `check` and in its own CI job, and deliberately NOT in
+# check-ci. Set CHART_CHECK_CACHE=<dir> to keep pulled charts between runs; without it every
+# run re-downloads all nine. Its honest limits are in the tool's docstring - above all, it
+# proves the values render, not that the rendered manifest is what was meant.
+chart-values-check:
+	@command -v helm >/dev/null 2>&1 \
+	  || { echo "chart-values-check: helm is missing - refusing to report clean"; exit 1; }; \
+	python3 -c 'import yaml' >/dev/null 2>&1 \
+	  || { echo "chart-values-check: PyYAML is missing (pip install pyyaml) - refusing to report clean"; exit 1; }; \
+	python3 tools/chart-values-check.py
 
 # py-deps: fail with an instruction instead of a traceback.
 #

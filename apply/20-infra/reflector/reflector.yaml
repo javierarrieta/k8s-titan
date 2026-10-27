@@ -1,12 +1,20 @@
-# Reflector replicates TLS material across namespaces and nothing else. The database
-# credential is authored instead (spec 4 A4); keeping Reflector's scope to certificates
-# is what stops it becoming a second secret-sync mechanism by accident.
+# Reflector replicates TLS material across namespaces, plus exactly one credential and one
+# ConfigMap: the restic backup Secret and the backup scripts, both declared in `apps` and mirrored
+# to the six namespaces that run backup jobs (apply/70-backup/). The database credential is still
+# authored instead (spec 4 A4).
+#
+# That is a reversal of this file's original rule - "TLS material and nothing else" - made in the
+# restic backup spec section 7b, and the reason is arithmetic rather than preference: six
+# namespaces times a credential and a 150-line script is either twelve copies in git that can
+# drift or one copy mirrored. Both mirror lists are explicit namespace lists, never "all
+# namespaces", and `make backup-coverage` fails when the two disagree with each other or with the
+# set of namespaces that has a runner.
 #
 # That scope is a convention, not a boundary. The chart's ClusterRole (rbac.enabled
 # defaults to true) grants `configmaps` and `secrets` with verbs ["*"], cluster-wide,
 # so the blast radius of a compromised Reflector is every Secret in the cluster, not
-# just the TLS ones. What holds it to TLS is review and the set of objects we choose
-# to annotate - never RBAC.
+# just the TLS ones, and still is. What decides what gets mirrored is review and the set of
+# objects we choose to annotate - never RBAC.
 #
 # This is bootstrap spec 9's deferred item, promoted on its own stated trigger ("a second
 # namespace needs titan-tls"), and promoted whole: the Certificate moves to `certificates`
@@ -30,7 +38,7 @@ spec:
   chart:
     spec:
       chart: reflector
-      version: "10.0.46"
+      version: "10.0.69"
       sourceRef:
         kind: HelmRepository
         name: emberstack

@@ -19,7 +19,7 @@ spec:
       sourceRef:
         kind: HelmRepository
         name: cert-manager-webhook-ovh
-      version: "0.6.0"
+      version: "0.9.19"
   interval: 1h0s
   releaseName: cert-manager-webhook-ovh
   # The webhook chart templates cert-manager.io kinds (its serving Certificate and
@@ -41,15 +41,24 @@ spec:
     certManager:
       namespace: cert-manager
       serviceAccountName: cert-manager
+    # Chart 0.7.0 rewrote the values layout (top-level securityContext/replicas/
+    # environment/port/resources/nodeSelector moved under `pod.`, image.repository
+    # split into image.registry + image.repository) and added a values.schema.json
+    # with additionalProperties: false on every object. Two things this file has to
+    # carry as a result: `ovhAuthenticationMethod` is required per issuer, and the
+    # consumer key is `applicationConsumerKeyRef`, not `consumerKeyRef`. Helm checks
+    # values against that schema before it renders anything, so either one wrong is a
+    # red release with nothing applied. `make chart-values-check` renders this release
+    # against the pinned chart to catch exactly that; docs/cert-manager-webhook-ovh.md.
     issuers:
       - name: le-prod-titan
         create: true
         kind: ClusterIssuer
-        namespace: default
         cnameStrategy: None
         acmeServerUrl: https://acme-v02.api.letsencrypt.org/directory
         email: javier@techdelivery.es
         ovhEndpointName: ovh-eu
+        ovhAuthenticationMethod: application
         ovhAuthenticationRef:
           applicationKeyRef:
             name: ovh-domain-secrets
@@ -57,17 +66,17 @@ spec:
           applicationSecretRef:
             name: ovh-domain-secrets
             key: OVH_APPLICATION_SECRET
-          consumerKeyRef:
+          applicationConsumerKeyRef:
             name: ovh-domain-secrets
             key: OVH_CONSUMER_KEY
       - name: le-staging-titan
         create: true
         kind: ClusterIssuer
-        namespace: default
         cnameStrategy: None
         acmeServerUrl: https://acme-staging-v02.api.letsencrypt.org/directory
         email: javier@techdelivery.es
         ovhEndpointName: ovh-eu
+        ovhAuthenticationMethod: application
         ovhAuthenticationRef:
           applicationKeyRef:
             name: ovh-domain-secrets
@@ -75,6 +84,6 @@ spec:
           applicationSecretRef:
             name: ovh-domain-secrets
             key: OVH_APPLICATION_SECRET
-          consumerKeyRef:
+          applicationConsumerKeyRef:
             name: ovh-domain-secrets
             key: OVH_CONSUMER_KEY

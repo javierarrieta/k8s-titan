@@ -1,0 +1,16 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  # The scripts every job mounts, mirrored to each participating namespace by Reflector.
+  - preflight.yaml
+  # Per-namespace SAs and the runner's Role/RoleBinding. The one thing Reflector cannot mirror.
+  - rbac.yaml
+  # One discovery CronJob per participating namespace.
+  - runner.yaml
+  # Repo-wide retention and integrity. No volume mounts; talks only to MinIO.
+  - housekeeping.yaml
+  # NOTE on what is NOT here: the credential. apply/10-secrets/backup-minio-secrets.yaml is
+  # listed by apply/10-secrets/kustomization.yaml like every other Secret here, and Reflector
+  # mirrors it from `apps` into the namespaces above. `make secrets-placement` is what proves a
+  # Secret in that directory is actually listed there; a Secret listed only here would fail
+  # that gate and, worse, would not be sops-decrypted by kustomize-controller.

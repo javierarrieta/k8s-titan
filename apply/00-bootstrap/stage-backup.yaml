@@ -1,0 +1,32 @@
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: backup
+  namespace: flux-system
+spec:
+  dependsOn:
+    # secrets: the jobs reference backup-minio-secrets, and a job that starts before the
+    # credential exists lands in CreateContainerConfigError naming a Secret that plainly
+    # exists -- the exact failure mode this repo already reasoned about for the investing agent.
+    # infra: Reflector lives there, and the credential and the scripts only reach the
+    # participating namespaces through it. Ordering is not sufficient (Reflector reacts to
+    # objects, not to Flux stages) but it removes the obvious race.
+    - name: secrets
+    - name: infra
+  interval: 10m0s
+  path: ./apply/70-backup
+  # prune: false AND deletionPolicy: Orphan, both, for the reason k8s-techdelivery documents:
+  # Orphan governs only what happens when THIS Kustomization object is deleted, while prune:
+  # true still deletes each individual manifest removed from git. The property wanted is "a
+  # GitOps accident cannot delete the thing that guards against the accident", and only the pair
+  # gives it. Consequence accepted in advance, and it is a real one: retiring a backup job
+  # deliberately means `kubectl delete cronjob`, not a commit, and nothing in CI will tell you
+  # that a job you removed from git is still running nightly.
+  #
+  # Every other stage here uses prune: true. That asymmetry is the point and not an oversight to
+  # tidy up.
+  prune: false
+  deletionPolicy: Orphan
+  sourceRef:
+    kind: GitRepository
+    name: flux-system

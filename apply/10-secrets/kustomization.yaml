@@ -138,3 +138,21 @@ resources:
   # release-secrets` cannot vouch for this name; an unlisted file here would build green and be
   # silently never applied, which is the lie `make secrets-placement` exists to catch.
   - investing-agent-secrets.yaml
+  # restic PV backups. One copy, in `apps`, mirrored to the four namespaces that run backup
+  # jobs by Reflector -- which is a deliberate widening of the TLS-only scope
+  # apply/20-infra/reflector/reflector.yaml records, and the header on apply/70-backup/
+  # preflight.yaml says why the arithmetic changed. Referenced by CronJob envFrom, not by a
+  # HelmRelease, so `make release-secrets` cannot vouch for this name; `make secret-refs` has
+  # to be told it is produced in-cluster, which is a hole with a named producer rather than an
+  # oversight. An unlisted file here would build green and be silently never applied, which is
+  # the lie `make secrets-placement` exists to catch.
+  - backup-minio-secrets.yaml
+  # SearXNG's signing key, in `apps` next to the workload that reads it. One key, and it is the only
+  # credential this app has — its settings live in a plain ConfigMap precisely because this value
+  # arrives through the environment (searx/settings_defaults.py:219 registers secret_key as
+  # SEARXNG_SECRET-overridable), so nothing else needs to be encrypted.
+  #
+  # Consumed by a Deployment's secretKeyRef in namespace `apps`, not by a HelmRelease, so `make
+  # release-secrets` cannot vouch for this name; an unlisted file here would build green and be
+  # silently never applied, which is the lie `make secrets-placement` exists to catch.
+  - searxng-secrets.yaml

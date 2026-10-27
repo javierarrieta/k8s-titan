@@ -51,6 +51,12 @@ apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: opencloud-data
+  # Deliberately NOT annotated with backup.titan.arrieta.eu/class. OpenCloud's file bytes live in
+  # casa's `opencloud-blobs` bucket and its metadata tree lives here, and a metadata tree restored
+  # without the blobs it references is a restore that looks perfectly healthy and is corrupt --
+  # so half a backup is worse than none. casa has no capacity to mirror the bucket, so neither
+  # half is backed up. That is stated in full at spec 4 of the restic design; do not "fix" this
+  # omission without reading it.
   namespace: files
   labels:
     app: opencloud
