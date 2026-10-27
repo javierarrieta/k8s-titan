@@ -156,15 +156,98 @@ before merging. The add is deliberate and is now the design record at the bottom
   allow-list and `apps` was already on it.
 - **No forward-auth middleware** was added. The dashboard's own basic auth
   (`HERMES_DASHBOARD_BASIC_AUTH_*`) is the gate, which is the property that made a public hostname
-  safe to plan. Adding a proxy-side gate would have meant editing the Tesla-owned outpost
-  blueprint that owns the provider list for no benefit.
-- **The router is pinned to the `websecure` entrypoint**, so cleartext is refused rather than
-  redirected — the same line drawn for the bearer token on `llm.titan.arrieta.eu`, since the static
-  basic-auth credential is in play either way.
+  safe to plan — and the credential behind it is machine-generated, operator-attested 2026-10-27, which
+  is the half of that sentence the rate-limit decision turns on. Adding a proxy-side gate would have
+  meant editing the Tesla-owned outpost blueprint that owns the provider list for no benefit.
+- **The router is pinned to the `websecure` entrypoint** —
+  `traefik.ingress.kubernetes.io/router.entrypoints: websecure` on the `Ingress` annotations, the
+  same line `apply/50-apps/llm/llm.yaml` draws for its bearer token — so cleartext is refused rather
+  than redirected, because the static basic-auth credential is in play either way. There is no global
+  HTTP→HTTPS redirect on this cluster's Traefik to lean on instead, which was measured, not assumed:
+  `http://meals.titan.arrieta.eu/` (no pin) answers **200** over cleartext and
+  `http://llm.titan.arrieta.eu/` (pinned) answers **404**. So the annotation is the whole mechanism
+  and nothing in this repo notices it being removed.
+- **Nothing rate-limits the host.** The dashboard's basic auth is the only gate on a public hostname,
+  so failed logins are unthrottled at the proxy. Traefik 3.7.8 ships an OSS `rateLimit` middleware and
+  the `Middleware` CRD is already used by `observability-grafana-auth@kubernetescrd`, so it is a
+  two-line add — deliberately not added. The decision, and the residual it leaves, are in
+  *Why no rate limiter — decided, not deferred* below.
+
+### The credential behind the gate, measured 2026-10-27
+
+`HERMES_DASHBOARD_BASIC_AUTH_PASSWORD_HASH` was read out of `apply/10-secrets/investing-agent-secrets.yaml`
+with sops to answer one question — is the hash the defense here? — and only its **parameters** are
+recorded below. The digest and the salt are credential material and stay in the Secret.
+
+| field | value | reading |
+| --- | --- | --- |
+| id | `scrypt` | memory-hard KDF; the right family, not MD5 or bare SHA-256 |
+| N | 16384 = 2^14 | cost parameter |
+| r | 8 | block size, 1024 bytes |
+| p | 1 | parallelism |
+| salt | 18 bytes | base64, 24 chars |
+| output | 32 bytes | base64, 44 chars |
+
+- **16 MiB and a full mixing pass per attempt** (128 · N · r). That is real work per guess, and it is
+  the throttle the proxy is not providing: every failed login costs this 1.5-CPU pod the same 16 MiB
+  and the same CPU, which is why no rate limiter has been added and is also the DoS surface one would
+  have bought back.
+- **It is below OWASP's current floor.** The Password Storage Cheat Sheet asks for scrypt at
+  N=2^17, r=8, p=1 — 128 MiB — or an equal-defence row. Ours is 8× lighter than that row, and OWASP's
+  equal-defence table pairs N=2^14 with p=**5**, so N=2^14 at p=1 sits under every combination it
+  lists. Not a defect introduced here, and not fixable from this repo either: nothing in this tree sets
+  those parameters — the container's only `env` entries are `HERMES_HOME`, `HERMES_CRON_TIMEOUT` and
+  `TMPDIR`, everything else arrives by `envFrom` — so they are the image's own.
+- **What the hash cannot prove is the part that matters — and that question is now closed.** A hash says
+  nothing about the entropy of the input it was computed over, so it could not answer this on its own.
+  **The operator attests on 2026-10-27 that the dashboard password is machine-generated**, which is not
+  verifiable from the hash and is recorded as attestation, not as evidence. It changes the reading above:
+  OWASP's cost floor exists to make offline cracking of a *guessable* input expensive, and a
+  full-entropy input needs no such help — 2^14/p=1 is sub-floor and still irrelevant, because there is
+  nothing to enumerate. The username is six characters and not one of `admin`/`root`/`dashboard`, which
+  removes the attacker's first guess and nothing else.
+
+### Why no rate limiter — decided, not deferred
+
+The rule written below was resolved the same day it was written: the password is machine-generated, so
+**no `rateLimit` middleware is being added to this host.**
+
+A `rateLimit` middleware would have bought two things:
+
+- **Guessing headroom — now worth nothing.** Unthrottled, one source IP can try as many passwords as it
+  can send packets for, but against a machine-generated password none of them land. The scrypt cost
+  above caps the attempt rate at the pod anyway.
+- **Pod headroom — still unthrottled, and that is the residual.** 16 MiB plus CPU per failed attempt is
+  a way to starve the pod that runs the agent gateway alongside the dashboard, and nothing limits it.
+  Accepted: it is an availability hit on one console, the same unauthenticated-request cost every other
+  public host here already carries, and the liveness probe on `:9119` is a `tcpSocket` that would keep
+  succeeding right up until the container restarted for something else.
+
+What it would have cost: Traefik's limiter is per source IP and counts **every** request including the
+console's static assets, so a threshold tight enough to slow a guesser is a threshold that locks the
+operator out of the page they need in order to log in — and that failure presents as an outage, not a
+lockout, with the pod healthy and every gate green.
+
+The rule stays, for the next host that is not behind a machine-generated credential: **add the middleware
+if the password is human-chosen** — measure one console page load first and set the burst above it.
+
+After merge, the two commands that prove the add behaved:
+
+```sh
+# expect 404; a 200 means the websecure pin is gone and the host is serving over cleartext
+curl -o /dev/null -w '%{http_code}\n' http://investing-agent.titan.arrieta.eu/
+# expect the dashboard's own auth response, not a Traefik 404
+curl -o /dev/null -w '%{http_code}\n' https://investing-agent.titan.arrieta.eu/
+```
+
+Before merge both answer 404 — Traefik's own 404, because no router matches the host yet — which is
+why the pair has to be run after the sync, not before.
 
 `make dry-run` on this branch now builds and accepts `50-apps` with **74** objects (the Ingress is
 one of them). Nothing about the add is covered by an offline gate that did not exist before — the
 `Ingress` is a core type and `crd-check`'s scope is custom resources only, and the live API server
-was the one that accepted it (the same gate that caught the `data:`/base64 Secret defect).
-
-
+was the one that accepted it (the same gate that caught the `data:`/base64 Secret defect). Two
+Ingress fields sit outside every gate here and are worth naming: `spec.tls[].secretName` —
+`secret-refs` walks workloads, never Ingresses, so a typo'd `titan-tls` builds green and surfaces as
+a TLS handshake failure — and the Traefik annotations above, which nothing reads. Both values are
+correct as written; both would fail as a runtime symptom, not a red build.

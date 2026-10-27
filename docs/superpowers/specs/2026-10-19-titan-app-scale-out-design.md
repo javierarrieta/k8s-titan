@@ -115,6 +115,21 @@ only. It says nothing about stages, and the sentence "gets its own namespace and
 a stage rule it disqualifies workloads the tree has already placed in `apps`, which is what §3.2 now
 says out loud instead of leaving to inference.
 
+**Amended 2026-10-27, because `investing-agent` grew a public hostname and stayed in `apps`.** The
+clause "no public hostname of their own" decides namespace by **what a hostname costs the cluster**,
+not by whether one exists. `investing-agent.titan.arrieta.eu` bought nothing: the existing wildcard
+already serves it, `apps` was already on the Reflector allow-list, so no `Certificate`, no DNS record,
+no Secret and no `namespaces.yaml` entry appeared. Read as a literal ban on hostnames the clause buys
+a namespace for zero new cluster objects — the ceremony §3.1 exists to avoid. The clause still bites
+where it was written to bite: a hostname that needs its own `Certificate`, its own DNS, or its own
+allow-list line is a workload reaching for a name prefix.
+
+The softest edge, recorded rather than smoothed: "no credentials beyond what they read from their own
+config" already described almost every member of this stage — authentik, coder and Tesla each read a
+Secret set of their own — so read strictly it disqualifies the tree it lives in, which is the
+vacuous-rule failure wearing the other hat. What actually decides namespace is the hard list after
+the comma: own `Certificate`, own database, more than a couple of pods.
+
 ### 3.2 Where the small apps go
 
 A new small app is **a subdirectory of `apply/50-apps/` listed in `apply/50-apps/kustomization.yaml`**
