@@ -124,3 +124,10 @@ resources:
   # PVC unbound and nowhere to rsync the hand-moved 10 Gi into. The file's own header is the
   # sequence, and its last step is the pod delete that makes the copied files take effect.
   - investing-agent/investing-agent.yaml
+  # SearXNG, the metasearch engine behind open-webui's web search. One hand-written manifest
+  # (ConfigMap + Deployment + Service in namespace `apps`), no database, no public hostname, no PVC,
+  # so it passes the §3.1 admission test for the shared namespace and buys no stage: a bad field here
+  # freezes coder's and authentik's *updates*, which is the accepted cost recorded at the top of this
+  # file. It is listed next to its only consumer's dependency rather than as a platform service on
+  # purpose — if a second client ever appears, that is the change which argues for a namespace.
+  - searxng/searxng.yaml

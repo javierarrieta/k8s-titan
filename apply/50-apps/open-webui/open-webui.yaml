@@ -125,6 +125,37 @@ spec:
           value: "*"
         # The first user to sign in becomes admin regardless of all of the above
         # (utils/oauth.py:1598-1607). Do that on purpose and record it in the runbook.
+        # --- web search: SearXNG, in-cluster, no API key and no egress credential ---------------
+        # The engine is apply/50-apps/searxng/ (namespace `apps`), reached over the ClusterIP. The
+        # FQDN is required, not tidy: open-webui lives in namespace `open-webui` and a bare
+        # `http://searxng/search` only resolves inside the caller's own namespace.
+        #
+        # open-webui sends `format=json` on every request (backend/open_webui/retrieval/web/
+        # searxng.py:55-57 at v0.12.3) and SearXNG 403s any format its settings do not list, so the
+        # `formats:` list in searxng-settings is what makes these four lines work rather than
+        # silently return nothing.
+        #
+        # THESE THREE ARE PERSISTENT CONFIG, AND THAT IS A TRAP. `web.search.enable`,
+        # `web.search.engine` and `web.search.searxng_query_url` are seeded into the `config` table at
+        # startup and afterwards the DATABASE row wins over the environment — Config.seed_defaults
+        # (backend/open_webui/models/config.py:248-271) inserts a key only when it is absent, and
+        # Config.get reads the row when one exists. So on an instance that has already booted, editing
+        # these lines changes nothing on its own. What to do about it, and what was actually done,
+        # is recorded in docs/open-webui-runbook.md §6a; verify through /config rather than assuming.
+        - name: ENABLE_WEB_SEARCH
+          value: "true"
+        - name: WEB_SEARCH_ENGINE
+          value: searxng
+        - name: SEARXNG_QUERY_URL
+          value: http://searxng.apps.svc.cluster.local/search
+        # 5 rather than the upstream default of 3: the extra two are cheap, and SearXNG's own ranking
+        # across engines puts a surprising amount of junk in the first three.
+        - name: WEB_SEARCH_RESULT_COUNT
+          value: "5"
+        # Page-content retrieval is deliberately NOT enabled here (WEB_LOADER_ENGINE stays unset):
+        # that would make open-webui fetch arbitrary URLs from the pod, which is a different
+        # exposure decision from asking a search engine a question. Search returns titles and
+        # snippets until someone decides otherwise.
         # --- probes ---------------------------------------------------------------------------
         # startupProbe rather than a big initialDelay: startup runs Alembic migrations against
         # Postgres and initialises chroma, which is slow on a cold start and unbounded on a slow one.

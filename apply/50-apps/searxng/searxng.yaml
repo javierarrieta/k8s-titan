@@ -1,0 +1,184 @@
+# SearXNG on titan: a private metasearch engine whose only client is Open WebUI.
+#
+# WHY IT IS IN `apps` AND NOT ITS OWN NAMESPACE. It passes the admission test in
+# docs/superpowers/specs/2026-10-19-titan-app-scale-out-design.md §3.1 on every axis that buys a
+# namespace: one pod, no database, no public hostname, no `Certificate` of its own. The one axis it
+# does touch is its own Secret — and `investing-agent` is the precedent for that being survivable in
+# `apps` (own Secret file, still namespace `apps`). It also inherits something for free by landing
+# here: Reloader's release namespace IS `apps` (apply/20-infra/reloader/reloader.yaml:16), so the
+# annotation below works without editing Reloader's `namespaces:` list, which is the inert-annotation
+# defect that note records for promtail.
+#
+# WHY THERE IS NO INGRESS, AND WHY THAT IS THE POINT. Nothing outside this cluster may reach it.
+# open-webui calls it over the ClusterIP, so there is no hostname, no `titan-tls` reflection to add,
+# no `40-certificates` edit, and no public box to rate-limit or abuse. SearXNG's own limiter is off
+# for the same reason — see the settings below.
+#
+# WHAT IS STATEFUL HERE: nothing. `/var/cache/searxng` holds `faviconcache.db` and the engine
+# suspension bookkeeping, both of which rebuild themselves, so it is an emptyDir and NOT a PVC. That
+# means no `backup.titan.arrieta.eu/class` annotation and nothing to add to the restic scope
+# (apply/70-backup/ discovers annotated PVCs; there is no volume here to discover).
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: searxng-settings
+  namespace: apps
+data:
+  # `use_default_settings: true` keeps this file to its deltas. The upstream default settings.yml is
+  # ~1,000 lines of engine list; vendoring it here would go stale silently and would be bulk someone
+  # edits in this repo, which is exactly the shape §3.2 of the 2026-10-19 design says not to author
+  # in the shared stage.
+  settings.yml: |
+    use_default_settings: true
+
+    general:
+      debug: false
+      instance_name: "titan"
+
+    search:
+      # `json` is the whole reason this file exists. SearXNG answers 403 for a format that is not
+      # listed here (docs.searxng.org/dev/search_api: "Requesting an unset format will return a 403
+      # Forbidden"), and open-webui asks for it unconditionally — backend/open_webui/
+      # retrieval/web/searxng.py:55-57 at v0.12.3 sends format=json on every request. The upstream
+      # default lists html only, so an unconfigured SearXNG returns 403 to every search and
+      # open-webui shows an empty result set with both pods healthy.
+      # `html` stays listed so the web UI still works from inside the cluster when someone wants to
+      # see what the engine actually returned.
+      # safe_search is 0 here because open-webui sends its own `safesearch` per request (same file,
+      # line 61) and that request parameter wins; this is only the floor for anything else that
+      # reaches it.
+      safe_search: 0
+      formats:
+        - html
+        - json
+
+    server:
+      # The limiter requires a valkey database (docs.searxng.org/admin/settings/settings_server.html).
+      # This instance has exactly one client, in-cluster, on a ClusterIP with no Ingress, so rate
+      # limiting can only ever throttle open-webui. Buying a Redis to satisfy it is the wrong trade;
+      # the exposure the limiter defends against is a public instance, and this is not one.
+      limiter: false
+      public_instance: false
+      image_proxy: false
+      # GET, not the upstream POST default: open-webui issues GETs, and there is no browser history
+      # to protect on a headless internal service.
+      method: "GET"
+      # NO secret_key IN THIS FILE, on purpose. searx/settings_defaults.py:219 registers secret_key
+      # as SEARXNG_SECRET-overridable, so the value arrives from the Secret through env and this
+      # ConfigMap stays credential-free — which is what lets it be plain YAML in git instead of sops
+      # ciphertext. The entrypoint's random-key substitution only runs when it creates settings.yml
+      # from its template (container/entrypoint.sh `setup`), which it does not do here because this
+      # file exists; leaving the default `ultrasecretkey` in place would therefore have been the
+      # actual outcome without the env override.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: searxng
+  namespace: apps
+  # Reloader restarts the pod when searxng-settings or searxng-secrets changes. It is needed and not
+  # decorative: SearXNG reads settings.yml once at import, and kubelet rewrites the mounted file in
+  # place without telling anyone, so a settings edit would otherwise sit unread in a running pod.
+  # `apps` is Reloader's own release namespace, so this works without touching its `namespaces:` list.
+  annotations:
+    reloader.stakater.com/auto: "true"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: searxng
+  template:
+    metadata:
+      labels:
+        app: searxng
+    spec:
+      # uid/gid 977 is the image's own `searxng` user (codeberg.org/searxng/base, the `searxng`
+      # stage writes /etc/passwd with `searxng:x:977:977`). The image ships no USER line, so it runs
+      # as root by default and its entrypoint chowns the volumes when it is root; running as 977
+      # instead means it cannot chown, which the entrypoint only WARNs about (container/entrypoint.sh
+      # `setup_ownership`), and FORCE_OWNERSHIP=false below is what keeps that warning honest instead
+      # of alarming. This is the observability case from the 2026-10-19 design: a hardening step the
+      # workload actually satisfies, not one it can never meet.
+      # fsGroup is what makes the emptyDir writable by 977; without it kubelet hands the pod a
+      # root-owned directory and SearXNG cannot write faviconcache.db.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 977
+        runAsGroup: 977
+        fsGroup: 977
+      containers:
+      - name: searxng
+        # Dated upstream tag (date + commit), verified present on Docker Hub before pinning:
+        # GET /v2/repositories/searxng/searxng/tags/2026.10.27-cb74e7f81/ → 200. SearXNG publishes
+        # no stable semver, so `latest` would be an unreviewable moving target and a dated tag is the
+        # closest thing to the v0.12.3-style pin every other app here carries.
+        image: docker.io/searxng/searxng:2026.10.27-cb74e7f81
+        env:
+        # The only credential here, and it is a signing key for SearXNG's own signed cookies.
+        - name: SEARXNG_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: searxng-secrets
+              key: SEARXNG_SECRET
+        # See the namespace securityContext note: the pod is not root, so the entrypoint could not
+        # chown even if it tried. Saying so turns a chown attempt plus warning into a no-op.
+        - name: FORCE_OWNERSHIP
+          value: "false"
+        ports:
+        - name: http
+          containerPort: 8080
+        volumeMounts:
+        - name: config
+          mountPath: /etc/searxng
+          readOnly: true
+        - name: cache
+          mountPath: /var/cache/searxng
+        # /healthz is a real route (searx/webapp.py:621), not the front page — `/` renders a search
+        # form and would keep a wedged engine looking alive.
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: http
+          periodSeconds: 30
+        readinessProbe:
+          httpGet:
+            path: /healthz
+            port: http
+          periodSeconds: 10
+        resources:
+          requests:
+            cpu: 50m
+            memory: 128Mi
+          limits:
+            cpu: "1"
+            memory: 512Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+          seccompProfile:
+            type: RuntimeDefault
+      volumes:
+      - name: config
+        configMap:
+          name: searxng-settings
+      - name: cache
+        emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: searxng
+  namespace: apps
+  # ClusterIP and nothing else. open-webui reaches it at
+  # http://searxng.apps.svc.cluster.local/search; there is no Ingress and adding one is a decision
+  # about exposing a search proxy to the internet, not a cleanup.
+spec:
+  type: ClusterIP
+  selector:
+    app: searxng
+  ports:
+  - name: http
+    port: 80
+    targetPort: http
