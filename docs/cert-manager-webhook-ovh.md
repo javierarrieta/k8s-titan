@@ -79,7 +79,7 @@ working on the old webhook while the release is red.
 ## Not proven
 
 - **No end-to-end DNS-01 challenge has been observed against 0.9.19 on this cluster.**
-  The chart declares no minimum cert-manager version and cert-manager is pinned 1.21.1;
+  The chart declares no minimum cert-manager version and cert-manager is pinned 1.21.3;
   the render diff and a `Ready` issuer are the evidence available offline, and they are
   weaker than a renewal actually solved by the new pod. Record the first one here.
 - **The schema gap is still open.** `make check-ci` does not render charts, so the next
