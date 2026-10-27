@@ -40,10 +40,10 @@ spec:
     spec:
       containers:
         - name: collabora
-          # the 26.04-series tag, pushed 2026-10-09; header explains why this is a digest and how
+          # the 26.04-series tag, pushed 2026-10-23; header explains why this is a digest and how
           # to resolve it back to a tag. The full tag is deliberately not written here: a four-part
           # dotted version is what leak-check's IPv4 pattern matches.
-          image: collabora/code@sha256:56541aad09403975646dfb87a3716e38afecce09b5f853391eb6d937a0ccd402
+          image: collabora/code@sha256:808410e77b8695a35b93c7638fbba07c10cf0ba8307141b460248f18ab6e5c55
           env:
             # coolwsd must not try to create its own certificate; traefik terminates.
             - name: DONT_GEN_SSL_CERT
