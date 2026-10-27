@@ -33,10 +33,12 @@ Do not copy old-layout values out of the upstream 0.6.0 README.
 
 ## Proving a bump before merging it
 
-Nothing in `make check` renders `HelmRelease` values, so a chart bump that cannot install
-passes every gate in this repo. It did: PR #176 went green on a values set the chart
-rejects. Until that gap is closed, check a bump offline. This block is bash, not fish —
-run it under `bash`:
+`make chart-values-check` does this for every `HelmRelease` in the tree: it resolves each
+release's source, pulls the pinned chart, and runs `helm template` over `spec.values`. It
+runs in CI as the `Chart gate` job and locally as part of `make check`. That is the gate
+this page was written before existed - PR #176 went green on values the chart rejects.
+
+To do one release by hand, or to read the rendered output rather than just a verdict:
 
 ```bash
 cd "$(mktemp -d)"
@@ -82,5 +84,9 @@ working on the old webhook while the release is red.
   The chart declares no minimum cert-manager version and cert-manager is pinned 1.21.3;
   the render diff and a `Ready` issuer are the evidence available offline, and they are
   weaker than a renewal actually solved by the new pod. Record the first one here.
-- **The schema gap is still open.** `make check-ci` does not render charts, so the next
-  automated bump can repeat this. This page is a workaround, not a gate.
+- **The gate proves the values render, not that the rendered manifest is what was meant.**
+  `make chart-values-check` catches a schema violation like the one this page is about. It
+  cannot catch a value the chart now ignores silently, and it renders the pinned version, so
+  it catches an automated bump after it is proposed and never before. On the free plan this
+  repo cannot enable branch protection, so a red `Chart gate` is advisory: it stops a broken
+  bump only if someone looks at it.

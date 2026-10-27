@@ -48,8 +48,8 @@ spec:
     # carry as a result: `ovhAuthenticationMethod` is required per issuer, and the
     # consumer key is `applicationConsumerKeyRef`, not `consumerKeyRef`. Helm checks
     # values against that schema before it renders anything, so either one wrong is a
-    # red release with nothing applied - and no gate in this repo can see it, because
-    # nothing here renders HelmRelease values. See docs/cert-manager-webhook-ovh.md.
+    # red release with nothing applied. `make chart-values-check` renders this release
+    # against the pinned chart to catch exactly that; docs/cert-manager-webhook-ovh.md.
     issuers:
       - name: le-prod-titan
         create: true
