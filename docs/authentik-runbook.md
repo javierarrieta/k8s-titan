@@ -540,7 +540,15 @@ kubectl -n auth logs deploy/authentik-worker --since=1h | grep -i "changed file"
 ```
 
 `Applying blueprint due to changed file` names the path it read. Absent that line, nothing has been
-attempted and the blueprint is not the thing to debug. To skip the wait, apply it directly — same
+attempted and the blueprint is not the thing to debug. **But the line proves dispatch, not success,**
+and reading it as a verdict is a trap in its own right: `apply_blueprint` sets `status = ERROR`, saves,
+and *returns without raising* when validation fails (`blueprints/v1/tasks.py:209-221`), so the celery
+wrapper still logs `Task finished` with `exc: null` and the worker's stdout can stay entirely clean
+while every entry in the blueprint failed. Measured on 2026-10-28 with `titan-identity`: `Creating new
+blueprint instance from file`, `Applying blueprint due to changed file`, `Task finished exc: null`,
+zero `warning` or `error` lines — and the only field that then distinguishes a clean apply from a
+wholly failed one is `BlueprintInstance.status`. Read that, in the UI under Directory → Blueprints, or
+over the API with the token below. To skip the wait, apply it directly — same
 code path the periodic task uses:
 
 ```fish
@@ -556,7 +564,7 @@ that is where the diagnosis starts, not where it ends. That k8s-side limit is wh
 `titan-blueprint-reader` below exists to work around; it is a different identity, not a grant to
 `k8s-reader`.
 
-### A read-only path to blueprint status — declared, not yet applied
+### A read-only path to blueprint status — applied, and the account exists
 
 Written with `apply/50-apps/auth/identity-blueprint.yaml`, which declares an authentik role
 `titan-blueprint-reader` holding exactly one permission — `authentik_blueprints.view_blueprintinstance`
@@ -572,11 +580,15 @@ named; nothing below needs them, the blueprint list returns only name / path / s
 and on a token meant to be handed to an agent those two are org-wide user enumeration. They were
 dropped in review — see the comment on the role itself before adding anything back.
 
-**Nothing here has been run.** The blueprint is not applied, the account does not exist yet, and no
-token has been minted. What follows is derived from the pinned `version/2026.8.5` source, not from a
-successful run — treat it as a procedure to verify, not a runbook that has been drilled.
+**What is proven and what is not.** The blueprint is applied — `titan-identity` reached status
+`successful` at 16:50:37Z on 2026-10-28, so the role `titan-blueprint-reader` and the service account
+`svc-blueprint-status` both exist in the instance now. **No token has been minted**, and the procedure
+below has still never been run end to end: it is derived from the pinned `version/2026.8.5` source,
+not from a drilled run, so treat the minting steps as a procedure to verify the first time someone
+needs them. Nothing consumes the token yet, and per the rule in the blueprint's own header, if nothing
+ever consumes it, do not mint it.
 
-What it will answer, once applied:
+What it answers once a token exists:
 
 ```fish
 # GET /api/v3/managed/blueprints/ — the route is `managed/blueprints` in

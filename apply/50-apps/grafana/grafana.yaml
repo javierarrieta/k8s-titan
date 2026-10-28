@@ -139,10 +139,22 @@ spec:
           value: preferred_username
         - name: GF_AUTH_GENERIC_OAUTH_NAME_ATTRIBUTE_PATH
           value: name
-        # authentik Admins -> Grafana Org Admin, everyone else Viewer. GrafanaAdmin (server admin) is
-        # deliberately not granted.
+        # titan-grafana-admins -> Grafana Org Admin, everyone else Viewer. GrafanaAdmin (server
+        # admin) is deliberately not granted.
+        #
+        # SWITCHED OFF `authentik Admins` on 2026-10-28, and the order was the point: the group was
+        # seeded from `authentik Admins` FIRST (scripts/seed-authentik-group.sh, excluding the
+        # break-glass account) and only then was this line changed. Switching first empties the
+        # group, and this expression makes that silent - a miss is `&& 'Admin' || 'Viewer'`, so every
+        # admin quietly becomes a Viewer behind a login page that still looks healthy. If a rebuilt
+        # authentik ever loses the group, that is the symptom to expect, not an error.
+        #
+        # Two things this line cannot do: it reads the claim baked into the token AT LOGIN, so anyone
+        # already signed in keeps their old groups until they re-authenticate; and it cannot see
+        # group parentage - authentik's `groups` claim is the plain M2M, so a nested group does not
+        # count here (see the header of apply/50-apps/auth/identity-blueprint.yaml).
         - name: GF_AUTH_GENERIC_OAUTH_ROLE_ATTRIBUTE_PATH
-          value: contains(groups[*], 'authentik Admins') && 'Admin' || 'Viewer'
+          value: contains(groups[*], 'titan-grafana-admins') && 'Admin' || 'Viewer'
         - name: GF_AUTH_GENERIC_OAUTH_ALLOW_SIGN_UP
           value: "true"
         # Safe specifically because the edge gate means authentik already holds a session by the time
