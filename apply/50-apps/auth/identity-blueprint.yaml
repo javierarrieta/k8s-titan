@@ -46,10 +46,11 @@ data:
     # members of the parent group" - which invites one shared admin group with four per-app groups
     # as its children. That does not work for what these groups are for, and the reason is in the
     # source rather than in the prose. The `groups` OIDC claim is emitted by authentik's own managed
-    # profile scope mapping (blueprints/system/providers-oauth2.yaml:44 on main:
+    # profile scope mapping (blueprints/system/providers-oauth2.yaml:44 at the pinned 2026.8.5:
     # `"groups": [group.name for group in request.user.groups.all()]`), and `User.groups` is the
-    # plain M2M. Ancestors are added only by `User.all_groups()` (core/models.py:427,
-    # `self.groups.all().with_ancestors()`), which is what `is_superuser` and role resolution use -
+    # plain M2M. Ancestors are added only by `User.all_groups()` (core/models.py:416 at the same
+    # tag, `self.groups.all().with_ancestors()`), which is what `is_superuser` and role resolution
+    # use -
     # not the claim. So parentage propagates superuser-ness and roles, and does NOT propagate into
     # a token. Per-app groups therefore mean per-app membership lists; that is the price of the
     # split, and it is stated here rather than discovered during an incident.
@@ -77,7 +78,8 @@ data:
       # who can administer authentik is therefore an admin everywhere. These four groups are the
       # seam that lets each of those be its own decision. The consumer list below is complete —
       # `grep -rl "ROLE_ATTRIBUTE_PATH\|OAUTH_ADMIN\|OIDC_GROUPS" apply/` returns exactly these
-      # four files, and there are two Grafanas, not one.
+      # four consumer files (this file's own comments also match that grep, and are not consumers),
+      # and there are two Grafanas, not one.
       #
       # THEY ARE INERT ON PURPOSE, AND THAT IS THE DANGER TOO
       # Nothing reads them yet, so merging this changes nobody's access. Adoption is a SEPARATE

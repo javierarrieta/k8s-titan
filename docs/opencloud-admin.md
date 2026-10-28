@@ -121,7 +121,7 @@ link is checked, and it is not switched on because of an ordering hazard and one
 
 | link | evidence |
 |---|---|
-| authentik `profile` scope emits `groups` | built-in mapping, `request.user.ak_groups.all()` |
+| authentik `profile` scope emits `groups` | built-in mapping, `request.user.groups.all()` (`providers-oauth2.yaml:44` at the pinned 2026.8.5; upstream renamed this from `ak_groups`) |
 | the OpenCloud provider releases `profile` | `apply/50-apps/auth/opencloud-blueprint.yaml`, `property_mappings` |
 | web requests `profile` | `WEB_OIDC_SCOPE` default `openid profile email`, `services/web/pkg/config/config.go:87` |
 | **Android, desktop and iOS request `profile`** | `nativeAppScopes`, `services/webfinger/pkg/config/defaults/defaultconfig.go:11` and `:60-66`, handed to clients as the `http://opencloud.eu/ns/oidc/scopes` webfinger property that the desktop reads at `oauth.cpp:608` |
