@@ -41,6 +41,10 @@ resources:
   # credential — see the file's own header for why that distinction is the whole point.
   - auth/tesla-outpost-blueprint.yaml
   - auth/opencloud-blueprint.yaml
+  # Groups and service accounts, as a ConfigMap for the same credential-free reason as the two
+  # above, and listed before the HelmRelease that mounts it for the same reason: a pod whose
+  # mounted ConfigMap does not exist yet sits Pending rather than converging.
+  - auth/identity-blueprint.yaml
   - auth/authentik.yaml
   # Quota, limit range and the provisioner Role, all in coder-workspaces. The quota is the only
   # thing standing between a third workspace and the Postgres every other app here depends on.
