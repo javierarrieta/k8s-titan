@@ -283,7 +283,7 @@ manifest said "basic auth" and now says login. The posture is unchanged — and 
 cleartext is a worse outcome than one basic-auth header, which is one more reason the entrypoint pin is
 the line that matters.
 
-### Re-check after the 2026-10-28 gate — baseline taken, post-merge check NOT yet run
+### Re-check after the 2026-10-28 gate — baseline taken, post-merge check run and passing
 
 The pair above is the 2026-10-27 state and stays as measured. The gate changes what `https://` has to
 answer, so the baseline was re-taken immediately before PR #192 landed, which makes the post-merge
@@ -300,13 +300,31 @@ $ curl -o /dev/null -w '%{http_code}\n' http://investing-agent.titan.arrieta.eu/
 404
 ```
 
-All four measured 2026-10-28 as the read-only `k8s-reader` identity, before the change. After it
-lands: the annotation dump must carry `router.middlewares` as well, `http://` must still be 404, and
-the `https://` 302 must point at `auth.titan.arrieta.eu/outpost.goauthentik.io/start?rd=…` instead of
-`/login?next=%2F`. Three wrong answers, three faults — a 302 still landing on `/login` is the
-middleware not firing, a 200 is the host serving strangers, and a 404 with a clean Traefik log is
-authentik refusing a host its provider no longer matches. Nothing alerts on any of this, so it is a
-check someone has to run.
+All four measured 2026-10-28 as the read-only `k8s-reader` identity, before the change. Merged as
+`a9c0831`; the `apps` stage reached `Ready=ReconciliationSucceeded rev=main@sha1:a9c0831…` roughly 90
+seconds later, behind `infra` → `certificates` → `databases`. The `DependencyNotReady` cascade along
+the way is propagation, not a stall, and it is why this check has to wait for the sync rather than the
+merge. Then:
+
+```console
+$ kubectl --context titan -n apps get ingress investing-agent -o jsonpath='{.metadata.annotations}'
+{"traefik.ingress.kubernetes.io/router.entrypoints":"websecure","traefik.ingress.kubernetes.io/router.middlewares":"apps-teslamate-auth@kubernetescrd"}
+$ curl -o /dev/null -w '%{http_code} %{redirect_url}\n' https://investing-agent.titan.arrieta.eu/
+302 https://auth.titan.arrieta.eu/application/o/authorize/?client_id=…&state=<jwt>   # elided
+$ curl -o /dev/null -w '%{http_code}\n' http://investing-agent.titan.arrieta.eu/
+404
+```
+
+- **The gate is live, and the predicted hop was wrong.** The 302 does not land on
+  `auth.titan.arrieta.eu/outpost.goauthentik.io/start?rd=…`, which is what this section and the
+  manifest both claimed before merge. It goes to `auth.titan.arrieta.eu/application/o/authorize/`, and
+  the target host rides inside the signed `state` JWT as
+  `"redirect":"https://investing-agent.titan.arrieta.eu/"`. Judge it by the authority in `Location`:
+  `auth.titan.arrieta.eu` is gated, `investing-agent.titan.arrieta.eu/login` is not.
+- **Three wrong answers, three faults** — a 302 still landing on `/login` is the middleware not
+  firing, a 200 is the host serving strangers, and a 404 with a clean Traefik log is authentik
+  refusing a host its provider no longer matches. Nothing alerts on any of this, so it is a check
+  someone has to run.
 
 **Not set, deliberately left that way:** no HSTS header on this host. Harmless while `http://` answers 404
 — a downgrade needs an active attacker, not a stale bookmark — so a nit, not a finding.

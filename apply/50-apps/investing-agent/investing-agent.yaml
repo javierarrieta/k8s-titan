@@ -368,14 +368,18 @@ metadata:
   # not part of this change. And the self-reference is worth naming: if authentik is down this console is
   # unreachable, which is correct — the console is not how anyone fixes authentik.
   #
-  # HOW TO TELL IT IS STILL WORKING. Before this line was added,
-  # `GET https://investing-agent.titan.arrieta.eu/` answered 302 to `/login?next=%2F` — hermes' own
-  # form, measured 2026-10-28. With the gate in place it must 302 to
-  # `auth.titan.arrieta.eu/outpost.goauthentik.io/start?rd=…` instead. Four answers, four faults: a 302
-  # to `/login` means the middleware is not firing; a 200 means the whole host is served to strangers;
-  # and a 404 with a clean Traefik log is authentik answering, which is what a narrowed provider does
-  # to a host it no longer matches — the trap `docs/teslamate-runbook.md:577` already records for the
-  # Tesla apps, and the reason the coupling paragraph above is not decoration.
+  # HOW TO TELL IT IS STILL WORKING, measured on the live cluster 2026-10-28 after this landed.
+  # Before the line, `GET https://investing-agent.titan.arrieta.eu/` answered 302 to
+  # `/login?next=%2F` — hermes' own form. After it, the 302 goes to
+  # `auth.titan.arrieta.eu/application/o/authorize/?client_id=…&state=<jwt>` and the target host rides
+  # inside the signed `state` as `"redirect":"https://investing-agent.titan.arrieta.eu/"`. Not the
+  # `/outpost.goauthentik.io/start?rd=…` hop this comment first predicted — same gate, one hop earlier
+  # in the OAuth dance, so judge it by the authority in the `Location` header, not by the path.
+  # Four answers, four faults: a 302 to `/login` means the middleware is not firing; a 200 means the
+  # whole host is served to strangers; and a 404 with a clean Traefik log is authentik answering, which
+  # is what a narrowed provider does to a host it no longer matches — the trap
+  # `docs/teslamate-runbook.md:577` already records for the Tesla apps, and the reason the coupling
+  # paragraph above is not decoration.
   #
   # NOTHING NON-BROWSER CALLS THIS HOST, which is the only reason forward-auth here is free. A machine
   # caller would get a 302 to an HTML login page rather than an error, so a broken integration would
