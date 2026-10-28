@@ -106,8 +106,11 @@ data:
       # propagate through parentage, unlike the claim.
 
       # Grafana at grafana.titan.arrieta.eu (namespace `observability`).
-      # Consumer to switch later: apply/50-apps/grafana/grafana.yaml:145,
-      # GF_AUTH_GENERIC_OAUTH_ROLE_ATTRIBUTE_PATH.
+      # SWITCHED 2026-10-28: apply/50-apps/grafana/grafana.yaml, the
+      # GF_AUTH_GENERIC_OAUTH_ROLE_ATTRIBUTE_PATH expression, now reads this group instead of
+      # `authentik Admins`. Seeded first, from the live instance, with
+      # scripts/seed-authentik-group.sh --exclude <break-glass account>; the order is what makes the
+      # switch safe, because an empty group here is a silent Viewer downgrade.
       - model: authentik_core.group
         id: titan_grafana_admins
         identifiers:
