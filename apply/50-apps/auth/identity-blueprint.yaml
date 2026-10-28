@@ -91,7 +91,9 @@ data:
       # THEY ARE INERT ON PURPOSE, AND THAT IS THE DANGER TOO
       # Nothing reads them yet, so merging this changes nobody's access. Adoption is a SEPARATE
       # commit per app, and the order matters: (1) merge this, (2) add to each group the humans who
-      # are in `authentik Admins` today, in the UI or with `ak shell`, (3) only then switch that
+      # are in `authentik Admins` today — `scripts/seed-authentik-group.sh <group> "authentik Admins"`
+      # does it idempotently and prints who moved, and takes no names as arguments so no human name
+      # enters this repository — or by hand in the UI or `ak shell`, (3) only then switch that
       # app's group name, one app per commit, rollback being a one-word revert of that single line.
       # Switching before step 2 empties the group and locks every non-admin out of an app whose
       # login page still looks healthy — and the failure is silent in two of the four cases:
