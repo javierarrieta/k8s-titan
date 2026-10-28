@@ -13,12 +13,12 @@ KUSTOMIZE_DIRS := $(shell find apply -name kustomization.yaml 2>/dev/null | sed 
 # not be able to slip between the encryption rule and the validation glob.
 SECRET_FIND := find apply/10-secrets \( -name '*.yaml' -o -name '*.yml' \) ! -name kustomization.yaml
 
-.PHONY: check check-ci kustomize-check kustomize-listing dry-run py-deps validate update-keys scan leak-check secrets-placement secrets-list secrets-present release-secrets secret-refs ingress-auth backup-coverage db-url-check oidc-check grafana-oidc-check observability-oidc-check open-webui-oidc-check mealie-check sure-check crd-check namespace-check tesla-forwarder-test chart-values-check update-cnpg-crds update-crds
+.PHONY: check check-ci kustomize-check kustomize-listing dry-run py-deps validate update-keys scan leak-check secrets-placement secrets-list secrets-present release-secrets secret-refs ingress-auth backup-coverage db-url-check oidc-check grafana-oidc-check observability-oidc-check open-webui-oidc-check mealie-check sure-check crd-check namespace-check tesla-forwarder-test chart-values-check update-cnpg-crds update-crds blueprint-mount-check
 
 # leak-check runs FIRST: make has no -k, so it stops at the first failing prerequisite.
 # validate needs the age key, so an operator who forgot SOPS_AGE_KEY_FILE would never
 # reach a leak gate placed behind it.
-check: py-deps leak-check kustomize-check kustomize-listing validate secrets-placement release-secrets secret-refs ingress-auth backup-coverage db-url-check oidc-check grafana-oidc-check observability-oidc-check open-webui-oidc-check mealie-check sure-check crd-check namespace-check chart-values-check tesla-forwarder-test
+check: py-deps leak-check kustomize-check kustomize-listing validate secrets-placement release-secrets secret-refs ingress-auth blueprint-mount-check backup-coverage db-url-check oidc-check grafana-oidc-check observability-oidc-check open-webui-oidc-check mealie-check sure-check crd-check namespace-check chart-values-check tesla-forwarder-test
 	@echo "check: all offline gates passed"
 
 # The subset provable from the tree alone - no age key, no cluster, no network.
@@ -541,15 +541,16 @@ ingress-auth:
 # whether the mount existed. oidc-check and sure-check guard the *contents* of individual
 # blueprints and only for the apps they were each written for; nothing guarded the mount.
 #
-# It fails four ways: a blueprint-bearing ConfigMap (or an `authentik-*-blueprint` Secret) in the
-# release's namespace that `blueprints.configMaps`/`secrets` never lists; a listed name with no
-# such object; a mounted name absent from the worker's reloader annotation, which is the slow-
+# It fails five ways: a blueprint-bearing ConfigMap (or an `authentik-*-blueprint` Secret) in the
+# release's namespace that `blueprints.configMaps`/`secrets` never lists; a listed name with no such
+# object; a mounted ConfigMap with no `.yaml` key the worker would discover, or none that parses to a
+# blueprint; a mounted name absent from the worker's reloader annotation, which is the slow-
 # landing case and the one that reads as "my change did nothing"; and a tree with no authentik
 # HelmRelease or an unreadable `blueprints` block, so it cannot pass vacuously.
 #
-# Keyless, so it runs in check-ci: it reads names, annotations, and plaintext ConfigMap bodies.
-# Its honest limits are in the tool's docstring - above all, it proves a mount is wired, never that
-# the worker applied the blueprint or that the blueprint was valid.
+# Keyless, so it runs in check-ci too: it reads names, annotations, and plaintext ConfigMap bodies.
+# Its honest limits are in the tool's docstring - above all, it proves a mount is wired and its body
+# parses, never that the worker applied the blueprint or that the blueprint was valid.
 blueprint-mount-check:
 	@command -v python3 >/dev/null 2>&1 \
 	  || { echo "blueprint-mount-check: python3 is missing - refusing to report clean"; exit 1; }; \

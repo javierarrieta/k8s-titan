@@ -5,7 +5,7 @@ and never read by the worker is indistinguishable from one that was never writte
 docs/authentik-runbook.md §5 is the record of that costing an hour of live breakage on
 2026-10-20, and of a second blueprint being skipped by the very discovery pass that should have
 caught it. Every one of those failures was green in every gate this repo had, because no gate
-asked whether the mount existed. This does, in four directions:
+asked whether the mount existed. This does, in five directions:
 
   1. EXISTS BUT UNMOUNTED - a ConfigMap in the HelmRelease's namespace carrying a real blueprint
      (a `.yaml` key whose value parses to a mapping with `version` and `entries`) that is not
@@ -16,6 +16,11 @@ asked whether the mount existed. This does, in four directions:
   2. MOUNTED BUT MISSING - a name in `blueprints.configMaps` / `blueprints.secrets` with no such
      object in the HelmRelease's own namespace. The chart mounts these by name, so a typo leaves
      the pod Pending, which reads as a chart bug.
+  2b. MOUNTED BUT UNREADABLE - a ConfigMap that is mounted, and reload-wired, but carries no key the
+     worker will look at. The chart discovers only keys ending in `.yaml` (chart authentik-2026.8.5,
+     values.yaml:222), so `identity.yml` or a body that does not parse to a mapping with `version`
+     and `entries` mounts cleanly, satisfies every other check here, and is never applied. Found by
+     review of PR #194: renaming the key was enough to make the gate report clean.
   3. MOUNTED BUT NOT RELOAD-WIRED - kubelet rewrites a mounted Secret/ConfigMap in place and the
      worker only discovers blueprints at startup plus on a beat pass measured at up to ~50 minute
      gaps, so a name that is mounted but absent from the worker's reloader annotation edits
@@ -24,8 +29,10 @@ asked whether the mount existed. This does, in four directions:
      block this script cannot read is a failure, not a clean run.
 
 Honest limits, stated because a gate that overstates itself gets trusted too much:
-  * It proves a name is mounted and reload-wired. It does NOT prove the worker applied it, or that
-    it applied cleanly - that is `ak apply_blueprint` and the worker log, runbook §5.
+  * It proves a name is mounted, reload-wired, and carries a parseable blueprint body under a `.yaml`
+    key. It does NOT prove the worker applied it, or that it applied cleanly - that is
+    `ak apply_blueprint` and the worker log, runbook §5. It parses the blueprint's shape, never its
+    validity against authentik's schema.
   * It reads Secret NAMES only, never Secret content, so it cannot tell whether a mounted Secret
     actually holds a blueprint, nor whether the blueprint inside it is valid.
   * It reads the pinned chart's `blueprints.configMaps` / `blueprints.secrets` shape only. Any
@@ -92,9 +99,13 @@ def main():
         return 1
 
     # Objects by (kind, namespace, name), plus which ConfigMaps actually carry a blueprint.
+    # cm_yaml_keys / cm_blueprint_keys are kept separately so a mounted ConfigMap can be reported
+    # as "no .yaml key at all" rather than the vaguer "no blueprint in it".
     present = set()
     blueprint_cms = set()
     secret_named_blueprints = set()
+    cm_yaml_keys = {}
+    cm_blueprint_keys = {}
     for d in docs:
         kind = d.get("kind")
         if kind not in ("ConfigMap", "Secret"):
@@ -106,7 +117,11 @@ def main():
         present.add((kind, ns, name))
         if kind == "ConfigMap":
             data = d.get("data") or {}
-            if any(k.endswith(".yaml") and is_blueprint_value(v) for k, v in data.items()):
+            yaml_keys = {k for k in data if k.endswith(".yaml")}
+            good = {k for k in yaml_keys if is_blueprint_value(data[k])}
+            cm_yaml_keys[(ns, name)] = yaml_keys
+            cm_blueprint_keys[(ns, name)] = good
+            if good:
                 blueprint_cms.add((ns, name))
         elif name.startswith(SECRET_PREFIX) and name.endswith(SECRET_SUFFIX):
             secret_named_blueprints.add((ns, name))
@@ -161,6 +176,22 @@ def main():
                         f"{ns}/{name}: `blueprints.{key}` mounts {mount!r} but no {kind} "
                         f"{ns}/{mount} exists in this tree"
                     )
+                # Mounted and present: does it actually carry something the worker will discover?
+                # ConfigMap only - a Secret's body is sops ciphertext and this gate is keyless.
+                if key == "configMaps" and (kind, ns, mount) in present:
+                    if not cm_yaml_keys.get((ns, mount)):
+                        failures.append(
+                            f"{ns}/{name}: {mount!r} is mounted but has no key ending in .yaml, "
+                            f"and the chart discovers only those (values.yaml:222) - nothing will "
+                            "ever be applied from it"
+                        )
+                    elif not cm_blueprint_keys.get((ns, mount)):
+                        failures.append(
+                            f"{ns}/{name}: {mount!r} is mounted but none of its .yaml keys "
+                            f"({', '.join(sorted(cm_yaml_keys[(ns, mount)]))}) parses to a "
+                            "blueprint with `version` and `entries` - nothing will be applied "
+                            "from it"
+                        )
                 if not auto and mount not in reload_lists[key]:
                     failures.append(
                         f"{ns}/{name}: {mount!r} is mounted but not in the worker's "
@@ -190,8 +221,9 @@ def main():
 
     print(
         f"blueprint-mount-check: {len(releases)} authentik HelmRelease(s), "
-        f"{checked_mounts} mount(s) scanned; every blueprint in the tree mounted by name and "
-        "reload-wired on the worker (Secret content is never read - see the gate's own docstring)"
+        f"{checked_mounts} mount(s) scanned; every blueprint in the tree mounted by name, "
+        "reload-wired on the worker, and parseable where the worker reads it (Secret content is "
+        "never read - see the gate's own docstring)"
     )
     return 0
 

@@ -242,14 +242,18 @@ blueprint the startup discovery pass silently skipped. `oidc-check` and `sure-ch
 contents of individual blueprints and only for the apps they were each written for; nobody guarded
 the mount. It fails when a blueprint-bearing `ConfigMap` (or an `authentik-*-blueprint` `Secret`)
 sits in the release's namespace unlisted under `blueprints.configMaps`/`secrets`, when a listed
-name has no such object, when a mounted name is absent from the worker's reloader annotation — the
+name has no such object, when a mounted `ConfigMap` carries no `.yaml` key the worker would even
+look at (chart `values.yaml:222`) or none that parses to a blueprint, when a mounted name is absent
+from the worker's reloader annotation — the
 slow-landing case that reads as "my change did nothing" — and when there is no authentik
 `HelmRelease` or an unreadable `blueprints` block, so it cannot pass vacuously. Adding the gate
 immediately failed on `authentik-opencloud-blueprint`, mounted since it was written and missing from
 that annotation, so every edit to it had been landing up to an hour late. Its honest limits: it
-proves a mount is wired, never that the worker applied the blueprint or that the blueprint was
-valid, and it reads Secret *names* only, so a mounted Secret's contents are outside its view. It was
-written while adding a new blueprint, and found a bug that predated it.
+proves a mount is wired and its body parses, never that the worker applied the blueprint or that the
+blueprint was valid, and it reads Secret *names* only, so a mounted Secret's contents are outside
+its view. It was
+written while adding a new blueprint, and found a bug that predated it; review of that PR found the
+`.yaml`-key case, which is why a mounted-but-unreadable ConfigMap is a failure and not a skip.
 `crd-check` walks every built
 object against the CRDs vendored in `vendor/cnpg-crds/` and rejects any field the schema
 does not declare at that position — which is the class of error a normal schema validator
