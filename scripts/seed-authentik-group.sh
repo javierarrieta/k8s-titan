@@ -4,7 +4,7 @@
 # RUN IT, DON'T READ IT INTO A SHELL — the operator's login shell is fish. The bash-isms here are
 # deliberate and the shebang is the interpreter.
 #
-#     scripts/seed-authentik-group.sh <target-group> <source-group> [--dry-run]
+#     scripts/seed-authentik-group.sh <target-group> <source-group> [--dry-run] [--exclude <user>]...
 #
 # WHY THIS EXISTS AND WHY IT TAKES NO NAMES
 # apply/50-apps/auth/identity-blueprint.yaml declares four per-app admin groups and deliberately
@@ -40,16 +40,32 @@ set -euo pipefail
 
 usage() {
   sed -n '3,6p' "$0" | sed 's/^# \{0,1\}//'
-  echo "usage: $(basename "$0") <target-group> <source-group> [--dry-run]" >&2
+  echo "usage: $(basename "$0") <target-group> <source-group> [--dry-run] [--exclude <user>]..." >&2
   exit 2
 }
 
+# Parsed in a loop rather than by position, because `--exclude` is repeatable and can land anywhere
+# among the arguments.
 DRY=0
-if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then usage; fi
-if [ "${3:-}" = "--dry-run" ]; then DRY=1; fi
-[ $# -ge 2 ] || usage
-TARGET=$1
-SOURCE=$2
+EXCLUDE=""
+POSITIONAL=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --dry-run) DRY=1 ;;
+    --exclude)
+      shift
+      [ $# -gt 0 ] || { echo "--exclude needs a username" >&2; exit 2; }
+      EXCLUDE="${EXCLUDE}${1}," ;;
+    --exclude=*) EXCLUDE="${EXCLUDE}${1#--exclude=}," ;;
+    -h|--help) usage ;;
+    -*) echo "unknown option: $1" >&2; usage ;;
+    *) POSITIONAL+=("$1") ;;
+  esac
+  shift
+done
+[ ${#POSITIONAL[@]} -ge 2 ] || usage
+TARGET=${POSITIONAL[0]}
+SOURCE=${POSITIONAL[1]}
 
 NS=${AUTHENTIK_NAMESPACE:-auth}
 KCTL=(kubectl)
@@ -68,6 +84,9 @@ from authentik.core.models import Group
 src_name = os.environ["SEED_SRC"]
 tgt_name = os.environ["SEED_TGT"]
 dry = os.environ.get("SEED_DRY") == "1"
+# Comma-separated. Django's UnicodeUsernameValidator allows only letters, digits and @ . + - _ in a
+# username, so a comma cannot appear inside one and cannot forge a second entry.
+exclude = {n for n in os.environ.get("SEED_EXCLUDE", "").split(",") if n}
 
 def shape(g, extra=()):
     # `extra` projects users that are NOT yet in the group, so a dry run can show the after-state it
@@ -92,7 +111,12 @@ if tgt is None:
 
 before = {u.username for u in tgt.users.all()}
 before_shape = shape(tgt)   # capture BEFORE the add, or target_before reports the after-state
-to_add = [u for u in src.users.all() if u.username not in before]
+src_users = list(src.users.all())
+to_add = [u for u in src_users if u.username not in before and u.username not in exclude]
+skipped = [u for u in src_users if u.username in exclude and u.username not in before]
+# An --exclude never removes: the script is additive-only. Say so loudly rather than letting the
+# operator believe an exclusion took effect when the account was already a member.
+already_excluded = [u for u in tgt.users.all() if u.username in exclude]
 if to_add and not dry:
     tgt.users.add(*to_add)
     # Drop the stale related-manager cache before re-reading, or target_after reports the old count.
@@ -104,6 +128,9 @@ print(json.dumps({
     "added": sorted(u.username for u in to_add),
     "added_detail": sorted([{"username": u.username, "type": u.type} for u in to_add],
                            key=lambda m: m["username"]),
+    "skipped": sorted([{"username": u.username, "type": u.type} for u in skipped],
+                      key=lambda m: m["username"]),
+    "excluded_but_present": sorted(u.username for u in already_excluded),
     "target_after": shape(tgt, to_add if dry else ()),
 }))
 PYCODE
@@ -114,8 +141,8 @@ PYCODE
 # `sh` sets the variables, and `sh` is the one binary guaranteed in any image; `env` is not.
 # The `_` after the -c script is Django's: sh -c SCRIPT consumes the next word as $0.
 if ! OUT=$("${KCTL[@]}" exec -n "$NS" deploy/authentik-worker -- \
-             sh -c 'SEED_SRC="$1"; SEED_TGT="$2"; SEED_DRY="$3"; export SEED_SRC SEED_TGT SEED_DRY; ak shell -c "$4"' \
-             _ "$SOURCE" "$TARGET" "$DRY" "$PY" 2>&1); then
+             sh -c 'SEED_SRC="$1"; SEED_TGT="$2"; SEED_DRY="$3"; SEED_EXCLUDE="$4"; export SEED_SRC SEED_TGT SEED_DRY SEED_EXCLUDE; ak shell -c "$5"' \
+             _ "$SOURCE" "$TARGET" "$DRY" "$EXCLUDE" "$PY" 2>&1); then
   echo "seed-authentik-group: the shell call failed. Last lines:" >&2
   printf '%s\n' "$OUT" | tail -5 >&2
   case "$OUT" in
@@ -149,6 +176,10 @@ printf '%s\n' "$JSON" | jq -r '
     "target  \(.target_before.name)  superuser=\(.target_before.is_superuser)  members=\(.target_before.count)",
     (if (.added | length) == 0 then "added   none (already seeded)"
      else "added   \(.added_detail | map(.username + ":" + .type) | join(", "))" end),
+    (if (.skipped | length) == 0 then empty
+     else "skipped \(.skipped | map(.username + ":" + .type) | join(", "))  (--exclude)" end),
+    (if (.excluded_but_present | length) == 0 then empty
+     else "WARNING: \(.excluded_but_present | join(", ")) excluded but ALREADY a member — this script never removes; drop them in the UI" end),
     "now     \(.target_after.count) member(s): \(.target_after.members | map(.username + ":" + .type) | join(", "))",
     (if .dry then "DRY RUN — nothing changed." else "COMMITTED — membership is live now." end)
   end'
