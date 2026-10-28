@@ -57,8 +57,8 @@ if [ -n "${KUBE_CONTEXT:-}" ]; then KCTL+=(--context "$KUBE_CONTEXT"); fi
 
 # The python is one argv element passed to `ak shell -c`. Django's shell command runs it and exits,
 # which is what makes this scriptable; `ak shell` with no -c is an interactive pty and would hang.
-# Names travel as environment variables rather than being interpolated into the source, so a group
-# name containing a quote cannot rewrite the code it is about to run.
+# The names reach the python as environment variables set by the pod's own `sh` (see the exec call
+# below), so a group name containing a quote cannot rewrite the code it is about to run.
 # `read -d ''` returns 1 when it hits end of input, which a heredoc always does. Under `set -e` that
 # kills the script here with no message at all, so swallow the status.
 read -r -d '' PY <<'PYCODE' || true
@@ -88,6 +88,7 @@ if tgt is None:
     raise SystemExit(0)
 
 before = {u.username for u in tgt.users.all()}
+before_shape = shape(tgt)   # capture BEFORE the add, or target_before reports the after-state
 to_add = [u for u in src.users.all() if u.username not in before]
 if to_add and not dry:
     tgt.users.add(*to_add)
@@ -96,15 +97,20 @@ if to_add and not dry:
 
 print(json.dumps({
     "ok": True, "dry": dry,
-    "source": shape(src), "target_before": shape(tgt),
+    "source": shape(src), "target_before": before_shape,
     "added": sorted(u.username for u in to_add),
     "target_after": shape(tgt),
 }))
 PYCODE
 
-if ! OUT=$("${KCTL[@]}" exec -n "$NS" deploy/authentik-worker \
-             -e "SEED_SRC=$SOURCE" -e "SEED_TGT=$TARGET" -e "SEED_DRY=$DRY" \
-             -- ak shell -c "$PY" 2>&1); then
+# The names and the code all travel as argv elements, never interpolated into a shell string.
+# `kubectl exec` has NO -e flag - that is `docker exec` / `kubectl run`, and the mistake was made
+# here and fails with `unknown shorthand flag: 'e'` before anything reaches the pod. So the pod's own
+# `sh` sets the variables, and `sh` is the one binary guaranteed in any image; `env` is not.
+# The `_` after the -c script is Django's: sh -c SCRIPT consumes the next word as $0.
+if ! OUT=$("${KCTL[@]}" exec -n "$NS" deploy/authentik-worker -- \
+             sh -c 'SEED_SRC="$1"; SEED_TGT="$2"; SEED_DRY="$3"; export SEED_SRC SEED_TGT SEED_DRY; ak shell -c "$4"' \
+             _ "$SOURCE" "$TARGET" "$DRY" "$PY" 2>&1); then
   echo "seed-authentik-group: the shell call failed. Last lines:" >&2
   printf '%s\n' "$OUT" | tail -5 >&2
   case "$OUT" in
