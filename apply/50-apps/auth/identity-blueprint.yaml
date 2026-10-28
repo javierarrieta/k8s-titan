@@ -55,17 +55,18 @@ data:
     # a token. Per-app groups therefore mean per-app membership lists; that is the price of the
     # split, and it is stated here rather than discovered during an incident.
     #
-    # NOT proven: this has not been applied to the live instance. `roles` on a user is checked
-    # structurally rather than by running it, and the three things that make it structurally sound
-    # are worth naming so the remaining risk is the small one: `User.roles` is a FORWARD M2M
-    # declared on User (core/models.py:379, `related_name="users"`, through UserRole) exactly like
-    # `User.groups` at :378, so it is not the prohibited reverse side; `!KeyOf` resolves to the
-    # referenced entry's `pk` (blueprints/v1/common.py:249), which is the UUID the schema asks for;
-    # and the role entry precedes the user entry, so the instance `!KeyOf` needs exists by then.
-    # What is left unproven is only that a live worker agrees. Before trusting it, apply it and read
-    # the worker's verdict:
-    #   kubectl -n auth logs deploy/authentik-worker --since=1h | grep -i "changed file"
-    # and see docs/authentik-runbook.md §5 for the mount-not-apply trap — a blueprint that is
+    # PROVEN APPLIED, 2026-10-28. The worker created the instance and applied it at 16:50:37Z from
+    # `mounted/cm-authentik-identity-blueprint/identity.yaml` and the BlueprintInstance status is
+    # `successful`, which is the only field that answers the question — see
+    # docs/authentik-runbook.md §5 for why the worker log does not. So `roles` on a user works, and
+    # why it works is worth keeping: `User.roles` is a FORWARD M2M declared on User
+    # (core/models.py:379, `related_name="users"`, through UserRole) exactly like `User.groups` at
+    # :378, so it is not the prohibited reverse side; `!KeyOf` resolves to the referenced entry's
+    # `pk` (blueprints/v1/common.py:249), which is the UUID the schema asks for; and the role entry
+    # precedes the user entry, so the instance `!KeyOf` needs exists by then.
+    # What is still NOT proven is membership: the four groups exist and are empty, and nothing reads
+    # them until an app is switched over, one app per commit, in the order written below.
+    # See docs/authentik-runbook.md §5 for the mount-not-apply trap — a blueprint that is
     # valid, validly applied to the cluster, and never read by the worker looks exactly like one
     # that was never written.
     version: 1
