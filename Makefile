@@ -13,12 +13,12 @@ KUSTOMIZE_DIRS := $(shell find apply -name kustomization.yaml 2>/dev/null | sed 
 # not be able to slip between the encryption rule and the validation glob.
 SECRET_FIND := find apply/10-secrets \( -name '*.yaml' -o -name '*.yml' \) ! -name kustomization.yaml
 
-.PHONY: check check-ci kustomize-check kustomize-listing dry-run py-deps validate update-keys scan leak-check secrets-placement secrets-list secrets-present release-secrets secret-refs ingress-auth backup-coverage db-url-check oidc-check grafana-oidc-check observability-oidc-check open-webui-oidc-check mealie-check sure-check crd-check namespace-check tesla-forwarder-test chart-values-check update-cnpg-crds update-crds
+.PHONY: check check-ci kustomize-check kustomize-listing dry-run py-deps validate update-keys scan leak-check secrets-placement secrets-list secrets-present release-secrets secret-refs ingress-auth backup-coverage db-url-check oidc-check grafana-oidc-check observability-oidc-check open-webui-oidc-check mealie-check sure-check crd-check namespace-check tesla-forwarder-test chart-values-check update-cnpg-crds update-crds blueprint-mount-check
 
 # leak-check runs FIRST: make has no -k, so it stops at the first failing prerequisite.
 # validate needs the age key, so an operator who forgot SOPS_AGE_KEY_FILE would never
 # reach a leak gate placed behind it.
-check: py-deps leak-check kustomize-check kustomize-listing validate secrets-placement release-secrets secret-refs ingress-auth backup-coverage db-url-check oidc-check grafana-oidc-check observability-oidc-check open-webui-oidc-check mealie-check sure-check crd-check namespace-check chart-values-check tesla-forwarder-test
+check: py-deps leak-check kustomize-check kustomize-listing validate secrets-placement release-secrets secret-refs ingress-auth blueprint-mount-check backup-coverage db-url-check oidc-check grafana-oidc-check observability-oidc-check open-webui-oidc-check mealie-check sure-check crd-check namespace-check chart-values-check tesla-forwarder-test
 	@echo "check: all offline gates passed"
 
 # The subset provable from the tree alone - no age key, no cluster, no network.
@@ -42,7 +42,7 @@ check: py-deps leak-check kustomize-check kustomize-listing validate secrets-pla
 # network is unhappy is worse than one that is not here at all.
 check-ci:
 	@rc=0; \
-	for t in py-deps leak-check kustomize-check kustomize-listing secrets-placement release-secrets secret-refs ingress-auth backup-coverage crd-check namespace-check tesla-forwarder-test; do \
+	for t in py-deps leak-check kustomize-check kustomize-listing secrets-placement release-secrets secret-refs ingress-auth blueprint-mount-check backup-coverage crd-check namespace-check tesla-forwarder-test; do \
 	  echo "--- $$t ---"; \
 	  $(MAKE) --no-print-directory $$t || rc=1; \
 	done; \
@@ -529,6 +529,39 @@ ingress-auth:
 	  || { echo "ingress-auth: PyYAML is missing (pip install pyyaml) - refusing to report clean"; exit 1; }; \
 	{ for d in $(KUSTOMIZE_DIRS); do kubectl kustomize "$$d" || exit 1; printf -- '---\n'; done; } \
 	  | python3 tools/ingress-auth-check.py apply
+
+# blueprint-mount-check: every authentik blueprint this tree declares is mounted, and mounted where
+# it will actually be read.
+#
+# authentik applies blueprints itself, on its own schedule, and reports nothing to Flux. So a
+# blueprint can be committed, built green, applied to the cluster by Flux, and never reach the
+# worker - which is not a hypothetical: docs/authentik-runbook.md §5 records a blueprint added on
+# 2026-10-20 that was mounted, valid, and skipped by the startup discovery pass, and a second case
+# where the beat pass took 21 minutes to notice. Every gate here was green, because no gate asked
+# whether the mount existed. oidc-check and sure-check guard the *contents* of individual
+# blueprints and only for the apps they were each written for; nothing guarded the mount.
+#
+# It fails six ways: a blueprint-bearing ConfigMap (or an `authentik-*-blueprint` Secret) anywhere in
+# the tree that no authentik release lists under `blueprints.configMaps`/`secrets` - tree-wide on
+# purpose, since the chart mounts by name inside the release's own namespace only and a blueprint
+# committed into the wrong namespace is mounted by nothing; a listed name with no such object; a
+# mounted ConfigMap the worker cannot discover, which is three cases from authentik's own pass
+# (blueprints/v1/tasks.py:126-143) - no `.yaml` key at all, no `.yaml` body parsing to a mapping with
+# `entries`, or a `version` that is not 1; a mounted name absent from the worker's reloader
+# annotation, which is the slow-landing case and the one that reads as "my change did nothing"; that
+# annotation naming an object that no longer exists; and a tree with no authentik HelmRelease or an
+# unreadable `blueprints` block, so it cannot pass vacuously.
+#
+# Keyless, so it runs in check-ci too: it reads names, annotations, and plaintext ConfigMap bodies.
+# Its honest limits are in the tool's docstring - above all, it proves a mount is wired and its body
+# parses, never that the worker applied the blueprint or that the blueprint was valid.
+blueprint-mount-check:
+	@command -v python3 >/dev/null 2>&1 \
+	  || { echo "blueprint-mount-check: python3 is missing - refusing to report clean"; exit 1; }; \
+	python3 -c 'import yaml' >/dev/null 2>&1 \
+	  || { echo "blueprint-mount-check: PyYAML is missing (pip install pyyaml) - refusing to report clean"; exit 1; }; \
+	{ for d in $(KUSTOMIZE_DIRS); do kubectl kustomize "$$d" || exit 1; printf -- '---\n'; done; } \
+	  | python3 tools/blueprint-mount-check.py
 
 # backup-coverage: every PVC that opted in to backup is reachable by a runner, and the four
 # separate files that have to agree about it do agree.

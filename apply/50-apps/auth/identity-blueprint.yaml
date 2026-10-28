@@ -1,0 +1,211 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  # Named to read beside authentik-tesla-blueprint and authentik-opencloud-blueprint, which are
+  # ConfigMaps for the same reason: this blueprint carries no credential, so it gets the exposure
+  # that matches. A ConfigMap is readable in plain view by anyone who can read namespace `auth`,
+  # which is right for a group name and a permission list and would not be for coder's
+  # client_secret (that one goes through apply/10-secrets and sops).
+  #
+  # There is a hard rule behind that split, and it is the reason this file has no `${PLACEHOLDER}`
+  # and no scripts/setup-*.sh: `authentik_core.token` accepts a `key` attribute (verified against
+  # https://goauthentik.io/blueprints/schema.json, definition model_authentik_core.token), so an
+  # API token CAN be declared in a blueprint. It must not be. This repo is public and
+  # `make leak-check` greps credential shapes, not privilege — a token committed here would be a
+  # live admin credential that no gate is designed to notice. Service accounts are declared here;
+  # their tokens are minted out of band and live in apply/10-secrets if anything needs them.
+  name: authentik-identity-blueprint
+  namespace: auth
+data:
+  # Only keys ending in .yaml are discovered by the worker (chart authentik-2026.8.5,
+  # values.yaml:220-226 — the chart offers blueprints.configMaps and blueprints.secrets and
+  # nothing else).
+  identity.yaml: |
+    # authentik blueprint: groups and service accounts. Deliberately NOT human users.
+    #
+    # WHY HUMANS ARE NOT HERE
+    # Human identity on titan comes from Google (authentik/blueprints-google.yaml) and lands on
+    # first login. Declaring people in git would make git own their password lifecycle, and a
+    # deleted line would be a deleted person: `state: absent` deletes via Django's .delete(),
+    # which cascades to sessions, consent and app history. Groups and service accounts are the
+    # opposite case — they are configuration, they are what a rebuilt authentik does NOT get back,
+    # and nothing else reconstructs them.
+    #
+    # WHY A BLUEPRINT AND NOT A CRD OR TERRAFORM
+    # authentik ships no CRDs (verified on this cluster; the pinned chart has no crds/ directory),
+    # so blueprints are the only first-party declarative path. See docs/authentik-runbook.md §5.
+    #
+    # WHAT IS PROVEN AND WHAT IS NOT
+    # Proven offline: every model name and every attribute below was checked against
+    # https://goauthentik.io/blueprints/schema.json (265 model definitions) rather than written
+    # from memory. Two things that file settles and memory would have got wrong: roles are
+    # `authentik_rbac.role`, there is no `authentik_core.role`; and `user.groups` / `user.roles`
+    # are declared with `!KeyOf`, not with UUIDs, for objects this blueprint creates itself.
+    # WHY MEMBERSHIP IS DIRECT AND NOT INHERITED
+    # Authentik has group parentage, and the docs say "Members of children groups are effective
+    # members of the parent group" - which invites one shared admin group with four per-app groups
+    # as its children. That does not work for what these groups are for, and the reason is in the
+    # source rather than in the prose. The `groups` OIDC claim is emitted by authentik's own managed
+    # profile scope mapping (blueprints/system/providers-oauth2.yaml:44 at the pinned 2026.8.5:
+    # `"groups": [group.name for group in request.user.groups.all()]`), and `User.groups` is the
+    # plain M2M. Ancestors are added only by `User.all_groups()` (core/models.py:416 at the same
+    # tag, `self.groups.all().with_ancestors()`), which is what `is_superuser` and role resolution
+    # use -
+    # not the claim. So parentage propagates superuser-ness and roles, and does NOT propagate into
+    # a token. Per-app groups therefore mean per-app membership lists; that is the price of the
+    # split, and it is stated here rather than discovered during an incident.
+    #
+    # NOT proven: this has not been applied to the live instance. `roles` on a user is checked
+    # structurally rather than by running it, and the three things that make it structurally sound
+    # are worth naming so the remaining risk is the small one: `User.roles` is a FORWARD M2M
+    # declared on User (core/models.py:379, `related_name="users"`, through UserRole) exactly like
+    # `User.groups` at :378, so it is not the prohibited reverse side; `!KeyOf` resolves to the
+    # referenced entry's `pk` (blueprints/v1/common.py:249), which is the UUID the schema asks for;
+    # and the role entry precedes the user entry, so the instance `!KeyOf` needs exists by then.
+    # What is left unproven is only that a live worker agrees. Before trusting it, apply it and read
+    # the worker's verdict:
+    #   kubectl -n auth logs deploy/authentik-worker --since=1h | grep -i "changed file"
+    # and see docs/authentik-runbook.md §5 for the mount-not-apply trap — a blueprint that is
+    # valid, validly applied to the cluster, and never read by the worker looks exactly like one
+    # that was never written.
+    version: 1
+    metadata:
+      name: titan-identity
+    entries:
+      # ------------------------------------------------------------------ groups
+      # `authentik Admins` is deliberately NOT declared here. Authentik's own system blueprint
+      # owns it (apply/60-tesla/grafana.yaml:139 records where it comes from), and a
+      # `state: present` entry for an object another blueprint manages is a fight that is lost
+      # on whichever pass runs last. Reference it with !Find; never redeclare it.
+      #
+      # WHY THESE GROUPS EXIST AT ALL
+      # Today one group does four jobs across four apps. `authentik Admins` is authentik's own
+      # superuser group AND Grafana's Org Admin AND Open WebUI's admin AND Mealie's admin. Anyone
+      # who can administer authentik is therefore an admin everywhere. These four groups are the
+      # seam that lets each of those be its own decision. The consumer list below is complete —
+      # `grep -rl "ROLE_ATTRIBUTE_PATH\|OAUTH_ADMIN\|OIDC_GROUPS" apply/` returns exactly these
+      # four consumer files (this file's own comments also match that grep, and are not consumers),
+      # and there are two Grafanas, not one.
+      #
+      # THEY ARE INERT ON PURPOSE, AND THAT IS THE DANGER TOO
+      # Nothing reads them yet, so merging this changes nobody's access. Adoption is a SEPARATE
+      # commit per app, and the order matters: (1) merge this, (2) add to each group the humans who
+      # are in `authentik Admins` today, in the UI or with `ak shell`, (3) only then switch that
+      # app's group name, one app per commit, rollback being a one-word revert of that single line.
+      # Switching before step 2 empties the group and locks every non-admin out of an app whose
+      # login page still looks healthy — and the failure is silent in two of the four cases:
+      # Grafana's expression is `contains(groups[*], X) && 'Admin' || 'Viewer'`, so a miss is
+      # "everyone quietly becomes Viewer", and open-webui has role management on, where a
+      # non-matching group is a 403 rather than a fallback role (its own comment at
+      # apply/50-apps/open-webui/open-webui.yaml:117 says so).
+      #
+      # Every entry repeats `is_superuser: false` deliberately. `state: present` re-asserts listed
+      # attrs on every discovery pass, so pinning it false is what stops an admin group quietly
+      # becoming a privilege escalation via the UI — and `is_superuser` is the one attr that DOES
+      # propagate through parentage, unlike the claim.
+
+      # Grafana at grafana.titan.arrieta.eu (namespace `observability`).
+      # Consumer to switch later: apply/50-apps/grafana/grafana.yaml:145,
+      # GF_AUTH_GENERIC_OAUTH_ROLE_ATTRIBUTE_PATH.
+      - model: authentik_core.group
+        id: titan_grafana_admins
+        identifiers:
+          # `name` is the group's unique key, so it belongs in identifiers and not in attrs:
+          # on update only attrs are re-applied, and a field set in both places is the shape
+          # the docs tell you to avoid.
+          name: titan-grafana-admins
+        state: present
+        attrs:
+          is_superuser: false
+
+      # The SECOND Grafana: tesla-boards.titan.arrieta.eu (namespace `apps`, from 60-tesla).
+      # It is a separate instance with its own OIDC client and its own role expression, so it gets
+      # its own group; collapsing these two would re-create the original problem one level down.
+      # Consumer to switch later: apply/60-tesla/grafana.yaml:148, same env var.
+      - model: authentik_core.group
+        id: titan_tesla_grafana_admins
+        identifiers:
+          name: titan-tesla-grafana-admins
+        state: present
+        attrs:
+          is_superuser: false
+
+      # Open WebUI at open-webui.titan.arrieta.eu.
+      # Consumer to switch later: apply/50-apps/open-webui/open-webui.yaml:123,
+      # OAUTH_ADMIN_ROLES. That variable is a comma-separated list matched against the `groups`
+      # claim, which is why these names carry no spaces — the current `authentik Admins` works only
+      # because it happens to be a single value.
+      - model: authentik_core.group
+        id: titan_openwebui_admins
+        identifiers:
+          name: titan-openwebui-admins
+        state: present
+        attrs:
+          is_superuser: false
+
+      # Mealie at meals.titan.arrieta.eu.
+      # Consumer to switch later: apply/50-apps/mealie/mealie.yaml:165, OIDC_ADMIN_GROUP. Mealie's
+      # OIDC_USER_GROUP is deliberately unset, so any authentik-authenticated user is admitted as
+      # a normal member; only the admin group is in scope here.
+      - model: authentik_core.group
+        id: titan_mealie_admins
+        identifiers:
+          name: titan-mealie-admins
+        state: present
+        attrs:
+          is_superuser: false
+
+      # ------------------------------------------------------------------ rbac
+      # Read-only, and that is the whole point of it. docs/authentik-runbook.md §5 records the
+      # gap this closes: the read-only k8s-reader identity is Forbidden on pods/exec, so it
+      # "cannot reach authentik's blueprint status at all", and every blueprint diagnosis has
+      # needed an admin kubeconfig. This role is the authentik-side equivalent of k8s-reader:
+      # enough to answer "did the worker apply my blueprint, and did it fail", never enough to
+      # change anything. The permission strings are copied from the schema's own enum for
+      # authentik_rbac.role.permissions (882 entries), not guessed.
+      - model: authentik_rbac.role
+        id: role_blueprint_reader
+        identifiers:
+          name: titan-blueprint-reader
+        state: present
+        attrs:
+          permissions:
+            # Exactly one permission, and it is the one the API actually asks for. authentik's
+            # default DRF permission class is authentik.rbac.permissions.ObjectPermissions, whose
+            # SAFE_METHODS path requires <app_label>.view_<model> on a collection endpoint, so
+            # GET /api/v3/managed/blueprints/ is refused without this and answered with it.
+            # BlueprintInstance is what the UI's blueprint list is backed by, and its status / error
+            # is the field that says whether a mount landed.
+            - authentik_blueprints.view_blueprintinstance
+            #
+            # WHAT IS DELIBERATELY NOT HERE. An earlier draft also granted
+            # authentik_core.view_user and authentik_core.view_group, justified as "so the same call
+            # can name which user or group an entry touched". No call in
+            # docs/authentik-runbook.md needs them: the blueprint list carries name, path, status
+            # and last_applied and nothing else, and on a token written to be handed to an agent
+            # those two are org-wide user enumeration. A read-only role is only safe at the width of
+            # the question it answers. Add either back with the endpoint that needs it named, never
+            # for completeness.
+
+      # ------------------------------------------------------------------ service accounts
+      # A service account is a user with `type: service_account` (the schema's enum is
+      # internal | external | service_account | internal_service_account). It has no password
+      # and cannot complete an interactive login; it authenticates with an API token, which is
+      # minted out of band and is NOT in this file — see the header of the ConfigMap above.
+      #
+      # `state: present` re-asserts `roles` on every discovery pass, which is wanted here and
+      # is also the thing to remember: a permission added to this role in the UI is reverted by
+      # the next pass. Add permissions by editing this file.
+      - model: authentik_core.user
+        identifiers:
+          username: svc-blueprint-status
+        state: present
+        attrs:
+          name: Blueprint status reader (read-only)
+          type: service_account
+          is_active: true
+          # !KeyOf points at the entry above with `id: role_blueprint_reader`. Proven shape for
+          # user.groups (goauthentik/authentik#5700); user.roles is the symmetric M2M and is
+          # the one line here that has not been run against a live instance.
+          roles:
+            - !KeyOf role_blueprint_reader

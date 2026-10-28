@@ -124,7 +124,8 @@ spec:
         - name: GF_AUTH_GENERIC_OAUTH_JWK_SET_URL
           value: https://auth.titan.arrieta.eu/application/o/tesla-boards/jwks/
         # profile is load-bearing, not decoration: the `groups` claim exists only because authentik's
-        # default profile scope mapping emits it (blueprints/system/providers-oauth2.yaml:45). Drop
+        # default profile scope mapping emits it (blueprints/system/providers-oauth2.yaml:44 at the
+        # pinned 2026.8.5). Drop
         # it and the role expression below evaluates against a missing claim and everyone silently
         # lands as Viewer — a permissions bug that presents as working.
         - name: GF_AUTH_GENERIC_OAUTH_SCOPES

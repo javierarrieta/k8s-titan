@@ -54,7 +54,7 @@ entries:
         - refresh_token
       # 'profile' is not decoration. Grafana's role mapping reads a `groups` claim, and that claim
       # only exists because the default profile scope mapping emits it
-      # (blueprints/system/providers-oauth2.yaml:45). Drop this scope and every OIDC login silently
+      # (blueprints/system/providers-oauth2.yaml:44 at the pinned 2026.8.5). Drop this scope and every OIDC login silently
       # becomes Viewer, because contains(groups[*], ...) evaluates against nothing.
       property_mappings:
         - !Find [authentik_providers_oauth2.scopemapping, [managed, goauthentik.io/providers/oauth2/scope-openid]]

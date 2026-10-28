@@ -104,6 +104,13 @@ spec:
         # above: authentik's worker only reads what is listed here, and a blueprint that is never
         # mounted is indistinguishable from one that was never written.
         - authentik-opencloud-blueprint
+        # Groups and service accounts (four per-app admin groups, one read-only service account).
+        # A ConfigMap because it carries no credential by construction — see the header of
+        # apply/50-apps/auth/identity-blueprint.yaml, which is also where the rule "declare the
+        # service account, never its token" is written down. Same mount-not-apply trap as every
+        # entry above, and it bites this one harder than the others: a group that was never applied
+        # is invisible until someone is locked out of an app over it.
+        - authentik-identity-blueprint
     authentik:
       log_level: info
       error_reporting:
@@ -186,4 +193,10 @@ spec:
         # plus at startup, so an edit would otherwise sit unread for up to an hour after a merge.
         # Worker only, deliberately — the comment above records that the server does not apply
         # blueprints, so restarting it for a blueprint edit would be an auth outage for no behaviour.
-        configmap.reloader.stakater.com/reload: authentik-tesla-blueprint
+        #
+        # This list was missing authentik-opencloud-blueprint until `make blueprint-mount-check` was
+        # added and failed on it: the OpenCloud blueprint was mounted, and every edit to it would have
+        # landed up to an hour late and read as a no-op. That is the exact failure mode
+        # docs/authentik-runbook.md §5 describes, sitting in main and invisible to every gate that
+        # existed. Keep this list and `blueprints.configMaps` in step; the gate now enforces it.
+        configmap.reloader.stakater.com/reload: "authentik-tesla-blueprint,authentik-opencloud-blueprint,authentik-identity-blueprint"

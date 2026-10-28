@@ -514,7 +514,9 @@ cookie, and it is worth walking once deliberately rather than discovering on a p
 ## 5. Declarative authentik config — blueprints, and how long they take to land
 
 authentik config-as-code on this install is **blueprints**, not CRDs. The chart pinned at
-`2026.8.3` ships no `crds/` directory and has no `installCRDs`, so there is no `Provider` object
+`2026.8.5` ships no `crds/` directory and has no `installCRDs` (verified at `2026.8.3`, when this
+was written; the pin has moved and the `blueprints` mount keys are unchanged at `2026.8.5` —
+`values.yaml:220-226`), so there is no `Provider` object
 to commit; `blueprints.secrets: [<name>]` on the HelmRelease mounts a Secret into the worker at
 `/blueprints/mounted/secret-<name>/`. The first thing using it is coder's OIDC app and provider:
 template at `authentik/blueprints-coder.yaml`, rendered by `scripts/setup-coder-secrets.sh` into
@@ -550,7 +552,64 @@ kubectl -n auth exec deploy/authentik-worker -- ak apply_blueprint \
 `Forbidden` on `pods/exec`, `pods/portforward` and `get secret` — measured with
 `kubectl auth can-i`, not inferred — so it cannot read a mounted blueprint, cannot run
 `ak apply_blueprint`, and cannot reach authentik's blueprint status at all. It can read pod logs, and
-that is where the diagnosis starts, not where it ends.
+that is where the diagnosis starts, not where it ends. That k8s-side limit is what
+`titan-blueprint-reader` below exists to work around; it is a different identity, not a grant to
+`k8s-reader`.
+
+### A read-only path to blueprint status — declared, not yet applied
+
+Written with `apply/50-apps/auth/identity-blueprint.yaml`, which declares an authentik role
+`titan-blueprint-reader` holding exactly one permission — `authentik_blueprints.view_blueprintinstance`
+— and a service account `svc-blueprint-status` holding that role. The authentik-side equivalent of
+`k8s-reader`: enough to answer "did the worker apply my blueprint, and did it fail", never enough to
+change anything.
+
+One permission is the whole design, and it is the width the API actually asks for: authentik's default
+DRF permission class is `authentik.rbac.permissions.ObjectPermissions` (`authentik/root/settings.py:248`),
+whose `SAFE_METHODS` path requires `<app_label>.view_<model>` on a collection endpoint. An earlier draft
+also granted `authentik_core.view_user` and `authentik_core.view_group` so a failed entry could be
+named; nothing below needs them, the blueprint list returns only name / path / status / last_applied,
+and on a token meant to be handed to an agent those two are org-wide user enumeration. They were
+dropped in review — see the comment on the role itself before adding anything back.
+
+**Nothing here has been run.** The blueprint is not applied, the account does not exist yet, and no
+token has been minted. What follows is derived from the pinned `version/2026.8.5` source, not from a
+successful run — treat it as a procedure to verify, not a runbook that has been drilled.
+
+What it will answer, once applied:
+
+```fish
+# GET /api/v3/managed/blueprints/ — the route is `managed/blueprints` in
+# authentik/blueprints/urls.py at version/2026.8.5; the list is what the UI's blueprint page is.
+curl -sS -H "Authorization: Bearer $AUTHENTIK_STATUS_TOKEN" \
+  https://auth.titan.arrieta.eu/api/v3/managed/blueprints/ \
+  | jq '.results[] | {name, path, status, last_applied}'
+```
+
+`status` is one of `successful | warning | error | orphaned | unknown` (`BlueprintInstanceStatus`,
+`authentik/blueprints/models.py:46`). A blueprint the worker never discovered is **absent from this
+list entirely** — that is the runbook's oldest finding, and it is why absence and failure are two
+different answers here and only `ak apply_blueprint` plus the worker log separates them.
+
+Minting the token, in order, with the two traps in it:
+
+1. The account must exist first, i.e. the blueprint must have landed. Check with the `curl` above
+   against a known-good token, or the UI (Directory → Users → `svc-blueprint-status`).
+2. `POST /api/v3/core/tokens/` with `{"identifier": …, "intent": "api", "user": "<uuid>",
+   "expiring": false}`. `expiring: false` is not cosmetic: the API forces `expires` to the tenant
+   default for `intent: api` (`authentik/core/api/tokens.py`, `TokenSerializer.validate`), and the
+   default manager filters out `expires__lt=now(), expiring=True` — a token left expiring is
+   silently gone one day later and the next diagnosis fails with a 401 that looks like a revoked
+   grant.
+3. **The create response does not contain the key.** `TokenSerializer` has no `key` field outside
+   the blueprint context; the key comes from `GET /api/v3/core/tokens/<identifier>/view_key/`,
+   which needs `authentik_core.view_token_key` — deliberately *not* in `titan-blueprint-reader`, so
+   minting is an admin act and reading is not. That is the split that makes the role safe to hand to
+   an agent.
+
+The token then goes in `apply/10-secrets/`, sops-encrypted, `stringData` — never in a blueprint, per
+the rule written into the header of `identity-blueprint.yaml`. What consumes it is not wired yet; if
+nothing consumes it, do not mint it.
 
 ### A brand-new blueprint can be missed by the very pass that should have caught it
 

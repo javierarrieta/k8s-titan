@@ -641,7 +641,7 @@ Four things that were true at the time of the rename and are worth knowing befor
   when the gap has a price (`docs/authentik-runbook.md` §5, which is where all of that is written down).
   Two things about it are easy to get wrong and hard to notice:
   - **The `profile` scope is load-bearing.** The `groups` claim comes only from authentik's default
-    profile scope mapping (`blueprints/system/providers-oauth2.yaml:45`), so dropping it makes
+    profile scope mapping (`blueprints/system/providers-oauth2.yaml:44` at the pinned 2026.8.5), so dropping it makes
     `role_attribute_path` evaluate against a missing claim and every login silently becomes Viewer.
     Members of authentik's own default `authentik Admins` group get Org Admin; everyone else Viewer.
   - **The endpoint paths are asymmetric.** `authorize`, `token` and `userinfo` are global
