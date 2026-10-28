@@ -144,21 +144,34 @@ kubectl --context titan -n apps exec deploy/investing-agent -- sh -c 'grep -o "\
 Then curl the `base_url` that first command printed, at `/v1/models`, and expect `200`. Three
 commands, and they are the only ones that would have caught anything this section documents.
 
-## Ingress, added 2026-10-27
+## Ingress, added 2026-10-27 — amended 2026-10-28, now gated by authentik
 
 The dashboard went from in-cluster-only to a public hostname during the bring-up follow-up, not
 before merging. The add is deliberate and is now the design record at the bottom of
 `apply/50-apps/investing-agent/investing-agent.yaml`; this section is the log of it.
 
+**Amended 2026-10-28, because PR #192 put a forward-auth gate in front of this host and three
+sentences below said the opposite of what the file does.** The original wording is kept rather than
+silently rewritten — it is the log of what was decided on 2026-10-27, and the parts about the
+credential and the entrypoint pin still hold. What changed: the `Ingress` now carries
+`traefik.ingress.kubernetes.io/router.middlewares: apps-teslamate-auth@kubernetescrd`, so every
+request reaches authentik before it reaches the pod and the dashboard's own login is the *second*
+gate rather than the only one. The mechanism, the policy it inherits (any authentik-authenticated
+account — `access_group` is unset, and nothing in this tree can attest that set is a set of one), and
+the answers that tell you whether it is working are all on the `Ingress`. `make ingress-auth`
+appears with that change and is what stops the annotation from being prose only.
+
 - **The host** is `investing-agent.titan.arrieta.eu` — one label deep, exactly the wildcard
   `*.titan.arrieta.eu`'s depth, so the add needed no new Certificate and no DNS record, and no edit
   to `apply/40-certificates/titan-wildcard.yaml`: the Secret arrives through the Reflector
   allow-list and `apps` was already on it.
-- **No forward-auth middleware** was added. The dashboard's own login
-  (`HERMES_DASHBOARD_BASIC_AUTH_*`) is the gate, which is the property that made a public hostname
-  safe to plan — and the credential behind it is machine-generated, operator-attested 2026-10-27, which
-  is the half of that sentence the rate-limit decision turns on. Adding a proxy-side gate would have
-  meant editing the Tesla-owned outpost blueprint that owns the provider list for no benefit.
+- **SUPERSEDED 2026-10-28 — this bullet read "No forward-auth middleware was added."** There is one
+  now, and it needed no blueprint edit: the outpost's provider is `forward_domain` over
+  `titan.arrieta.eu`, so this host was already covered by it. Kept because the half about the
+  credential is what the rate-limit decision still rests on. The dashboard's own login
+  (`HERMES_DASHBOARD_BASIC_AUTH_*`) was then the only gate, which is the property that made a public
+  hostname safe to plan — and the credential behind it is machine-generated, operator-attested
+  2026-10-27, which is the half of that sentence the rate-limit decision turns on.
 - **The router is pinned to the `websecure` entrypoint** —
   `traefik.ingress.kubernetes.io/router.entrypoints: websecure` on the `Ingress` annotations, the
   same line `apply/50-apps/llm/llm.yaml` draws for its bearer token — so cleartext is refused rather
@@ -166,9 +179,13 @@ before merging. The add is deliberate and is now the design record at the bottom
   HTTP→HTTPS redirect on this cluster's Traefik to lean on instead, which was measured, not assumed:
   `http://meals.titan.arrieta.eu/` (no pin) answers **200** over cleartext and
   `http://llm.titan.arrieta.eu/` (pinned) answers **404**. So the annotation is the whole mechanism
-  and nothing in this repo notices it being removed.
-- **Nothing rate-limits the host.** The dashboard's login is the only gate on a public hostname,
-  so failed logins are unthrottled at the proxy. Traefik 3.7.8 ships an OSS `rateLimit` middleware and
+  and nothing in this repo notices it being removed — `make ingress-auth`, new with the 2026-10-28
+  amendment, reads the middleware annotation and deliberately not this one.
+- **Nothing rate-limits the host.** Narrowed 2026-10-28, not closed: a stranger on the internet can no
+  longer make this pod run scrypt at all, because authentik answers them first, but nothing has been
+  verified to throttle a signed-in user hammering `/login`. Before the gate the dashboard's login was
+  the only gate on a public hostname, so failed logins were unthrottled at the proxy. Traefik 3.7.8
+  ships an OSS `rateLimit` middleware and
   the `Middleware` CRD is already used by `observability-grafana-auth@kubernetescrd`, so it is a
   two-line add — deliberately not added. The decision, and the residual it leaves, are in
   *Why no rate limiter — decided, not deferred* below.
@@ -265,6 +282,31 @@ but `GET /` answers 302 to `/login?next=%2F` and no response carries `WWW-Authen
 manifest said "basic auth" and now says login. The posture is unchanged — and a session cookie loose in
 cleartext is a worse outcome than one basic-auth header, which is one more reason the entrypoint pin is
 the line that matters.
+
+### Re-check after the 2026-10-28 gate — baseline taken, post-merge check NOT yet run
+
+The pair above is the 2026-10-27 state and stays as measured. The gate changes what `https://` has to
+answer, so the baseline was re-taken immediately before PR #192 landed, which makes the post-merge
+check a comparison rather than a hope:
+
+```console
+$ kubectl --context titan -n apps get ingress investing-agent -o jsonpath='{.metadata.annotations}'
+{"traefik.ingress.kubernetes.io/router.entrypoints":"websecure"}
+$ kubectl --context titan -n apps get middleware teslamate-auth -o jsonpath='{.spec.forwardAuth.address}'
+http://authentik-server.auth.svc.cluster.local/outpost.goauthentik.io/auth/traefik
+$ curl -o /dev/null -w '%{http_code}\n' https://investing-agent.titan.arrieta.eu/
+302
+$ curl -o /dev/null -w '%{http_code}\n' http://investing-agent.titan.arrieta.eu/
+404
+```
+
+All four measured 2026-10-28 as the read-only `k8s-reader` identity, before the change. After it
+lands: the annotation dump must carry `router.middlewares` as well, `http://` must still be 404, and
+the `https://` 302 must point at `auth.titan.arrieta.eu/outpost.goauthentik.io/start?rd=…` instead of
+`/login?next=%2F`. Three wrong answers, three faults — a 302 still landing on `/login` is the
+middleware not firing, a 200 is the host serving strangers, and a 404 with a clean Traefik log is
+authentik refusing a host its provider no longer matches. Nothing alerts on any of this, so it is a
+check someone has to run.
 
 **Not set, deliberately left that way:** no HSTS header on this host. Harmless while `http://` answers 404
 — a downgrade needs an active attacker, not a stale bookmark — so a nit, not a finding.

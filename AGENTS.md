@@ -204,8 +204,8 @@ a skip. CI runs GitGuardian on every push and warns, rather than failing, when
 `GITGUARDIAN_API_KEY` is absent from the repo.
 
 What runs automatically is `make check-ci` — leak-check, kustomize-check, kustomize-listing,
-secrets-placement, release-secrets, secret-refs, backup-coverage, crd-check and namespace-check,
-the gates provable from the tree alone,
+secrets-placement, release-secrets, secret-refs, ingress-auth, backup-coverage, crd-check and
+namespace-check — the gates provable from the tree alone,
 and the only control here that `--no-verify` cannot skip. `release-secrets` fails when a
 `HelmRelease` reaches for a Secret that is not in `apply/10-secrets` with a matching
 namespace, so a typo'd name surfaces on the laptop instead of as a red release three
@@ -220,7 +220,20 @@ name and namespace with a producer in `PRODUCED_IN_CLUSTER` (today: `apps/titan-
 by Reflector); an entry there is a deliberate gap, not a fix. Same honest limit as
 `release-secrets`: a name and a namespace, never the keys inside. It was written because the
 investing-agent migration had to hand-check its `envFrom` name and nothing in the tree would
-have caught a typo. `crd-check` walks every built
+have caught a typo. `ingress-auth` is that gate one object type further on, for the
+annotation-shaped decisions on an `Ingress`: it fails when a built `Ingress` serving a
+`*.titan.arrieta.eu` host carries no `router.middlewares` and is not named in `NOT_PROXY_GATED` with
+a citation, when a reference names no `Middleware` this tree builds or a namespace other than its own
+Ingress's, or when the resolved `Middleware` is not a `forwardAuth` — an annotation naming a
+`stripPrefix` satisfies "has a middleware" while gating nothing. It reports without failing the one
+reference that crosses a Flux stage (`50-apps`' investing-agent Ingress → `60-tesla`'s Middleware),
+because neither stage depends on the other and a cold restore can leave that reference briefly
+unresolvable. Its honest limits: it proves a gate resolves, never that the policy behind it is the
+policy you meant — an authentik provider with `access_group` unset gates a host open to every
+authenticated account, and that is a row in authentik's database, not in this tree — and it does not
+read `router.entrypoints`, so the `websecure` pin is still guarded by prose alone. It was written
+because PR #192 gated a public host with an annotation, and that same file said, twice, that no gate
+reads Traefik annotations. `crd-check` walks every built
 object against the CRDs vendored in `vendor/cnpg-crds/` and rejects any field the schema
 does not declare at that position — which is the class of error a normal schema validator
 waves through, because the CNPG CRDs set no `additionalProperties: false` anywhere, and

@@ -88,7 +88,8 @@
 # outpost before the pod sees it, through the Middleware that already exists in this namespace. This
 # is NOT a mesh-only host and nothing here takes it off the internet — it is the same public listener
 # with a real IdP in front of it. The mechanism, the policy it inherits, and what it fails open on are
-# all at the Ingress.
+# all at the Ingress. `make ingress-auth` proves the reference resolves and that this host is gated at
+# all; it cannot prove the policy, which is why the Ingress states the policy instead of implying it.
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -302,25 +303,37 @@ metadata:
   # `http://meals.titan.arrieta.eu/` — no pin — answers 200 over cleartext today, while
   # `http://llm.titan.arrieta.eu/` — pinned, apply/50-apps/llm/llm.yaml — answers 404. Nothing here
   # can see this line being deleted: `crd-check` walks custom resources, `secret-refs` walks
-  # workloads, and no gate reads Traefik annotations. This comment is the only guard.
+  # workloads, and `make ingress-auth` reads the middleware annotation below but deliberately not this
+  # one. For the pin, this comment is still the only guard.
   annotations:
     traefik.ingress.kubernetes.io/router.entrypoints: websecure
     # THE SECOND LINE THAT MATTERS IN THIS OBJECT: the forward-auth gate. `apps-teslamate-auth` is the
-    # Middleware declared at apply/60-tesla/teslamate.yaml:171-190 — same namespace, so it is
+    # Middleware declared at apply/60-tesla/teslamate.yaml:171-188 — same namespace, so it is
     # referenceable from here without a new object, and `@kubernetescrd` is the CRD provider's own name
     # (`@kubernetes` is the Ingress provider and does not resolve a CRD middleware). Delete this line
     # and the host is public again with only the dashboard's own login in front, which is the state this
-    # line exists to end. No gate here reads Traefik annotations, so this comment is the only guard —
-    # same class of hole as the entrypoint pin above it, and now there are two of them.
+    # line exists to end. `make ingress-auth` is the guard now: it fails when an apex host carries no
+    # middleware, when a reference names no `Middleware` this tree builds, or when a reference names a
+    # namespace other than its own Ingress's. It is the reason this line is no longer prose only.
+    #
+    # THE ONE HAZARD THAT GATE REPORTS RATHER THAN FAILS ON. This is the only middleware reference in the
+    # tree that crosses a Flux stage: the object is built by `60-tesla`, this Ingress by `50-apps`, and
+    # `stage-apps.yaml` and `stage-tesla.yaml` each `dependsOn` certificates and databases while neither
+    # depends on the other, so on a cold restore their order is undefined. While the reference is
+    # unresolvable Traefik disables this router and the host 404s — upstream behaviour, reported rather
+    # than measured here, and fail-closed either way, self-healing once `tesla` reconciles. Accepted
+    # 2026-10-28 over declaring a second identical `Middleware` in this file: two objects aimed at one
+    # outpost is a drift surface, and this file has no business owning the outpost's address. If the
+    # cold-restore 404 ever bites, that object is the fix and it is ten lines.
     traefik.ingress.kubernetes.io/router.middlewares: apps-teslamate-auth@kubernetescrd
   # The public console for the agent. The source had no ingress and the add is deliberate: the
   # operator needs the dashboard to configure the agent — profiles, model, cron — from a browser
   # instead of `kubectl exec` into the volume. It carries its own login
-  # (HERMES_DASHBOARD_BASIC_AUTH_*), which was the only gate when this Ingress was written and is now the
-  # second one. Note the variable names overstate the mechanism: it is a form login at `/login` followed by a
-  # signed session cookie — `GET /` answers 302 to `/login?next=%2F` and there is no `WWW-Authenticate`
-  # anywhere — not HTTP Basic. That makes the entrypoint pin below more important, not less: a session
-  # cookie loose in cleartext is worse than one basic-auth header.
+  # (HERMES_DASHBOARD_BASIC_AUTH_*), which was the only gate when this Ingress was written and is now
+  # the second one. Note the variable names overstate the mechanism: it is a form login at `/login`
+  # followed by a signed session cookie — `GET /` answers 302 to `/login?next=%2F` and there is no
+  # `WWW-Authenticate` anywhere — not HTTP Basic. That makes the entrypoint pin below more important,
+  # not less: a session cookie loose in cleartext is worse than one basic-auth header.
   #
   # WHY THE GATE NEEDED NOTHING ON THE AUTHENTIK SIDE. The proxy provider in
   # apply/50-apps/auth/tesla-outpost-blueprint.yaml is `mode: forward_domain` with
@@ -337,6 +350,13 @@ metadata:
   # re-couples this file to the Tesla blueprint the outpost entry lives in. Tightening it is a separate
   # change with its own review, and the same is true of the Tesla apps.
   #
+  # NOT ATTESTED, AND DELIBERATELY LEFT SO IN THE OPEN. Everything above is acceptable only if "every
+  # authentik account" is a set of one, and nothing in this tree can prove that: authentik's users are
+  # rows in its own database and the read-only identity here cannot read them. Check it on the IdP
+  # before trusting this host — Providers → titan-tesla → `access_group` still empty, and no enrollment
+  # flow that can mint an account without an operator. If either moves, this console is reachable by a
+  # stranger with a password and every gate in this repo stays green while it is.
+  #
   # THE COUPLING THAT CAME WITH THE CHEAP OPTION. The provider is owned by
   # apply/50-apps/auth/tesla-outpost-blueprint.yaml, a Tesla file. Narrowing it later — setting
   # access_group, or replacing forward_domain with per-host providers — reaches this host, and
@@ -348,11 +368,21 @@ metadata:
   # not part of this change. And the self-reference is worth naming: if authentik is down this console is
   # unreachable, which is correct — the console is not how anyone fixes authentik.
   #
-  # HOW TO TELL IT IS STILL WORKING. Before this line was added, `GET https://investing-agent.titan.arrieta.eu/`
-  # answered 302 to `/login?next=%2F` — hermes' own form, measured 2026-10-28. With the gate in place it
-  # must 302 to `auth.titan.arrieta.eu/outpost.goauthentik.io/start?rd=…` instead. A 302 that lands on
-  # `/login` means the middleware is not firing; a 200 means the whole host is being served to
-  # strangers.
+  # HOW TO TELL IT IS STILL WORKING. Before this line was added,
+  # `GET https://investing-agent.titan.arrieta.eu/` answered 302 to `/login?next=%2F` — hermes' own
+  # form, measured 2026-10-28. With the gate in place it must 302 to
+  # `auth.titan.arrieta.eu/outpost.goauthentik.io/start?rd=…` instead. Four answers, four faults: a 302
+  # to `/login` means the middleware is not firing; a 200 means the whole host is served to strangers;
+  # and a 404 with a clean Traefik log is authentik answering, which is what a narrowed provider does
+  # to a host it no longer matches — the trap `docs/teslamate-runbook.md:577` already records for the
+  # Tesla apps, and the reason the coupling paragraph above is not decoration.
+  #
+  # NOTHING NON-BROWSER CALLS THIS HOST, which is the only reason forward-auth here is free. A machine
+  # caller would get a 302 to an HTML login page rather than an error, so a broken integration would
+  # read as a silent no-op. Grep the tree for the hostname: only this file and its kustomization comment
+  # name it — no callback, webhook or cron URL points at it — and the agent's Discord transport is a bot
+  # connection out, not a listener in (`docs/investing-agent-bringup-2026-10-26.md` records
+  # `discord.state: connected` behind a bot token).
   #
   # Cleartext is refused here, not redirected, and that is what the `websecure` annotation above is
   # for — it is the mechanism, not the prose. The credential in play is the dashboard's own
@@ -376,12 +406,12 @@ metadata:
   # full mixing pass per attempt — which caps the attempt rate at the pod regardless. What that leaves
   # is resource exhaustion: every failed attempt costs this 1.5-CPU pod 16 MiB and real work, and
   # nothing caps it. That is an availability hit on one console, the same one every public host here
-  # carries. Traefik
-  # 3.7.8 ships an OSS `rateLimit` middleware and the `Middleware` CRD is already in use here
-  # (observability-grafana-auth@kubernetescrd), so it is a two-line add — deliberately not made, because
-  # the limiter is per source IP and counts every request including the console's own static assets, so
-  # a limit tight enough to matter can lock the operator out of the page they need to log in to, and
-  # that reads as an outage rather than a lockout. The scrypt parameters are below OWASP's current floor
+  # carries. Traefik 3.7.8 ships an OSS `rateLimit` middleware and the `Middleware` CRD is already in
+  # use here (observability-grafana-auth@kubernetescrd), so it is a two-line add — deliberately not
+  # made, because the limiter is per source IP and counts every request including the console's own
+  # static assets, so a limit tight enough to matter can lock the operator out of the page they need
+  # to log in to, and that reads as an outage rather than a lockout. The scrypt parameters are below
+  # OWASP's current floor
   # (N=2^17, r=8, p=1) and are not raisable from this tree — the container sets no parameter that moves
   # them — which is irrelevant while the input is full-entropy. Full record and the honest limits:
   # docs/investing-agent-bringup-2026-10-26.md.

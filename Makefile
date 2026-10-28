@@ -13,12 +13,12 @@ KUSTOMIZE_DIRS := $(shell find apply -name kustomization.yaml 2>/dev/null | sed 
 # not be able to slip between the encryption rule and the validation glob.
 SECRET_FIND := find apply/10-secrets \( -name '*.yaml' -o -name '*.yml' \) ! -name kustomization.yaml
 
-.PHONY: check check-ci kustomize-check kustomize-listing dry-run py-deps validate update-keys scan leak-check secrets-placement secrets-list secrets-present release-secrets secret-refs backup-coverage db-url-check oidc-check grafana-oidc-check observability-oidc-check open-webui-oidc-check mealie-check sure-check crd-check namespace-check tesla-forwarder-test chart-values-check update-cnpg-crds update-crds
+.PHONY: check check-ci kustomize-check kustomize-listing dry-run py-deps validate update-keys scan leak-check secrets-placement secrets-list secrets-present release-secrets secret-refs ingress-auth backup-coverage db-url-check oidc-check grafana-oidc-check observability-oidc-check open-webui-oidc-check mealie-check sure-check crd-check namespace-check tesla-forwarder-test chart-values-check update-cnpg-crds update-crds
 
 # leak-check runs FIRST: make has no -k, so it stops at the first failing prerequisite.
 # validate needs the age key, so an operator who forgot SOPS_AGE_KEY_FILE would never
 # reach a leak gate placed behind it.
-check: py-deps leak-check kustomize-check kustomize-listing validate secrets-placement release-secrets secret-refs backup-coverage db-url-check oidc-check grafana-oidc-check observability-oidc-check open-webui-oidc-check mealie-check sure-check crd-check namespace-check chart-values-check tesla-forwarder-test
+check: py-deps leak-check kustomize-check kustomize-listing validate secrets-placement release-secrets secret-refs ingress-auth backup-coverage db-url-check oidc-check grafana-oidc-check observability-oidc-check open-webui-oidc-check mealie-check sure-check crd-check namespace-check chart-values-check tesla-forwarder-test
 	@echo "check: all offline gates passed"
 
 # The subset provable from the tree alone - no age key, no cluster, no network.
@@ -42,7 +42,7 @@ check: py-deps leak-check kustomize-check kustomize-listing validate secrets-pla
 # network is unhappy is worse than one that is not here at all.
 check-ci:
 	@rc=0; \
-	for t in py-deps leak-check kustomize-check kustomize-listing secrets-placement release-secrets secret-refs backup-coverage crd-check namespace-check tesla-forwarder-test; do \
+	for t in py-deps leak-check kustomize-check kustomize-listing secrets-placement release-secrets secret-refs ingress-auth backup-coverage crd-check namespace-check tesla-forwarder-test; do \
 	  echo "--- $$t ---"; \
 	  $(MAKE) --no-print-directory $$t || rc=1; \
 	done; \
@@ -503,6 +503,32 @@ secret-refs:
 	  || { echo "secret-refs: PyYAML is missing (pip install pyyaml) - refusing to report clean"; exit 1; }; \
 	{ for d in $(KUSTOMIZE_DIRS); do kubectl kustomize "$$d" || exit 1; printf -- '---\n'; done; } \
 	  | python3 tools/secret-refs-check.py
+
+# ingress-auth: every public apex host is gated, and its gate resolves to something that gates.
+#
+# Whether a public hostname is gated at all is decided by Traefik annotations on an `Ingress`, and
+# nothing here read them: crd-check walks custom resources and an Ingress is a core type, secret-refs walks workloads and never looks at an Ingress, release-secrets walks
+# HelmRelease objects. So the annotation that gates investing-agent.titan.arrieta.eu behind
+# authentik (PR #192) was guarded by a comment, and that file said so twice. A gate whose subject
+# is prose gets deleted in a later refactor and stays green. This is secret-refs one object type
+# further on.
+#
+# It fails when an apex Ingress carries no router.middlewares and is not allow-listed, when a
+# reference names no Middleware this tree builds or a namespace other than its Ingress's own, and
+# when the resolved Middleware is not a forwardAuth - an annotation naming a stripPrefix satisfies
+# "has a middleware" while gating nothing. It refuses to pass vacuously, and a stale allow-list
+# entry fails rather than rotting.
+#
+# Keyless, so it runs in check-ci: it reads annotation strings off the built tree. Its honest
+# limits are in the tool's docstring - above all, it proves a gate resolves, never that the policy
+# behind it is the policy you meant, and it does not read router.entrypoints at all.
+ingress-auth:
+	@command -v python3 >/dev/null 2>&1 \
+	  || { echo "ingress-auth: python3 is missing - refusing to report clean"; exit 1; }; \
+	python3 -c 'import yaml' >/dev/null 2>&1 \
+	  || { echo "ingress-auth: PyYAML is missing (pip install pyyaml) - refusing to report clean"; exit 1; }; \
+	{ for d in $(KUSTOMIZE_DIRS); do kubectl kustomize "$$d" || exit 1; printf -- '---\n'; done; } \
+	  | python3 tools/ingress-auth-check.py apply
 
 # backup-coverage: every PVC that opted in to backup is reachable by a runner, and the four
 # separate files that have to agree about it do agree.
