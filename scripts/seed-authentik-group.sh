@@ -69,12 +69,15 @@ src_name = os.environ["SEED_SRC"]
 tgt_name = os.environ["SEED_TGT"]
 dry = os.environ.get("SEED_DRY") == "1"
 
-def shape(g):
-    # sorted() over dicts raises TypeError - dicts are not orderable - so sort by the username.
-    members = [{"username": u.username, "type": u.type} for u in g.users.all()]
+def shape(g, extra=()):
+    # `extra` projects users that are NOT yet in the group, so a dry run can show the after-state it
+    # is promising - including each user's `type`. Without that, a dry run prints an empty target and
+    # you commit without ever seeing whether you are about to hand admin to a service account.
+    members = {u.username: u.type for u in g.users.all()}
+    members.update({u.username: u.type for u in extra})
     return {"name": g.name, "is_superuser": g.is_superuser,
-            "members": sorted(members, key=lambda m: m["username"]),
-            "count": g.users.count()}
+            "members": [{"username": k, "type": v} for k, v in sorted(members.items())],
+            "count": len(members)}
 
 src = Group.objects.filter(name=src_name).first()
 if src is None:
@@ -99,7 +102,9 @@ print(json.dumps({
     "ok": True, "dry": dry,
     "source": shape(src), "target_before": before_shape,
     "added": sorted(u.username for u in to_add),
-    "target_after": shape(tgt),
+    "added_detail": sorted([{"username": u.username, "type": u.type} for u in to_add],
+                           key=lambda m: m["username"]),
+    "target_after": shape(tgt, to_add if dry else ()),
 }))
 PYCODE
 
@@ -143,7 +148,7 @@ printf '%s\n' "$JSON" | jq -r '
     "source  \(.source.name)  superuser=\(.source.is_superuser)  members=\(.source.count)",
     "target  \(.target_before.name)  superuser=\(.target_before.is_superuser)  members=\(.target_before.count)",
     (if (.added | length) == 0 then "added   none (already seeded)"
-     else "added   \(.added | join(", "))" end),
+     else "added   \(.added_detail | map(.username + ":" + .type) | join(", "))" end),
     "now     \(.target_after.count) member(s): \(.target_after.members | map(.username + ":" + .type) | join(", "))",
     (if .dry then "DRY RUN — nothing changed." else "COMMITTED — membership is live now." end)
   end'
