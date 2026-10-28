@@ -113,11 +113,18 @@ resources:
   - sure/sure-db.yaml
   - sure/sure.yaml
   # Hermes, the Nous Research investing agent, migrated from ../k8s-techdelivery with its object
-  # names intact. One hand-written manifest (PVC + Deployment + Service in namespace `apps`), so it
-  # is the shape §3.2 of the 2026-10-19 design keeps in this stage: no bulk authored here, and a bad
-  # field freezes coder's and authentik's *updates*, not coder. It passes the §3.1 admission test —
-  # one pod, no database, no public hostname, credentials only from its own Secret — which is why it
+  # names intact. One hand-written manifest (PVC + Deployment + Service + Ingress in namespace
+  # `apps`), so it is the shape §3.2 of the 2026-10-19 design keeps in this stage: no bulk authored
+  # here, and a bad field freezes coder's and authentik's *updates*, not coder. It passes the §3.1
+  # admission test — one pod, no database, credentials only from its own Secret — which is why it
   # lands in the existing `apps` namespace rather than buying a new one.
+  #
+  # §3.1 also says "no public hostname of their own", and since 2026-10-27 this app has one at
+  # investing-agent.titan.arrieta.eu. Spec §3.1 is amended for it: the clause decides namespace by what
+  # a hostname *costs the cluster*, and this one cost nothing — the existing wildcard reflected into
+  # `apps`, which was already on that allow-list, so no Certificate, no DNS record, no Secret and no
+  # namespaces.yaml entry. A literal ban would have bought a namespace for zero new objects, which is
+  # the ceremony the clause exists to avoid.
   #
   # It runs at replicas: 1 from the first merge, at the same moment ../k8s-techdelivery scales its
   # copy to 0: `local-path-retain` is WaitForFirstConsumer, so a stopped app here would leave the
