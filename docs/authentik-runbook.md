@@ -559,10 +559,18 @@ that is where the diagnosis starts, not where it ends. That k8s-side limit is wh
 ### A read-only path to blueprint status — declared, not yet applied
 
 Written with `apply/50-apps/auth/identity-blueprint.yaml`, which declares an authentik role
-`titan-blueprint-reader` (`authentik_blueprints.view_blueprintinstance`, `authentik_core.view_user`,
-`authentik_core.view_group`) and a service account `svc-blueprint-status` holding it. The
-authentik-side equivalent of `k8s-reader`: enough to answer "did the worker apply my blueprint, and
-did it fail", never enough to change anything.
+`titan-blueprint-reader` holding exactly one permission — `authentik_blueprints.view_blueprintinstance`
+— and a service account `svc-blueprint-status` holding that role. The authentik-side equivalent of
+`k8s-reader`: enough to answer "did the worker apply my blueprint, and did it fail", never enough to
+change anything.
+
+One permission is the whole design, and it is the width the API actually asks for: authentik's default
+DRF permission class is `authentik.rbac.permissions.ObjectPermissions` (`authentik/root/settings.py:248`),
+whose `SAFE_METHODS` path requires `<app_label>.view_<model>` on a collection endpoint. An earlier draft
+also granted `authentik_core.view_user` and `authentik_core.view_group` so a failed entry could be
+named; nothing below needs them, the blueprint list returns only name / path / status / last_applied,
+and on a token meant to be handed to an agent those two are org-wide user enumeration. They were
+dropped in review — see the comment on the role itself before adding anything back.
 
 **Nothing here has been run.** The blueprint is not applied, the account does not exist yet, and no
 token has been minted. What follows is derived from the pinned `version/2026.8.5` source, not from a

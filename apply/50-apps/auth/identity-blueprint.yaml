@@ -55,9 +55,15 @@ data:
     # a token. Per-app groups therefore mean per-app membership lists; that is the price of the
     # split, and it is stated here rather than discovered during an incident.
     #
-    # NOT proven: this has not been applied to the live instance. `roles` on a user is the
-    # symmetric sibling of the documented `groups` M2M pattern, not a form that has been run
-    # here. Before trusting it, apply it and read the worker's verdict:
+    # NOT proven: this has not been applied to the live instance. `roles` on a user is checked
+    # structurally rather than by running it, and the three things that make it structurally sound
+    # are worth naming so the remaining risk is the small one: `User.roles` is a FORWARD M2M
+    # declared on User (core/models.py:379, `related_name="users"`, through UserRole) exactly like
+    # `User.groups` at :378, so it is not the prohibited reverse side; `!KeyOf` resolves to the
+    # referenced entry's `pk` (blueprints/v1/common.py:249), which is the UUID the schema asks for;
+    # and the role entry precedes the user entry, so the instance `!KeyOf` needs exists by then.
+    # What is left unproven is only that a live worker agrees. Before trusting it, apply it and read
+    # the worker's verdict:
     #   kubectl -n auth logs deploy/authentik-worker --since=1h | grep -i "changed file"
     # and see docs/authentik-runbook.md §5 for the mount-not-apply trap — a blueprint that is
     # valid, validly applied to the cluster, and never read by the worker looks exactly like one
@@ -164,13 +170,22 @@ data:
         state: present
         attrs:
           permissions:
-            # BlueprintInstance is what the UI's blueprint list is backed by, and its status /
-            # error is the field that says whether a mount landed.
+            # Exactly one permission, and it is the one the API actually asks for. authentik's
+            # default DRF permission class is authentik.rbac.permissions.ObjectPermissions, whose
+            # SAFE_METHODS path requires <app_label>.view_<model> on a collection endpoint, so
+            # GET /api/v3/managed/blueprints/ is refused without this and answered with it.
+            # BlueprintInstance is what the UI's blueprint list is backed by, and its status / error
+            # is the field that says whether a mount landed.
             - authentik_blueprints.view_blueprintinstance
-            # So the same call can name which user or group an entry touched, which is the
-            # first question after "it failed".
-            - authentik_core.view_user
-            - authentik_core.view_group
+            #
+            # WHAT IS DELIBERATELY NOT HERE. An earlier draft also granted
+            # authentik_core.view_user and authentik_core.view_group, justified as "so the same call
+            # can name which user or group an entry touched". No call in
+            # docs/authentik-runbook.md needs them: the blueprint list carries name, path, status
+            # and last_applied and nothing else, and on a token written to be handed to an agent
+            # those two are org-wide user enumeration. A read-only role is only safe at the width of
+            # the question it answers. Add either back with the endpoint that needs it named, never
+            # for completeness.
 
       # ------------------------------------------------------------------ service accounts
       # A service account is a user with `type: service_account` (the schema's enum is
