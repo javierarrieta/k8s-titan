@@ -204,9 +204,8 @@ a skip. CI runs GitGuardian on every push and warns, rather than failing, when
 `GITGUARDIAN_API_KEY` is absent from the repo.
 
 What runs automatically is `make check-ci` — leak-check, kustomize-check, kustomize-listing,
-secrets-placement, release-secrets, secret-refs, ingress-auth, blueprint-mount-check, backup-coverage,
-crd-check and
-namespace-check — the gates provable from the tree alone,
+secrets-placement, release-secrets, secret-refs, ingress-auth, blueprint-mount-check,
+backup-coverage, crd-check and namespace-check — the gates provable from the tree alone,
 and the only control here that `--no-verify` cannot skip. `release-secrets` fails when a
 `HelmRelease` reaches for a Secret that is not in `apply/10-secrets` with a matching
 namespace, so a typo'd name surfaces on the laptop instead of as a red release three
@@ -241,19 +240,24 @@ never reach the worker — the shape `docs/authentik-runbook.md` §5 records twi
 blueprint the startup discovery pass silently skipped. `oidc-check` and `sure-check` guard the
 contents of individual blueprints and only for the apps they were each written for; nobody guarded
 the mount. It fails when a blueprint-bearing `ConfigMap` (or an `authentik-*-blueprint` `Secret`)
-sits in the release's namespace unlisted under `blueprints.configMaps`/`secrets`, when a listed
-name has no such object, when a mounted `ConfigMap` carries no `.yaml` key the worker would even
-look at (chart `values.yaml:222`) or none that parses to a blueprint, when a mounted name is absent
-from the worker's reloader annotation — the
-slow-landing case that reads as "my change did nothing" — and when there is no authentik
-`HelmRelease` or an unreadable `blueprints` block, so it cannot pass vacuously. Adding the gate
-immediately failed on `authentik-opencloud-blueprint`, mounted since it was written and missing from
-that annotation, so every edit to it had been landing up to an hour late. Its honest limits: it
-proves a mount is wired and its body parses, never that the worker applied the blueprint or that the
-blueprint was valid, and it reads Secret *names* only, so a mounted Secret's contents are outside
-its view. It was
-written while adding a new blueprint, and found a bug that predated it; review of that PR found the
-`.yaml`-key case, which is why a mounted-but-unreadable ConfigMap is a failure and not a skip.
+sits anywhere in the tree unlisted under `blueprints.configMaps`/`secrets` — tree-wide on purpose,
+because the chart mounts by name inside the release's own namespace only, so a blueprint committed
+into the wrong namespace is mounted by nothing; when a listed name has no such object; when a mounted
+`ConfigMap` is undiscoverable, which is three cases taken from authentik's own pass
+(`blueprints/v1/tasks.py:126-143`): no `.yaml` key at all, no `.yaml` body parsing to a mapping with
+`entries`, or a `version` that is not 1; when a mounted name is absent from the worker's reloader
+annotation — the slow-landing case that reads as "my change did nothing" — or when that annotation
+names an object that no longer exists; and when there is no authentik `HelmRelease` or an unreadable
+`blueprints` block, so it cannot pass vacuously. Adding the gate immediately failed on
+`authentik-opencloud-blueprint`, mounted since it was written and missing from that annotation, so
+every edit to it had been landing up to an hour late. Its honest limits: it proves a mount is wired
+and its body parses, never that the worker applied the blueprint or that the blueprint was valid, and
+it reads Secret *names* only, so a mounted Secret's contents are outside its view — which also means
+an unmounted `authentik-*-blueprint` `Secret` is judged on its name alone. It was written while adding
+a new blueprint, and found a bug that predated it; review of that PR found the `.yaml`-key case and
+then the `version` case, which is why a mounted-but-undiscoverable ConfigMap is a failure and not a
+skip — and why `entries` alone marks a blueprint, because authentik defaults a missing `version` to 1
+and a gate requiring both rejects a tree that works.
 `crd-check` walks every built
 object against the CRDs vendored in `vendor/cnpg-crds/` and rejects any field the schema
 does not declare at that position — which is the class of error a normal schema validator

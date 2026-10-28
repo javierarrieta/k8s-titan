@@ -541,12 +541,16 @@ ingress-auth:
 # whether the mount existed. oidc-check and sure-check guard the *contents* of individual
 # blueprints and only for the apps they were each written for; nothing guarded the mount.
 #
-# It fails five ways: a blueprint-bearing ConfigMap (or an `authentik-*-blueprint` Secret) in the
-# release's namespace that `blueprints.configMaps`/`secrets` never lists; a listed name with no such
-# object; a mounted ConfigMap with no `.yaml` key the worker would discover, or none that parses to a
-# blueprint; a mounted name absent from the worker's reloader annotation, which is the slow-
-# landing case and the one that reads as "my change did nothing"; and a tree with no authentik
-# HelmRelease or an unreadable `blueprints` block, so it cannot pass vacuously.
+# It fails six ways: a blueprint-bearing ConfigMap (or an `authentik-*-blueprint` Secret) anywhere in
+# the tree that no authentik release lists under `blueprints.configMaps`/`secrets` - tree-wide on
+# purpose, since the chart mounts by name inside the release's own namespace only and a blueprint
+# committed into the wrong namespace is mounted by nothing; a listed name with no such object; a
+# mounted ConfigMap the worker cannot discover, which is three cases from authentik's own pass
+# (blueprints/v1/tasks.py:126-143) - no `.yaml` key at all, no `.yaml` body parsing to a mapping with
+# `entries`, or a `version` that is not 1; a mounted name absent from the worker's reloader
+# annotation, which is the slow-landing case and the one that reads as "my change did nothing"; that
+# annotation naming an object that no longer exists; and a tree with no authentik HelmRelease or an
+# unreadable `blueprints` block, so it cannot pass vacuously.
 #
 # Keyless, so it runs in check-ci too: it reads names, annotations, and plaintext ConfigMap bodies.
 # Its honest limits are in the tool's docstring - above all, it proves a mount is wired and its body
