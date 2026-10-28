@@ -36,14 +36,16 @@ resources:
   # comes up crash-looping, which reads as a coder bug rather than a missing file.
   - coder/coder.yaml
   # authentik's blueprint for the Tesla apps, before the HelmRelease that mounts it: the chart
-  # mounts this ConfigMap into the worker, and a pod whose mounted ConfigMap does not exist yet
-  # sits Pending rather than converging. It is a ConfigMap and not a Secret because it carries no
+  # mounts this ConfigMap into the worker with no `optional: true`, so a worker pod created first
+  # sits in FailedMount until the ConfigMap lands. It does recover on its own — kubelet retries the
+  # mount, and the pod comes up the moment the object exists — so this ordering buys a clean rollout
+  # rather than a self-healing one. It is a ConfigMap and not a Secret because it carries no
   # credential — see the file's own header for why that distinction is the whole point.
   - auth/tesla-outpost-blueprint.yaml
   - auth/opencloud-blueprint.yaml
   # Groups and service accounts, as a ConfigMap for the same credential-free reason as the two
-  # above, and listed before the HelmRelease that mounts it for the same reason: a pod whose
-  # mounted ConfigMap does not exist yet sits Pending rather than converging.
+  # above, and listed before the HelmRelease that mounts it for the same mount-order reason — see
+  # the note on the Tesla blueprint.
   - auth/identity-blueprint.yaml
   - auth/authentik.yaml
   # Quota, limit range and the provisioner Role, all in coder-workspaces. The quota is the only
