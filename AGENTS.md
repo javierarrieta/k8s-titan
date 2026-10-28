@@ -204,7 +204,8 @@ a skip. CI runs GitGuardian on every push and warns, rather than failing, when
 `GITGUARDIAN_API_KEY` is absent from the repo.
 
 What runs automatically is `make check-ci` — leak-check, kustomize-check, kustomize-listing,
-secrets-placement, release-secrets, secret-refs, ingress-auth, backup-coverage, crd-check and
+secrets-placement, release-secrets, secret-refs, ingress-auth, blueprint-mount-check, backup-coverage,
+crd-check and
 namespace-check — the gates provable from the tree alone,
 and the only control here that `--no-verify` cannot skip. `release-secrets` fails when a
 `HelmRelease` reaches for a Secret that is not in `apply/10-secrets` with a matching
@@ -233,7 +234,23 @@ policy you meant — an authentik provider with `access_group` unset gates a hos
 authenticated account, and that is a row in authentik's database, not in this tree — and it does not
 read `router.entrypoints`, so the `websecure` pin is still guarded by prose alone. It was written
 because PR #192 gated a public host with an annotation, and that same file said, twice, that no gate
-reads Traefik annotations. `crd-check` walks every built
+reads Traefik annotations. `blueprint-mount-check` is that gate for authentik's blueprints, which
+nothing here could see before it: authentik applies blueprints itself, on its own schedule, and
+reports nothing back to Flux, so a blueprint can be committed, built green, applied by Flux, and
+never reach the worker — the shape `docs/authentik-runbook.md` §5 records twice, including a
+blueprint the startup discovery pass silently skipped. `oidc-check` and `sure-check` guard the
+contents of individual blueprints and only for the apps they were each written for; nobody guarded
+the mount. It fails when a blueprint-bearing `ConfigMap` (or an `authentik-*-blueprint` `Secret`)
+sits in the release's namespace unlisted under `blueprints.configMaps`/`secrets`, when a listed
+name has no such object, when a mounted name is absent from the worker's reloader annotation — the
+slow-landing case that reads as "my change did nothing" — and when there is no authentik
+`HelmRelease` or an unreadable `blueprints` block, so it cannot pass vacuously. Adding the gate
+immediately failed on `authentik-opencloud-blueprint`, mounted since it was written and missing from
+that annotation, so every edit to it had been landing up to an hour late. Its honest limits: it
+proves a mount is wired, never that the worker applied the blueprint or that the blueprint was
+valid, and it reads Secret *names* only, so a mounted Secret's contents are outside its view. It was
+written while adding a new blueprint, and found a bug that predated it.
+`crd-check` walks every built
 object against the CRDs vendored in `vendor/cnpg-crds/` and rejects any field the schema
 does not declare at that position — which is the class of error a normal schema validator
 waves through, because the CNPG CRDs set no `additionalProperties: false` anywhere, and
