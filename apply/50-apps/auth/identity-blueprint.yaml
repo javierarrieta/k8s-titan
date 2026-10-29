@@ -107,6 +107,32 @@ data:
       # becoming a privilege escalation via the UI — and `is_superuser` is the one attr that DOES
       # propagate through parentage, unlike the claim.
 
+      # The allow-list. `titan-family` answers "may this person reach the app at all", and it is
+      # bound to each application as a policy binding, so authentik refuses BEFORE a token exists
+      # rather than the app deciding after one does. It is not an admin group and grants no role.
+      #
+      # WHY A BINDING ON THE APPLICATION, NOT A DIFFERENT FLOW
+      # Every provider here runs default-provider-authorization-implicit-consent, which means "any
+      # authenticated user may have this app". authentik ships only implicit and explicit consent
+      # flows — there is no allow-groups flow to swap in — and it is that same flow which evaluates
+      # the bindings on the application. So the gate is a binding, not a flow.
+      #
+      # WHAT IT CANNOT DO: PARENTAGE. authentik's `groups` claim is the flat M2M and its group policy
+      # binding is flat too, so making titan-family a PARENT of an app's admin group grants nothing.
+      # Membership has to be direct, added per group.
+      #
+      # THE FAILURE MODE IS THE OPPOSITE OF THE ADMIN GROUPS'. A binding naming a group that does not
+      # exist DENIES rather than allows, so an app bound only to this group, with this group empty, is
+      # a lockout that includes you. Every app is therefore bound to family AND its own admin group,
+      # and the admin group is seeded before the binding lands.
+      - model: authentik_core.group
+        id: titan_family
+        identifiers:
+          name: titan-family
+        state: present
+        attrs:
+          is_superuser: false
+
       # Grafana at grafana.titan.arrieta.eu (namespace `observability`).
       # SWITCHED 2026-10-28: apply/50-apps/grafana/grafana.yaml, the
       # GF_AUTH_GENERIC_OAUTH_ROLE_ATTRIBUTE_PATH expression, now reads this group instead of
