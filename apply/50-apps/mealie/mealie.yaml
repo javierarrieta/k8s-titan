@@ -155,14 +155,16 @@ spec:
         - name: OIDC_USER_CLAIM
           value: email
         # Groups come from the `groups` claim (OIDC_GROUPS_CLAIM default), which exists in the token
-        # only because the blueprint attaches the profile scope mapping. OIDC_ADMIN_GROUP matches an
-        # existing authentik group — the same one grafana (apply/50-apps/grafana/grafana.yaml) and
-        # open-webui use. OIDC_USER_GROUP is deliberately UNSET: Mealie then admits any authenticated
-        # authentik user, which is the fleet's existing posture (open-webui sets OAUTH_ALLOWED_ROLES="*"
-        # for the same reason). Setting it to a group that does not exist in authentik locks everyone
-        # out while the login page still looks healthy.
+        # only because the blueprint attaches the profile scope mapping. OIDC_ADMIN_GROUP names this
+        # app's own group, switched off `authentik Admins` on 2026-10-29 and seeded first with
+        # scripts/seed-authentik-group.sh — the order matters: Mealie matches the claim flat, so a
+        # group that does not exist puts every admin in the ordinary-user seat with no error anywhere.
+        # OIDC_USER_GROUP is deliberately UNSET: Mealie then admits any authenticated authentik user,
+        # and who that is gets decided at the IdP now — the application is bound to `titan-family` or
+        # `titan-mealie-admins` in authentik/blueprints-mealie.yaml. Setting OIDC_USER_GROUP to a group
+        # that does not exist locks everyone out while the login page still looks healthy.
         - name: OIDC_ADMIN_GROUP
-          value: authentik Admins
+          value: titan-mealie-admins
         # Skip Mealie's own login page and go straight to authentik. With ALLOW_PASSWORD_LOGIN=false
         # the page would offer exactly one button anyway.
         - name: OIDC_AUTO_REDIRECT

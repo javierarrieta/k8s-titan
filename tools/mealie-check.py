@@ -41,7 +41,11 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from sopsload import find, load_docs, load_tolerating_tags, secret_key  # noqa: E402
+from sopsload import declared_groups, find, load_docs, load_tolerating_tags, secret_key  # noqa: E402
+
+# The group that decides who is a Mealie admin. Switched off authentik's own `authentik Admins` on
+# 2026-10-29 so narrowing this app's admin no longer touches every other consumer of that group.
+ADMIN_GROUP = "titan-mealie-admins"
 
 HOST = "meals.titan.arrieta.eu"
 # Both documented URIs, each strict. Mealie derives the URI it sends from BASE_URL rather than from a
@@ -158,9 +162,19 @@ def main():
         if env_of(dep, "ALLOW_PASSWORD_LOGIN") != "false":
             fail("ALLOW_PASSWORD_LOGIN is not false - a local password form next to SSO is a second, "
                  "unbacked door")
-        if env_of(dep, "OIDC_ADMIN_GROUP") != "authentik Admins":
-            fail("OIDC_ADMIN_GROUP is not 'authentik Admins' - it must name a group that exists in "
-                 "authentik, or admins land in the ordinary-user seat silently")
+        admin_group = env_of(dep, "OIDC_ADMIN_GROUP")
+        if admin_group != ADMIN_GROUP:
+            fail(f"OIDC_ADMIN_GROUP is {admin_group!r}; this app's admin comes from {ADMIN_GROUP!r}, "
+                 "the per-app group seeded from `authentik Admins` (switched 2026-10-29). It must name "
+                 "a group that exists in authentik, or admins land in the ordinary-user seat silently.")
+        groups = declared_groups(docs)
+        if not groups:
+            fail("no authentik_core.group declared by any blueprint in this tree - the admin-group "
+                 "check below would pass vacuously")
+        if ADMIN_GROUP not in groups:
+            fail(f"{ADMIN_GROUP!r} is not declared by any blueprint in this tree. Mealie matches the "
+                 "`groups` claim flat, so an admin group that does not exist puts every admin in the "
+                 "ordinary-user seat with no error anywhere - declare the group or fix the name.")
         if env_of(dep, "DB_ENGINE") != "postgres":
             fail("DB_ENGINE is not postgres - Mealie would silently use sqlite on the PVC, which is not "
                  "backed up and is not what the Database/DatabaseRole in `databases` are for")
