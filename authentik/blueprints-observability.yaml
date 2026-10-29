@@ -80,5 +80,40 @@ entries:
       slug: observability
       provider: !KeyOf observability-provider
       meta_launch_url: https://grafana.titan.arrieta.eu/
+      # Written out rather than inherited: the default is `any`, which is what is wanted, but a
+      # security decision should not live in a default a future release is free to change.
+      policy_engine_mode: any
       # The proxy provider's application (`tesla`) stays as it is: it is what makes forward-auth
       # work. Two applications, two providers, two jobs — collapsing them breaks one of the two.
+
+  # --- who may reach Grafana at all ---------------------------------------------------------------
+  # Two bindings and `policy_engine_mode: any`, so a member of EITHER group gets in. This replaces
+  # "any authentik-authenticated user can log in to Grafana and land as Viewer": the refusal now
+  # happens at the IdP, before a token exists, so the refused person sees authentik's own access
+  # denied page instead of a Grafana that half-works. The provider keeps
+  # default-provider-authorization-implicit-consent — authentik ships only implicit and explicit
+  # consent, and it is that flow which evaluates the bindings below.
+  #
+  # WHY NOT THE APP'S OWN EXPRESSION INSTEAD. Grafana can deny too
+  # (`GF_AUTH_GENERIC_OAUTH_ROLE_ATTRIBUTE_STRICT` plus a no-match branch), but that is four apps each
+  # inventing their own refusal, each with its own failure mode, and it fires after authentik has
+  # already issued a token. The IdP gate covers every app regardless of what the app can express.
+  #
+  # ORDER MATTERS. A binding naming a group that does not exist denies. `titan-family` is declared in
+  # apply/50-apps/auth/identity-blueprint.yaml; it must exist before this lands, and you must be in at
+  # least one of the two groups. The admin binding is what keeps an empty family from being a lockout.
+  - model: authentik_policies.policybinding
+    identifiers:
+      target: !Find [authentik_core.application, [slug, observability]]
+      order: 0
+    state: present
+    attrs:
+      group: !Find [authentik_core.group, [name, titan-family]]
+
+  - model: authentik_policies.policybinding
+    identifiers:
+      target: !Find [authentik_core.application, [slug, observability]]
+      order: 1
+    state: present
+    attrs:
+      group: !Find [authentik_core.group, [name, titan-grafana-admins]]
