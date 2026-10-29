@@ -692,6 +692,47 @@ a legitimate answer, and `ak apply_blueprint` is a shortcut for impatience or a 
 the only way back. Note the two ends still move at different speeds during a rotation, so that case
 keeps needing the manual apply — see the rotation section.
 
+### Loki proves dispatch and beat-recovery. It cannot prove the verdict
+
+Confirmed 2026-10-29 against casa's Loki while three blueprints landed, because "the log is quiet" is
+tempting to read as "it applied" and it is not.
+
+The pod logs are pushed to `https://loki.local.arrieta.eu` by promtail, so the same enqueued/started/
+finished evidence the section above describes is queryable across worker pod replacements — which the
+pod log is not, since the pod that lost the pass is gone:
+
+```fish
+set END (date +%s)000000000
+set START (math (date +%s) - 5400)000000000
+curl -sS -G https://loki.local.arrieta.eu/loki/api/v1/query_range \
+  --data-urlencode 'query={cluster="titan", namespace="auth", pod=~"authentik-worker.*"} |~ "blueprints_discovery|Applying blueprint"' \
+  --data-urlencode "start=$START" --data-urlencode "end=$END" --data-urlencode limit=200
+```
+
+That is how the 10:42:09 enqueue with no start was found eight minutes later to have been recovered by
+the 10:50:09 beat pass, which then logged `Applying blueprint due to changed file` for all three
+instances with `exc: null` and not one warning anywhere in the window.
+
+**And it is still not the verdict.** In `authentik/blueprints/v1/tasks.py`, a blueprint that fails
+validation does this:
+
+```python
+if not valid:
+    instance.status = BlueprintInstanceStatus.ERROR
+    instance.save()
+    self.logs(logs)          # ← the task record, not stdout
+    return
+```
+
+`self.logs()` attaches the captured Django logs to the **task record** — the UI's Tasks view — not to
+the stream promtail ships. So a failed apply and a clean apply produce the *same* pod log: one
+`Applying blueprint due to changed file` line and a task that finished with `exc: null`. Loki silence
+therefore cannot distinguish them, and neither can `kubectl logs`.
+
+The verdict remains `BlueprintInstance.status` in the UI. What Loki adds is the ability to see the
+dispatch and the beat recovery after the pod that performed them has been replaced, which is the half
+that used to be unrecoverable.
+
 ### How to tell the provider actually exists — mind the trailing slash
 
 ```fish
