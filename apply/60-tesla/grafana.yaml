@@ -136,17 +136,23 @@ spec:
           value: preferred_username
         - name: GF_AUTH_GENERIC_OAUTH_NAME_ATTRIBUTE_PATH
           value: name
-        # authentik Admins -> Grafana Org Admin, everyone else Viewer. The group is authentik's own
-        # default (blueprints/system/bootstrap.yaml:11, `group_name: authentik Admins`), so
-        # membership stays managed where it already is instead of becoming a fourth copy of a list.
+        # titan-tesla-grafana-admins -> Grafana Org Admin, everyone else Viewer.
+        # SWITCHED OFF `authentik Admins` on 2026-10-29, and the order was the point: the group was
+        # seeded from `authentik Admins` FIRST (scripts/seed-authentik-group.sh, break-glass excluded)
+        # and only then was this line changed. `&& 'Admin' || 'Viewer'` makes a missing or empty group
+        # a SILENT Viewer downgrade - login still works, panels still render, nobody with admin to
+        # notice. Same reasoning and same order as apply/50-apps/grafana/grafana.yaml.
         # GrafanaAdmin (server admin) is deliberately not granted; if a setting ever needs it, that is
         # allow_assign_grafana_admin, and it should be its own decision.
         #
-        # Anyone authentik lets through the edge gate gets a Grafana account here, as Viewer: the
-        # proxy provider has no access_group, so "can log into authentik" is the current bar. That is
-        # a deliberate standing choice, not an oversight of this change.
+        # WHO REACHES THIS AT ALL is no longer decided here. The application is bound to `titan-family`
+        # or `titan-tesla-grafana-admins` in authentik/blueprints-grafana.yaml, so the refusal happens
+        # at the IdP before a token exists; this expression only decides the role of someone who got
+        # through. It reads the claim baked into the token AT LOGIN, so an already-signed-in admin
+        # keeps their old groups until they re-authenticate, and group parentage does not count -
+        # authentik's `groups` claim is the plain M2M.
         - name: GF_AUTH_GENERIC_OAUTH_ROLE_ATTRIBUTE_PATH
-          value: contains(groups[*], 'authentik Admins') && 'Admin' || 'Viewer'
+          value: contains(groups[*], 'titan-tesla-grafana-admins') && 'Admin' || 'Viewer'
         - name: GF_AUTH_GENERIC_OAUTH_ALLOW_SIGN_UP
           value: "true"
         # Skips Grafana's own login page for an unauthenticated browser. Safe specifically because the

@@ -153,7 +153,9 @@ data:
       # The SECOND Grafana: tesla-boards.titan.arrieta.eu (namespace `apps`, from 60-tesla).
       # It is a separate instance with its own OIDC client and its own role expression, so it gets
       # its own group; collapsing these two would re-create the original problem one level down.
-      # Consumer to switch later: apply/60-tesla/grafana.yaml:148, same env var.
+      # SWITCHED 2026-10-29: apply/60-tesla/grafana.yaml, the
+      # GF_AUTH_GENERIC_OAUTH_ROLE_ATTRIBUTE_PATH expression, now reads this group. Seeded first, from
+      # the live instance, with scripts/seed-authentik-group.sh.
       - model: authentik_core.group
         id: titan_tesla_grafana_admins
         identifiers:
@@ -163,9 +165,10 @@ data:
           is_superuser: false
 
       # Open WebUI at open-webui.titan.arrieta.eu.
-      # Consumer to switch later: apply/50-apps/open-webui/open-webui.yaml:123,
-      # OAUTH_ADMIN_ROLES. That variable is a comma-separated list matched against the `groups`
-      # claim, which is why these names carry no spaces — the current `authentik Admins` works only
+      # SWITCHED 2026-10-29: apply/50-apps/open-webui/open-webui.yaml,
+      # OAUTH_ADMIN_ROLES, now reads this group. Seeded first, with
+      # scripts/seed-authentik-group.sh. That variable is a comma-separated list matched against the
+      # `groups` claim, which is why these names carry no spaces — the current `authentik Admins` works only
       # because it happens to be a single value.
       - model: authentik_core.group
         id: titan_openwebui_admins
@@ -176,7 +179,8 @@ data:
           is_superuser: false
 
       # Mealie at meals.titan.arrieta.eu.
-      # Consumer to switch later: apply/50-apps/mealie/mealie.yaml:165, OIDC_ADMIN_GROUP. Mealie's
+      # SWITCHED 2026-10-29: apply/50-apps/mealie/mealie.yaml, OIDC_ADMIN_GROUP, now reads this group.
+      # Seeded first, with scripts/seed-authentik-group.sh. Mealie's
       # OIDC_USER_GROUP is deliberately unset, so any authentik-authenticated user is admitted as
       # a normal member; only the admin group is in scope here.
       - model: authentik_core.group
