@@ -108,19 +108,28 @@ spec:
         - name: ENABLE_WEBUI_LOG
           value: "true"
         # --- roles come from authentik groups, the way this cluster already does for Grafana -----
-        # (apply/60-tesla/grafana.yaml:143 maps the same `authentik Admins` group.) Without role
-        # management the default role is `pending` (config.py:1748,2660), i.e. the second person
-        # through the door can log in and do nothing until an admin approves them in open-webui's UI.
+        # Without role management the default role is `pending` (config.py:1748,2660), i.e. the second
+        # person through the door can log in and do nothing until an admin approves them in open-webui's
+        # UI.
+        #
+        # OAUTH_ADMIN_ROLES was switched off `authentik Admins` on 2026-10-29 to the app's own group,
+        # seeded first with scripts/seed-authentik-group.sh. The order matters more here than anywhere
+        # else in this repo: with role management on, a non-matching group is a 403 rather than a
+        # fallback role, so switching before seeding would have locked every admin out of a login page
+        # that still looked healthy.
         #
         # OAUTH_ALLOWED_ROLES must NOT be left at its default `user,admin`: with the claim set to
-        # authentik group names, that default matches nothing and 403s every non-admin. `*` means any
-        # authentik-authenticated user gets `user`; `authentik Admins` gets `admin`.
+        # authentik group names, that default matches nothing and 403s every non-admin. `*` is left
+        # alone on purpose - the application is bound to `titan-family` or `titan-openwebui-admins` in
+        # authentik/blueprints-open-webui.yaml, so the only people who ever receive a token are those
+        # two groups, and naming a group here would make one decision depend on the same list twice, in
+        # two syntaxes.
         - name: ENABLE_OAUTH_ROLE_MANAGEMENT
           value: "true"
         - name: OAUTH_ROLES_CLAIM
           value: groups
         - name: OAUTH_ADMIN_ROLES
-          value: authentik Admins
+          value: titan-openwebui-admins
         - name: OAUTH_ALLOWED_ROLES
           value: "*"
         # The first user to sign in becomes admin regardless of all of the above

@@ -27,7 +27,11 @@ import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from sopsload import find, load_docs, load_tolerating_tags, secret_key  # noqa: E402
+from sopsload import declared_groups, find, load_docs, load_tolerating_tags, secret_key  # noqa: E402
+
+# The group that decides who is an open-webui admin. Switched off authentik's own `authentik Admins`
+# on 2026-10-29 so narrowing this app's admin no longer touches every other consumer of that group.
+ADMIN_GROUP = "titan-openwebui-admins"
 
 HOST = "open-webui.titan.arrieta.eu"
 # Both candidate callback paths, each strict. Open WebUI computes its own redirect URI with
@@ -148,8 +152,20 @@ def main():
         if env_of(dep, "OAUTH_ROLES_CLAIM") != "groups":
             fail("OAUTH_ROLES_CLAIM is not groups - OAUTH_ADMIN_ROLES would then read a claim "
                  "authentik does not send")
-        if env_of(dep, "OAUTH_ADMIN_ROLES") != "authentik Admins":
-            fail("OAUTH_ADMIN_ROLES is not 'authentik Admins'")
+        admin_roles = env_of(dep, "OAUTH_ADMIN_ROLES")
+        if admin_roles != ADMIN_GROUP:
+            fail(f"OAUTH_ADMIN_ROLES is {admin_roles!r}; this app's admin comes from {ADMIN_GROUP!r}, "
+                 "the per-app group seeded from `authentik Admins` (switched 2026-10-29). With "
+                 "ENABLE_OAUTH_ROLE_MANAGEMENT on, a group that matches nothing is a 403 rather than a "
+                 "fallback role, so a wrong name locks every admin out behind a healthy-looking login.")
+        groups = declared_groups(docs)
+        if not groups:
+            fail("no authentik_core.group declared by any blueprint in this tree - the admin-group "
+                 "check below would pass vacuously")
+        if ADMIN_GROUP not in groups:
+            fail(f"{ADMIN_GROUP!r} is not declared by any blueprint in this tree. open-webui reads the "
+                 "`groups` claim flat, so a role naming a group that does not exist makes every user a "
+                 "plain user silently - declare the group or fix the name.")
         allowed = env_of(dep, "OAUTH_ALLOWED_ROLES")
         if allowed in (None, "user,admin"):
             fail(f"OAUTH_ALLOWED_ROLES is {allowed!r}; with OAUTH_ROLES_CLAIM=groups the default "
