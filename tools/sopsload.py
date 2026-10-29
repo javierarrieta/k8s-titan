@@ -78,6 +78,47 @@ def secret_key(docs, name, namespace, key):
     return None, None
 
 
+def declared_groups(docs):
+    """Every authentik group name declared by a blueprint body among these documents.
+
+    Used by the per-app role gates, which must prove the group a role expression names is a group this
+    repo actually declares. A role expression pointing at a group that does not exist is silent in every
+    app here - Grafana falls back to Viewer, open-webui 403s, Mealie puts admins in the ordinary-user
+    seat - so "the name is a typo" is invisible from the outside and belongs in a gate.
+
+    `load_docs` decrypts on the way in, so groups declared in a sops-encrypted blueprint are visible
+    here; every caller of this function already needs the age key for other reasons.
+    """
+    names = set()
+    for doc in docs:
+        bodies = []
+        if isinstance(doc.get("entries"), list):
+            bodies.append(doc["entries"])
+        for field in ("data", "stringData"):
+            body = doc.get(field)
+            if not isinstance(body, dict):
+                continue
+            for key, value in body.items():
+                if not (key.endswith(".yaml") and isinstance(value, str)):
+                    continue
+                try:
+                    parsed = load_tolerating_tags(value)
+                except Exception:
+                    continue
+                if isinstance(parsed, dict) and isinstance(parsed.get("entries"), list):
+                    bodies.append(parsed["entries"])
+        for entries in bodies:
+            for entry in entries:
+                if not isinstance(entry, dict) or entry.get("model") != "authentik_core.group":
+                    continue
+                name = (entry.get("identifiers") or {}).get("name")
+                if not name:
+                    name = (entry.get("attrs") or {}).get("name")
+                if isinstance(name, str) and name:
+                    names.add(name)
+    return names
+
+
 def find(docs, kind, name, namespace=None):
     for d in docs:
         if d.get("kind") != kind:
