@@ -643,7 +643,9 @@ Four things that were true at the time of the rename and are worth knowing befor
   - **The `profile` scope is load-bearing.** The `groups` claim comes only from authentik's default
     profile scope mapping (`blueprints/system/providers-oauth2.yaml:44` at the pinned 2026.8.5), so dropping it makes
     `role_attribute_path` evaluate against a missing claim and every login silently becomes Viewer.
-    Members of authentik's own default `authentik Admins` group get Org Admin; everyone else Viewer.
+    Members of `titan-tesla-grafana-admins` get Org Admin; everyone else Viewer. Who may reach this
+    Grafana at all is decided earlier, at the IdP: the application is bound to `titan-family` or
+    `titan-tesla-grafana-admins` in authentik/blueprints-grafana.yaml.
   - **The endpoint paths are asymmetric.** `authorize`, `token` and `userinfo` are global
     (`/application/o/authorize/`), while issuer and JWKS carry the slug
     (`/application/o/<slug>/jwks/`). Composing `.../o/tesla-boards/authorize/` looks obvious and 404s.
