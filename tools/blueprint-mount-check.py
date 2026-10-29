@@ -42,8 +42,18 @@ asked whether the mount existed. This does, in six directions:
      entry that proves nothing. Only names with no object at all are flagged; a name that exists but
      is not a blueprint mount is legitimate (`authentik-secrets` is in the worker's Secret
      annotation for envFrom, not for blueprints).
-  4. NEVER PASSES VACUOUSLY - no authentik HelmRelease, no `blueprints` block, or a `blueprints`
-     block this script cannot read is a failure, not a clean run.
+  4. BINDING NAMES A GROUP THAT IS NOT DECLARED - a `authentik_policies.policybinding` whose `group`
+     resolves (via `!Find [authentik_core.group, [name, X]]`) to a name no blueprint in this tree
+     declares. This is the same class of error as `release-secrets` and `secret-refs`, one object type
+     further on, and it is worse than a typo in a role expression: a binding naming a group that does
+     not exist DENIES rather than allows, so the app it is bound to silently stops admitting people -
+     including, if it is the only binding, the person who wrote it. Found by reading the bindings
+     added in PR #198 and asking what would have happened if the group name had been misspelled.
+  5. NEVER PASSES VACUOUSLY - no authentik HelmRelease, no `blueprints` block, or a `blueprints`
+     block this script cannot read is a failure, not a clean run. So is a missing template directory,
+     or templates that exist but yield no binding at all: either the templates moved, this scanner
+     broke, or every binding was removed - and a gate that silently scans nothing is the failure mode
+     this file exists to prevent.
 
 Honest limits, stated because a gate that overstates itself gets trusted too much:
   * It proves a name is mounted, reload-wired, and carries a parseable blueprint body under a `.yaml`
@@ -59,11 +69,26 @@ Honest limits, stated because a gate that overstates itself gets trusted too muc
   * A blueprint body whose key ends in `.yaml` but which is not a mapping (a string, a list) is not
     a blueprint as far as this gate is concerned, and is therefore invisible rather than a failure.
     Authentik skips those too, so the outcome is the same and the shape is not one this repo writes.
+  * Group declarations are read from plaintext blueprint bodies only - ConfigMaps in the built tree
+    and the `authentik/blueprints-*.yaml` templates. A group declared inside a sops-encrypted
+    blueprint Secret is invisible here, and a binding pointing at one would be reported as
+    undeclared. Every group this repo declares lives in the plaintext `authentik-identity-blueprint`
+    ConfigMap for exactly that reason; a group that must stay secret goes in `DECLARED_ELSEWHERE`
+    with a citation, the same shape `secret-refs-check.py` uses for `PRODUCED_IN_CLUSTER`.
+  * Bindings are read from the templates, not from the mounted Secrets, because the Secrets are
+    ciphertext. So this proves the template is coherent, not that the mounted Secret matches it -
+    `scripts/rerender-authentik-blueprint.sh` with no `--write` is the tool that proves that half.
+  * A `!Find` on a group by anything other than `name` is reported rather than guessed at, because a
+    gate that cannot resolve a reference must say so instead of assuming it resolved.
+  * A binding that references a `policy:` or a `user:` instead of a `group:` is out of scope and is
+    skipped silently; only group references have a declaration in this tree to check against.
 
 Usage: kubectl kustomize <dirs> | blueprint-mount-check.py
 """
 
 import sys
+from pathlib import Path
+
 import yaml
 
 CHART = "authentik"
@@ -85,6 +110,18 @@ DISCOVERY_GLOB = "authentik/blueprints/v1/tasks.py:126"
 VERSION_RULE = "authentik/blueprints/v1/tasks.py:140-143"
 BLUEPRINT_VERSION = 1
 
+# --- group references (check 4) ------------------------------------------------------------------
+BINDING_MODEL = "authentik_policies.policybinding"
+GROUP_MODEL = "authentik_core.group"
+# The plaintext source of every encrypted blueprint Secret. Read from disk, not from stdin, because
+# the built tree holds the ciphertext version of these files.
+TEMPLATE_GLOB = "authentik/blueprints-*.yaml"
+REPO = Path(__file__).resolve().parents[1]
+# Groups that legitimately exist without being declared in this tree. An entry here is a deliberate
+# gap, not a fix - the same meaning `PRODUCED_IN_CLUSTER` carries in secret-refs-check.py.
+# Empty today: every group bound in this repo is a group this repo declares.
+DECLARED_ELSEWHERE = frozenset()
+
 
 class TagTolerantLoader(yaml.SafeLoader):
     """Blueprint YAML carries authentik's own tags (!KeyOf, !Find, !Context, !Format). A strict
@@ -93,6 +130,57 @@ class TagTolerantLoader(yaml.SafeLoader):
 
 
 TagTolerantLoader.add_multi_constructor("!", lambda loader, suffix, node: None)
+# `!Find` is the one tag this gate has to read rather than flatten: a group reference IS a !Find, so
+# mapping every tag to None (the previous behaviour) would make each binding look like it referenced
+# nothing and pass check 4 by being blind.
+TagTolerantLoader.add_constructor(
+    "!Find", lambda loader, node: loader.construct_sequence(node)
+)
+
+
+def blueprint_entries(value):
+    """The entry list of a blueprint body, or None if this value is not one.
+
+    Accepts a bare blueprint (`entries:` at the top) and a ConfigMap/Secret wrapper whose `data` or
+    `stringData` holds one under a `.yaml` key - both shapes appear in this tree.
+    """
+    if isinstance(value, str):
+        try:
+            value = yaml.load(value, Loader=TagTolerantLoader)
+        except yaml.YAMLError:
+            return None
+    if not isinstance(value, dict):
+        return None
+    if isinstance(value.get("entries"), list):
+        return value["entries"]
+    for field in ("data", "stringData"):
+        body = value.get(field)
+        if isinstance(body, dict):
+            for key in sorted(body):
+                if key.endswith(".yaml"):
+                    inner = blueprint_entries(body[key])
+                    if inner is not None:
+                        return inner
+    return None
+
+
+def group_reference(ref):
+    """The group name a `!Find [authentik_core.group, [name, X]]` resolves to.
+
+    Returns (name, None) on success, (None, reason) when it cannot be resolved - and an unresolved
+    reference is reported, never assumed to be fine.
+    """
+    if not isinstance(ref, list) or len(ref) != 2:
+        return None, "not a !Find [model, [key, value]] pair"
+    model, pair = ref
+    if model != GROUP_MODEL:
+        return None, f"!Find targets {model!r}, not {GROUP_MODEL!r}"
+    if not isinstance(pair, list) or len(pair) != 2:
+        return None, "!Find selector is not a [key, value] pair"
+    key, name = pair
+    if key != "name":
+        return None, f"group looked up by {key!r}; this gate only resolves lookup by 'name'"
+    return name, None
 
 
 def blueprint_version(value):
@@ -289,6 +377,72 @@ def main():
                     f"`blueprints.{key}` of the {CHART} release in {cns} - it will never be applied"
                 )
 
+    # --- check 4: every policybinding names a group this tree declares ---------------------------
+    # Sources: plaintext blueprint bodies in the built tree, plus the templates on disk. The mounted
+    # Secret blueprints are sops ciphertext and stay unread here - the template is their source, and
+    # `rerender-authentik-blueprint.sh` without --write is what proves the two still agree.
+    declared = set(DECLARED_ELSEWHERE)
+    bindings = []  # (where, group name or None, reason it could not be resolved)
+    sources = []
+    for d in docs:
+        if d.get("kind") in ("ConfigMap", "Secret"):
+            meta = d.get("metadata") or {}
+            sources.append((f"{meta.get('namespace')}/{meta.get('name')}", d))
+    templates = sorted((REPO / "authentik").glob("blueprints-*.yaml"))
+    if not templates:
+        failures.append(
+            f"no {TEMPLATE_GLOB} found under {REPO / 'authentik'} - this gate reads bindings from "
+            "those files, so finding none means they moved or this scanner broke"
+        )
+    for tpl in templates:
+        sources.append((str(tpl.relative_to(REPO)), tpl.read_text()))
+
+    for where, src in sources:
+        entries = blueprint_entries(src)
+        if not entries:
+            continue
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            model = entry.get("model")
+            attrs = entry.get("attrs") or {}
+            ids = entry.get("identifiers") or {}
+            if model == GROUP_MODEL:
+                gname = ids.get("name") or attrs.get("name")
+                if isinstance(gname, str) and gname:
+                    declared.add(gname)
+            elif model == BINDING_MODEL:
+                ref = attrs.get("group", ids.get("group"))
+                if ref is None:
+                    # A `policy:` or `user:` binding. Out of scope: only group references have a
+                    # declaration in this tree to check against.
+                    continue
+                name, why = group_reference(ref)
+                bindings.append((where, name, why))
+
+    if templates and not bindings:
+        failures.append(
+            f"no {BINDING_MODEL} found in any blueprint or template - either the templates moved, "
+            "this scanner broke, or every binding was removed. If the last, update this gate rather "
+            "than trusting a clean run from a gate that scanned nothing."
+        )
+
+    for where, name, why in sorted(bindings, key=lambda b: (b[0], str(b[1]))):
+        if why is not None:
+            failures.append(
+                f"{where}: a {BINDING_MODEL} group reference this gate cannot resolve: {why}. "
+                "An unresolvable group reference denies access rather than allowing it, so it is "
+                "reported rather than assumed to have resolved."
+            )
+        elif name not in declared:
+            failures.append(
+                f"{where}: a {BINDING_MODEL} binds group {name!r}, which no blueprint in this tree "
+                f"declares. A binding naming a group that does not exist DENIES rather than allows, "
+                f"so the application behind it silently stops admitting people. Declare the group, "
+                f"fix the name, or - if the group genuinely lives outside git - add it to "
+                f"DECLARED_ELSEWHERE in this file with a citation."
+            )
+
     if failures:
         print("FAIL: authentik blueprint mounts:")
         for line in failures:
@@ -299,7 +453,9 @@ def main():
         f"blueprint-mount-check: {len(releases)} authentik HelmRelease(s), "
         f"{checked_mounts} mount(s) scanned across {len(release_namespaces)} namespace(s); every "
         "blueprint in the tree mounted by name, reload-wired on the worker, and discoverable where "
-        "the worker reads it (Secret content is never read - see the gate's own docstring)"
+        "the worker reads it; "
+        f"{len(bindings)} policybinding(s) checked against {len(declared)} declared group(s) "
+        "(Secret content is never read - see the gate's own docstring)"
     )
     return 0
 
