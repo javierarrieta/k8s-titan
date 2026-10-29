@@ -100,6 +100,39 @@ entries:
       slug: mealie
       provider: !KeyOf mealie-provider
       meta_launch_url: https://meals.titan.arrieta.eu/
+      # Written out rather than inherited: the default is `any`, which is what is wanted, but a
+      # security decision should not live in a default a future release is free to change.
+      policy_engine_mode: any
       # The Application is not decoration. A provider with no owning Application is invisible to the
       # consumer that needs it — the recorded 404-for-every-host lesson in tesla-outpost-blueprint.yaml
       # — and it is also what makes Mealie appear in the authentik user dashboard.
+
+  # --- who may reach Mealie at all -----------------------------------------------------------------
+  # Same shape as the gate in authentik/blueprints-observability.yaml, which carries the full
+  # reasoning. Short version: the IdP refuses before a token exists, `any` means a member of EITHER
+  # group gets in, and a binding naming a group that does not exist DENIES rather than allows — which
+  # is why `titan-mealie-admins` was seeded from `authentik Admins` before this landed.
+  #
+  # This is also what makes Mealie's deliberately-unset `OIDC_USER_GROUP` safe. Unset means "admit any
+  # authenticated user", and that was true in the plainest sense until this gate existed; now the only
+  # people who can complete a login are family or admins.
+  #
+  # WHAT THIS DOES NOT CHANGE: the ADMIN role inside Mealie still comes from `OIDC_ADMIN_GROUP`, which
+  # still names `authentik Admins`. This gate answers "may they reach the app", not "what may they do
+  # inside it" — switching the role to the per-app group is a separate one-word change, and it has to
+  # stay separate because a role expression that matches nothing fails silently in each of these apps.
+  - model: authentik_policies.policybinding
+    identifiers:
+      target: !Find [authentik_core.application, [slug, mealie]]
+      order: 0
+    state: present
+    attrs:
+      group: !Find [authentik_core.group, [name, titan-family]]
+
+  - model: authentik_policies.policybinding
+    identifiers:
+      target: !Find [authentik_core.application, [slug, mealie]]
+      order: 1
+    state: present
+    attrs:
+      group: !Find [authentik_core.group, [name, titan-mealie-admins]]

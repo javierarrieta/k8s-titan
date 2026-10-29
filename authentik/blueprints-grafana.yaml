@@ -87,7 +87,31 @@ entries:
       slug: tesla-boards
       provider: !KeyOf tesla-boards-provider
       meta_launch_url: https://tesla-boards.titan.arrieta.eu/
+      # Written out rather than inherited: the default is `any`, which is what is wanted, but a
+      # security decision should not live in a default a future release is free to change.
+      policy_engine_mode: any
       # The proxy provider's application (`tesla`) stays as it is: it is what makes forward-auth work,
       # and ProxyProvider.objects.filter(application__isnull=False) is the only thing the embedded
       # outpost reads. Two applications, two providers, two jobs — collapsing them would break one of
       # the two.
+
+  # --- who may reach the Tesla Grafana at all -----------------------------------------------------
+  # Same shape as the gate in authentik/blueprints-observability.yaml, which carries the full
+  # reasoning. Short version: the IdP refuses before a token exists, `any` means a member of EITHER
+  # group gets in, and a binding naming a group that does not exist DENIES rather than allows — which
+  # is why `titan-tesla-grafana-admins` was seeded from `authentik Admins` before this landed.
+  - model: authentik_policies.policybinding
+    identifiers:
+      target: !Find [authentik_core.application, [slug, tesla-boards]]
+      order: 0
+    state: present
+    attrs:
+      group: !Find [authentik_core.group, [name, titan-family]]
+
+  - model: authentik_policies.policybinding
+    identifiers:
+      target: !Find [authentik_core.application, [slug, tesla-boards]]
+      order: 1
+    state: present
+    attrs:
+      group: !Find [authentik_core.group, [name, titan-tesla-grafana-admins]]
