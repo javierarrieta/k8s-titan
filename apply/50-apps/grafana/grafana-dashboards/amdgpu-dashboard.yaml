@@ -64,7 +64,7 @@ data:
           },
           "gridPos": {
             "h": 8,
-            "w": 8,
+            "w": 16,
             "x": 0,
             "y": 1
           },
@@ -155,8 +155,8 @@ data:
           "gridPos": {
             "h": 8,
             "w": 8,
-            "x": 8,
-            "y": 1
+            "x": 12,
+            "y": 17
           },
           "id": 2,
           "options": {
@@ -222,7 +222,7 @@ data:
           },
           "gridPos": {
             "h": 8,
-            "w": 8,
+            "w": 4,
             "x": 16,
             "y": 1
           },
@@ -478,69 +478,6 @@ data:
             }
           ],
           "title": "Core Clock (sclk)",
-          "type": "timeseries"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "$datasource"
-          },
-          "fieldConfig": {
-            "defaults": {
-              "unit": "mhertz",
-              "custom": {
-                "drawStyle": "line",
-                "fillOpacity": 10,
-                "lineWidth": 1,
-                "showPoints": "never"
-              },
-              "thresholds": {
-                "mode": "absolute",
-                "steps": [
-                  {
-                    "color": "green",
-                    "value": null
-                  }
-                ]
-              }
-            },
-            "overrides": []
-          },
-          "gridPos": {
-            "h": 8,
-            "w": 6,
-            "x": 18,
-            "y": 9
-          },
-          "id": 7,
-          "options": {
-            "legend": {
-              "calcs": [
-                "mean",
-                "last",
-                "max"
-              ],
-              "displayMode": "list",
-              "placement": "bottom",
-              "showLegend": true
-            },
-            "tooltip": {
-              "mode": "multi",
-              "sort": "desc"
-            }
-          },
-          "targets": [
-            {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "$datasource"
-              },
-              "expr": "node_hwmon_freq_freq_mhz{instance=~\"$instance\", chip=~\"$chip\", sensor=\"mclk\"} * on (instance, chip) group_left (chip_name) node_hwmon_chip_names{chip_name=\"amdgpu\"}",
-              "legendFormat": "{{instance}} mclk",
-              "refId": "A"
-            }
-          ],
-          "title": "Memory Clock (mclk)",
           "type": "timeseries"
         },
         {
