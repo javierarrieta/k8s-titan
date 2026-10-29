@@ -67,8 +67,13 @@ Two layers, deliberately, and they answer different questions:
 
 1. **The edge gate** decides whether the host may be reached at all. It never tells Grafana who you
    are. Unauthenticated browsers get a 302 to `auth.titan.arrieta.eu`.
-2. **OIDC** supplies identity and role: `contains(groups[*], 'authentik Admins') && 'Admin' ||
+2. **OIDC** supplies identity and role: `contains(groups[*], 'titan-grafana-admins') && 'Admin' ||
    'Viewer'`. `GrafanaAdmin` (server admin) is not granted to anyone.
+
+A third layer sits in front of both, inside authentik: the application is bound to `titan-family` or
+`titan-grafana-admins` (`authentik/blueprints-observability.yaml`), so anyone in neither is refused at
+the IdP before a token exists and never reaches Grafana to be made a Viewer. That binding is what
+switched this app off "any authentik user may log in".
 
 The `profile` scope is load-bearing on **both** sides of the pair — the `groups` claim exists only
 because authentik's default profile-scope mapping emits it. Drop it on either side and every login
