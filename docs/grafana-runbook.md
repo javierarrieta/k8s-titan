@@ -54,7 +54,7 @@ label at all, while its k8s scrapes do.
 | disk | `node_filesystem_*` | same set; 9 filesystems on titan |
 | comin | `comin_*` | 13 devices including `192.168.133.1:4243` |
 | postgres | `pg_*` filtered on `service="postgres-exporter"` | **casa's database.** titan's CNPG databases are **not** here — CNPG's exporter is not scraped into this Prometheus. This is a gap in the metrics pipeline, not a broken board |
-| amdgpu | `node_drm_*` | whatever has a GPU; the metric family exists with one series |
+| amdgpu | `node_drm_*`, plus the `llamacpp:*` panels for the halogen backend (`Generation TPS`, `Prompt TPS`, `Tokens generated/s`, `Requests deferred / processing`, `KV cache tokens`) | whatever has a GPU; the metric family exists with one series. The LLM panels resolve on the shared Prometheus through the `casa-halogen` scrape |
 | alerts | `alertmanager_*` | casa's Alertmanager. titan runs none |
 | security-scans | `kube_job_status_*` + Loki log lines | casa's scan jobs. titan's pod logs are in the same Loki under `cluster="titan"`, but no titan job runs these scans, so the Findings rows are thin by construction |
 
@@ -107,6 +107,14 @@ say they are mounted in `apply/50-apps/casa/grafana.yaml`, which is true there a
 those two comments is free to type and not free to verify, so they stay. The mount is the
 `volumeMounts` list in `apply/50-apps/grafana/grafana.yaml`, which is the only thing here that decides
 where a dashboard actually lands.
+
+**The one deliberate exception is `amdgpu-dashboard.yaml`.** Since 2026-10-29 it is edited, which breaks
+the "copied verbatim" rule, and the break is recorded as **D7** in
+`docs/superpowers/specs/2026-10-21-titan-grafana-design.md`. The two new panels — `Requests deferred
+/ processing` and `KV cache tokens` — were asked for on the titan-side board and resolve on the same
+shared Prometheus the rest of the board reads (via the `casa-halogen` ScrapeConfig). The divergence is
+titan-side only: casa's own copy is untouched. The rule's premise — that a copied file is an unmodified
+copy — no longer holds for this one, so the single-`cmp` re-sync proof no longer applies to it.
 
 ## 6. When a dashboard edit does not appear
 

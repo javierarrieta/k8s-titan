@@ -58,6 +58,7 @@ or this repository. Nothing here is a guess carried forward.
 | D4 | **`apply/50-apps/grafana/`, shared `apps` stage, own namespace `observability`** | Declined: a new `70-observability` stage, which is what §3.2 of the scale-out spec reads as when read literally. The tree already declined that for open-webui (D6 there) and for coder. The spec text conflates "own namespace" with "own stage"; that is a defect in the spec, not in this decision, and is amended in `2026-10-19-titan-app-scale-out-design.md` §3.1/§3.2 as its own commit |
 | D5 | **Official `grafana/grafana`, pinned by digest** | `teslamate/grafana` — what both casa and tesla-boards use — ships Tesla's dashboards and provisions a Postgres datasource from `DATABASE_*`. Neither is wanted here, and inheriting the image would inherit both |
 | D6 | **`allowUiUpdates: false` on every dashboard provider** | casa provisions with `editable: true`, which lets a browser edit silently diverge from git and survive every later apply. This repo already has a written rule about live drift being invisible to `make dry-run`; git is the only editor of a dashboard here |
+| D7 | **The `amdgpu` dashboard copy is edited — parity with `k8s-casa` is broken, deliberately.** `amdgpu-dashboard.yaml` now carries two new `llamacpp:*` panels — `Requests deferred / processing` and `KV cache tokens` — that the casa copy does not have. The panels query the same shared Prometheus the rest of the board reads (via the `casa-halogen` ScrapeConfig), so the divergence is additive and data-side, not a broken copy. It is a **titan-side** divergence: casa's own board is untouched |
 
 ## 4. Layout
 
@@ -113,6 +114,13 @@ Seven ConfigMaps, copied from `k8s-casa/apply/50-apps/casa/grafana-dashboards/` 
 `metadata.namespace` changed** — `casa` → `observability`. Names keep casa's
 `grafana-<topic>-dashboard` shape so a diff between the two trees stays readable.
 
+**2026-10-29 amendment — the copy rule is broken on purpose, on one board.** `amdgpu-dashboard.yaml`
+is edited. The two new panels (`Requests deferred / processing`, `KV cache tokens`) were asked for on
+the titan-side board and resolve on the same shared Prometheus the rest of the board reads, through
+the `casa-halogen` scrape that already exists. The divergence is recorded as D7 and is a **titan-side**
+divergence only: casa's copy is untouched, and `cmp` against `k8s-casa` no longer holds for this file.
+Future dashboard edits should either land in both trees or amend D7 here first.
+
 The provisioning ConfigMap declares one provider per dashboard, `type: file`, folders `Servers` /
 `Databases` / `Monitoring` / `Security` as casa has them, `disableDeletion: false`, and
 `allowUiUpdates: false` per D6.
@@ -125,7 +133,7 @@ What each board shows, given D1, so nobody mistakes an empty panel for a broken 
 | disk | `node_filesystem_*` | same, 9 filesystems on titan |
 | comin | `comin_*` | 13 devices including `192.168.133.1:4243` |
 | postgres | `pg_*` filtered on `service="postgres-exporter"` | casa's exporter. **titan's CNPG databases are not here** — CNPG's own exporter is not scraped into this Prometheus, so this board is casa's database and nothing else |
-| amdgpu | `node_drm_*` | whatever has a GPU; the metric family exists with one series |
+| amdgpu | `node_drm_*`, plus the `llamacpp:*` panels for the halogen backend (`Generation TPS`, `Prompt TPS`, `Tokens generated/s`, `Requests deferred / processing`, `KV cache tokens`) | whatever has a GPU; the metric family exists with one series. The LLM panels resolve on the shared Prometheus through the `casa-halogen` scrape |
 | alerts | `alertmanager_*` | casa's Alertmanager. titan runs none |
 | security-scans | `kube_job_status_*` (Prometheus) + log lines (Loki) | casa's scan jobs. titan's pod logs are in the same Loki under `cluster="titan"`, but no titan job runs these scans |
 
