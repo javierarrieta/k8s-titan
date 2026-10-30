@@ -8,6 +8,36 @@
 # the `apps` stage (spec §3.2 of the 2026-10-19 scale-out design). The namespace is separate because
 # §3.1 is about pod count, databases and credentials, and Sure fails it on four counts.
 #
+# AI MERCHANT DETECTION IS OFF, AND THE REASON IS A QUEUE PROPERTY NOT A MODEL ONE
+# On 2026-10-30 the "AI Merchant selection" rule was deactivated in the Sure UI. It is a row in
+# Postgres, not a field in this file, so nothing here changes when it is switched back on. This block
+# exists because the reason reads like "the model is bad" and is not, and because re-enabling it
+# restores a queue that provably cannot drain.
+#
+# THE MECHANISM. Rule::ActionExecutor::AutoDetectMerchants enqueues everything in
+# `enrichable(:merchant_id)`, and that scope is `where.not(locked_attributes ?| array['merchant_id'])`
+# (app/models/concerns/enrichable.rb:20). It excludes LOCKED rows and nothing else. The detector locks
+# a transaction only when it gets back both a name and a url
+# (app/models/family/auto_merchant_detector.rb, `next unless ...business_name.present? &&
+# business_url.present?`), and the built-in prompt tells the model to favour null above 80%
+# confidence, so the large majority of batches return null, null locks nothing, and those rows stay
+# in scope forever. ApplyRulesJob then runs after every sync (app/models/family/syncer.rb:27,
+# app/models/financekit/downstream.rb:54) over every MATCHING transaction rather than the newly
+# imported ones. The unresolved history is therefore re-enqueued in full, every sync, indefinitely.
+#
+# MEASURED 2026-10-30 from the queue dump and from Loki: one 02:22 run enqueued 987 batches over
+# 14,804 transactions; the run the previous afternoon covered 11,055, of which 10,821 were re-queued.
+# The single worker does ~86 batches/h at strict, i.e. ~2,064 batches/day of capacity, against
+# ~1,263/day of merchant plus categorization work. That is the whole explanation for a queue that
+# never drained, and it is why more memory or a faster model does not fix it.
+#
+# WHAT WOULD MAKE IT SAFE TO RE-ENABLE. Not a bigger queue and not a different JSON mode. Either the
+# null rate falls - the only UI lever is the prompt at /settings/ai_prompts -> `merchant_openai`, and
+# loosening "favour null" is a data-quality trade, not a free win - or upstream grows an
+# already-attempted marker so a null stops being re-tried on every sync. Until one of those is true,
+# one nightly run of this rule alone is ~48% of measured capacity and the share grows with the
+# unresolved backlog.
+#
 # WHAT IS BACKED UP AND WHAT IS NOT
 # Postgres (`sure`, in the Cluster that ships base backups and WAL) holds users, accounts,
 # transactions, categories and the OIDC identity. The PVC at /rails/storage holds uploaded files:
@@ -361,14 +391,24 @@ spec:
         # and the retry demonstrably did not converge: 99.2% of the same transactions were re-queued by
         # the next rule run. strict halves the calls and keeps the result that is known to parse.
         #
-        # THE ONE THING THIS DOES NOT PROVE: that the none-mode answer was no better. Nothing in the
-        # logs records the yield of either attempt, so this is a cost decision, not a measured win -
-        # and if it is wrong it is wrong quietly, by finding fewer merchants. The falsification is a
-        # paired run: count merchants created by one full rule application at auto, again at strict, on
-        # the same transaction set. If strict finds fewer, revert this and take the doubled cost.
+        # MEASURED AFTER THE FACT on 2026-10-30, over 459 batches that ran at strict: zero
+        # "Strict JSON mode failed, falling back to none mode" warnings, so the endpoint accepts Sure's
+        # own json_schema (not merely a probe schema) and the second unconstrained call never happens.
+        # Median elapsed fell from 154.8s per batch at auto to 30s at strict, which is the halved call
+        # count plus not paying for a discarded attempt.
+        #
+        # THE ONE THING STILL NOT PROVEN: that the none-mode answer was no better. And note this got
+        # HARDER to test, not easier - the null/missing diagnostic is logged only on the auto retry path
+        # (auto_detect_merchants_with_auto_mode); auto_detect_merchants_with_mode logs tokens and records
+        # usage with json_mode and nothing else. So at strict the yield is not in the logs at all. The
+        # falsification is now a UI measurement, not a grep: count merchants created by one full rule
+        # application at auto, again at strict, on the same transaction set. If strict finds fewer,
+        # revert this and take the doubled cost.
         #
         # "strict" still degrades safely: a provider that rejects the schema raises Faraday::BadRequestError
-        # and the rescue in auto_detect_merchants_openai_generic falls back to none mode.
+        # and the rescue in auto_detect_merchants_openai_generic falls back to none mode. That rescue is
+        # the reason the warning above is the thing to watch: if it ever appears, the cost saving is gone
+        # and only the log line says so.
         LLM_JSON_MODE: "strict"
         # Raised 2026-10-25 from 8192/2048 to 32768/8192 at the operator's request. Sure's own
         # defaults are far smaller - Assistant::TokenBudget::DEFAULT_CONTEXT_WINDOW is 2048 and the
