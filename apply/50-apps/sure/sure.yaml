@@ -259,21 +259,22 @@ spec:
         # the first visitor wins it. Upstream's own sequence (docs/hosting/docker.md step 5a) assumes a
         # local first account; with OIDC configured that step is unnecessary.
         ONBOARDING_STATE: "closed"
-        # TEMPORARY - REVERT AFTER THE DEBUG WINDOW. Turned on 2026-10-30 to capture raw LLM
-        # request/response bodies for the merchant-detection null storm: 484 of 487
-        # AutoDetectMerchantsJob batches logged "Auto mode: N% failed (N nulls, 0 missing) in
-        # strict mode, retrying with none mode" at a mean of 79% nulls, so the same ~15k
-        # transactions are re-enqueued by every ApplyRulesJob and the ai_low_priority queue grows
-        # (~987 batches/day enqueued vs ~793/day completed at 15 items and one concurrent worker).
-        # Sure truncates the response to 200 chars at the raise site (see the LLM_MAX_ITEMS_PER_CALL
-        # note below), so this flag is the only way to see whether the endpoint's strict
-        # json_schema mode is returning JSON nulls or the model is emitting the bare string
-        # "null" - the two need different fixes (endpoint capability vs prompt/schema).
-        # COST OF LEAVING IT ON: the debug log carries the full prompt, i.e. real transaction
-        # descriptions and counterparty names, and promtail (20-infra/monitoring/promtail.yaml,
-        # job pod-logs) ships every sure pod log line to casa's Loki, where it is retained.
-        # Revert this line to "false" when the capture is done; the revert is not optional.
-        AI_DEBUG_MODE: "true"
+        # INERT FOR THE BATCH AI PATHS, and it always was. Turned on 2026-10-30 (PR #204) chasing the
+        # merchant-detection null rate, on the strength of a claim further down that this was the only
+        # way to see a raw response body. That claim was wrong; it is corrected at LLM_MAX_ITEMS_PER_CALL.
+        # Read in upstream main at 28cdec5 (2026-10-30; the deployed 0.7.6-alpha.9 emits these exact log
+        # strings, so it is the same code path - the tag itself is no longer fetchable from the remote).
+        # The flag is read in exactly one place, Chat::Debuggable#debug_mode?
+        # (app/models/chat/debuggable.rb), and consumed by two Assistant CHAT views
+        # (app/views/assistant_messages/_assistant_message.html.erb, app/views/chats/_error.html.erb)
+        # to render tool calls in the browser. AutoDetectMerchantsJob never consults it - the worker log
+        # with it on was byte-for-byte the shape it was with it off. Kept here, set to false, so the next
+        # person does not repeat the experiment.
+        # If raw request/response bodies are ever genuinely wanted, the mechanism is Langfuse:
+        # config/initializers/langfuse.rb turns tracing on when LANGFUSE_PUBLIC_KEY + LANGFUSE_SECRET_KEY
+        # are present, and Provider::Openai::AutoMerchantDetector records the input transactions and the
+        # parsed merchants per generation. That ships data off-box, so it is not a casual flip.
+        AI_DEBUG_MODE: "false"
 
       # --- LLM: casa's halogen endpoint, reached over the WireGuard mesh ------------------------
       # titan is a public OVH box, not on the LAN; 192.168.0.0/24 is routable from titan pods only
@@ -315,6 +316,17 @@ spec:
         # access_token/uri_base/model only and the sole per-request escape in .env.example is
         # OPENAI_EXTRA_HEADERS, which is headers, not body. So until upstream grows an extra_body
         # knob, the mitigation is budget and batch size, not the switch.
+        # "auto" tries strict JSON-schema decoding first and, if more than 50% of the batch came back
+        # without a name or a URL, THROWS THE STRICT RESULT AWAY and re-asks in none mode
+        # (Provider::Openai::AutoMerchantDetector#auto_detect_merchants_with_auto_mode). Measured over 487 batches:
+        # 484 took that retry, and every one of them logged "0 missing", which means the strict response
+        # parsed cleanly and carried all 15 correlated transaction_ids every time - the endpoint's
+        # structured output is not the problem. The nulls are the model declining, as instructed
+        # ("Favor null over guessing - only return values if 80%+ confident"), and the retry does not
+        # change the outcome: 99.2% of the same transactions were re-queued by the next rule run.
+        # So auto mode is paying two LLM calls per batch to keep the second answer instead of the first.
+        # "strict" would halve the cost and keep the same result; left on "auto" only because nothing
+        # here proves the none-mode answer is worse, and that would need a paired run to show.
         LLM_JSON_MODE: "auto"
         # Raised 2026-10-25 from 8192/2048 to 32768/8192 at the operator's request. Sure's own
         # defaults are far smaller - Assistant::TokenBudget::DEFAULT_CONTEXT_WINDOW is 2048 and the
@@ -365,7 +377,9 @@ spec:
         # If it persists AT 10, the cause is not truncation and this knob is the wrong lever; the model
         # was also seen emitting the string "null" where JSON null belonged, which would be a schema
         # problem. Note Sure logs only raw.truncate(200) at the raise site, so the end of a bad response
-        # is never visible; AI_DEBUG_MODE=true is the only way to get more.
+        # is never visible. AI_DEBUG_MODE does NOT help with that - it drives two Assistant chat views
+        # and nothing on the batch path (see the note under rails.settings above); Langfuse is the only
+        # capture mechanism that records bodies.
         #
         # This is the knob that bounds call count: the executors each_slice pending items by it FIRST
         # (app/models/rule/action_executor/auto_categorize.rb:55, auto_detect_merchants.rb:28,
