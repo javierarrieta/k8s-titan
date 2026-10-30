@@ -259,7 +259,21 @@ spec:
         # the first visitor wins it. Upstream's own sequence (docs/hosting/docker.md step 5a) assumes a
         # local first account; with OIDC configured that step is unnecessary.
         ONBOARDING_STATE: "closed"
-        AI_DEBUG_MODE: "false"
+        # TEMPORARY - REVERT AFTER THE DEBUG WINDOW. Turned on 2026-10-30 to capture raw LLM
+        # request/response bodies for the merchant-detection null storm: 484 of 487
+        # AutoDetectMerchantsJob batches logged "Auto mode: N% failed (N nulls, 0 missing) in
+        # strict mode, retrying with none mode" at a mean of 79% nulls, so the same ~15k
+        # transactions are re-enqueued by every ApplyRulesJob and the ai_low_priority queue grows
+        # (~987 batches/day enqueued vs ~793/day completed at 15 items and one concurrent worker).
+        # Sure truncates the response to 200 chars at the raise site (see the LLM_MAX_ITEMS_PER_CALL
+        # note below), so this flag is the only way to see whether the endpoint's strict
+        # json_schema mode is returning JSON nulls or the model is emitting the bare string
+        # "null" - the two need different fixes (endpoint capability vs prompt/schema).
+        # COST OF LEAVING IT ON: the debug log carries the full prompt, i.e. real transaction
+        # descriptions and counterparty names, and promtail (20-infra/monitoring/promtail.yaml,
+        # job pod-logs) ships every sure pod log line to casa's Loki, where it is retained.
+        # Revert this line to "false" when the capture is done; the revert is not optional.
+        AI_DEBUG_MODE: "true"
 
       # --- LLM: casa's halogen endpoint, reached over the WireGuard mesh ------------------------
       # titan is a public OVH box, not on the LAN; 192.168.0.0/24 is routable from titan pods only
