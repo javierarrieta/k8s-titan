@@ -346,18 +346,30 @@ spec:
         # access_token/uri_base/model only and the sole per-request escape in .env.example is
         # OPENAI_EXTRA_HEADERS, which is headers, not body. So until upstream grows an extra_body
         # knob, the mitigation is budget and batch size, not the switch.
-        # "auto" tries strict JSON-schema decoding first and, if more than 50% of the batch came back
-        # without a name or a URL, THROWS THE STRICT RESULT AWAY and re-asks in none mode
-        # (Provider::Openai::AutoMerchantDetector#auto_detect_merchants_with_auto_mode). Measured over 487 batches:
-        # 484 took that retry, and every one of them logged "0 missing", which means the strict response
-        # parsed cleanly and carried all 15 correlated transaction_ids every time - the endpoint's
-        # structured output is not the problem. The nulls are the model declining, as instructed
-        # ("Favor null over guessing - only return values if 80%+ confident"), and the retry does not
-        # change the outcome: 99.2% of the same transactions were re-queued by the next rule run.
-        # So auto mode is paying two LLM calls per batch to keep the second answer instead of the first.
-        # "strict" would halve the cost and keep the same result; left on "auto" only because nothing
-        # here proves the none-mode answer is worse, and that would need a paired run to show.
-        LLM_JSON_MODE: "auto"
+        # Pinned to "strict" on 2026-10-30. "auto" tries strict first and, if more than 50% of the
+        # batch came back without a name or a URL, THROWS THE STRICT RESULT AWAY and re-asks in none
+        # mode (Provider::Openai::AutoMerchantDetector#auto_detect_merchants_with_auto_mode). Measured
+        # over 487 batches: 484 took that retry, and every one of them logged "0 missing" - which means
+        # the strict response parsed cleanly and carried all 15 correlated transaction_ids every time
+        # (items with no usable transaction_id are dropped before that count, and zero
+        # ResponseFormatError / parse failures / provider rejections appeared in 14.7h). Structured
+        # output on the endpoint is not the failure. The nulls are the model declining, as instructed:
+        # the built-in custom-provider instructions say "Favor null over guessing - only return values
+        # if 80%+ confident", and the schema itself declares business_name as ["string","null"].
+        #
+        # So auto was paying two LLM calls per batch to keep the second answer instead of the first,
+        # and the retry demonstrably did not converge: 99.2% of the same transactions were re-queued by
+        # the next rule run. strict halves the calls and keeps the result that is known to parse.
+        #
+        # THE ONE THING THIS DOES NOT PROVE: that the none-mode answer was no better. Nothing in the
+        # logs records the yield of either attempt, so this is a cost decision, not a measured win -
+        # and if it is wrong it is wrong quietly, by finding fewer merchants. The falsification is a
+        # paired run: count merchants created by one full rule application at auto, again at strict, on
+        # the same transaction set. If strict finds fewer, revert this and take the doubled cost.
+        #
+        # "strict" still degrades safely: a provider that rejects the schema raises Faraday::BadRequestError
+        # and the rescue in auto_detect_merchants_openai_generic falls back to none mode.
+        LLM_JSON_MODE: "strict"
         # Raised 2026-10-25 from 8192/2048 to 32768/8192 at the operator's request. Sure's own
         # defaults are far smaller - Assistant::TokenBudget::DEFAULT_CONTEXT_WINDOW is 2048 and the
         # response fallback is 512 - so these two numbers, not the model, were the binding constraint:
