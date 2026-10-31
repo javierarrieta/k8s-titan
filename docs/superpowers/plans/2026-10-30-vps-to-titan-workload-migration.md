@@ -38,7 +38,7 @@ new ticket is opened under a T-number and no work is scheduled against one.
 | R3 | **#111** (retire half) | |
 | — | **#99** | hostname scheme — **closed by spec D1/D1b**, should close with a pointer |
 | — | **#104** | mailserver: out of scope by operator instruction |
-| — | **#105**, **#108**, **#109** | investing-agent, unbound, gatus — the three the spec wrongly marked done or out of scope; see spec §0 |
+| — | **#105**, **#108**, **#109** | investing-agent, unbound, gatus — the three the spec wrongly marked done or out of scope; see spec §0. **Update 2026-10-31:** #105's data is confirmed migrated (operator), so it reduces to retiring the VPS Deployment and its 10 Gi PVC |
 
 Four tickets in this plan have **no existing issue**: TP, T0a, T2 and T3. Those are the only candidates
 for new issues, and only if the operator wants them tracked.

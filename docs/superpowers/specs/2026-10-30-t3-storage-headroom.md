@@ -102,7 +102,7 @@ Measured 2026-10-31 with an admin context (`kubectl exec deploy/… -- du -sh`).
 | `databasus-pv-claim` | 10 GiB | **89 MiB** | arrives if #113 keeps it |
 | `trading-reports-pv-claim` | 1 GiB | **9.3 MiB** | arrives (#106) |
 | `grafana-pv-claim` | 100 MiB | 6.7 MiB | **accepted loss** — not copied (D4) |
-| `investing-agent-pv-claim` | 10 GiB | **not measured — see below** | #105 |
+| `investing-agent-pv-claim` | 10 GiB | not measured — source scaled to 0; **data already migrated** | #105 → retire only |
 | `mailserver-maildata-pvc` | 50 GiB | **25 GiB** | **out of scope** |
 | `mailserver-mailstate-pvc` | 2 GiB | 419 MiB | **out of scope** |
 
@@ -117,10 +117,12 @@ formality — #102's rollback should budget for it.
 
 **New finding: the VPS `investing-agent` Deployment is scaled to `replicas: 0`.** That is why its `du`
 timed out — there is no ready pod to exec into. The Deployment exists, its pod template does mount
-`investing-agent-pv-claim`, but nothing is running and nothing is writing. Titan already runs a live
-investing-agent (Ingress 3 days old at time of writing). So #105 is not "migrate a running service", it
-is "confirm the dormant VPS copy holds nothing titan's copy lacks, then retire it" — a materially
-different ticket, and it should say so.
+`investing-agent-pv-claim`, but nothing is running and nothing is writing. **The operator has since
+confirmed the data was already migrated to titan** (2026-10-31), so the dormant PVC is dead weight rather
+than an un-migrated dataset, and #105 reduces to retiring the VPS side. Worth recording why this was
+misreadable in the first place: neither the scale-down nor the completed copy is visible from git, in
+either repo — which is the same class of gap the VPS authentik state has (§3), and the same fix: write it
+down somewhere a reader can find it.
 
 The VPS's 77.3 GiB of used disk is only partly PVC data: the measured volumes sum to ~31 GiB, of which
 mail alone is 25 GiB. The remaining ~46 GiB is system, container images and logs on a box that is

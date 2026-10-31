@@ -57,10 +57,16 @@ to #100 with a correction #100 itself supplies.
   that the pinned `clusterIP` is an immutable hard dependency, so unbound must move **before**
   mailserver and blocks that move. Being mailserver's dependency is the reason it has a ticket, not the
   reason it lacks one.
-- **`investing-agent` and `gatus` are not done.** #105 records a 10 Gi PVC holding "state nothing else
-  has" and a running two-process pod; #109 records that gatus's entire probe list is assertions about
-  the *VPS's* network view and cannot be copied. Both were marked done here on `replicas: 0`, which is
-  evidence about a Deployment and not about a volume.
+- **`gatus` is not done; `investing-agent` is migrated but not retired.** #109 records that gatus's
+  entire probe list is assertions about the *VPS's* network view and cannot be copied. For
+  `investing-agent`, #105 originally recorded a 10 Gi PVC holding "state nothing else has", and this
+  spec corrected an earlier "done" verdict that had been based on `replicas: 0` — evidence about a
+  Deployment, not a volume. **The operator has since confirmed the data was already migrated to titan**
+  (2026-10-31), so what remains is retiring the VPS Deployment and its 10 Gi PVC, not moving bytes.
+  Neither the scale-down nor the completed copy is visible from git in either repo; that is why it
+  read as un-migrated, and it is the same invisibility §3 hits with the VPS authentik state.
+  Marking it done on `replicas: 0` was still the wrong reasoning — it happened to arrive at a roughly
+  right answer by accident, which is not the same as being correct.
 - **D5 was too strong.** #100 notes the VPS's middleware annotation is
   `traefik-system-bearer-auth@kubernetescrd` — coupled to the VPS's `traefik-system` namespace, where
   titan's traefik does not live. So migrated middlewares are **rewritten, not copied**. D5's claim that
@@ -173,7 +179,7 @@ volume contents have never been inspected, and an unmeasured loss is not a zero 
 | Workload | VPS state | Titan home | Accepted loss |
 |---|---|---|---|
 | `teslamate` | `replicas: 0` | `60-tesla/` + own CNPG `Database` | **unmeasured.** The VPS instance accumulated charge/drive history before it was stopped, and that history is rows in the VPS Postgres — the same cluster T10 consolidates. T10 must confirm its DSN before this can be called none. |
-| `investing-agent` | **not done — #105.** 10 Gi PVC, own Secret set, a running two-process pod (`hermes gateway` + `hermes dashboard`) | `50-apps/investing-agent/` (app already on titan) | **the 10 Gi volume.** #105 calls it "state nothing else has". The app being replicated does not make the volume replicated; `replicas: 0` on the VPS says nothing about it. |
+| `investing-agent` | **migrated, not retired — #105.** App already on titan and running; the VPS Deployment is `replicas: 0` live (measured 2026-10-31, not just in git) | `50-apps/investing-agent/` (already there) | **nothing to copy** — operator confirmed the 10 Gi volume's data reached titan (2026-10-31). Remaining work is retiring the VPS Deployment and PVC behind an observation window. Unverified by diff; recorded as operator statement. |
 | `gatus` | **not done — #109.** Stateless, but its whole config is a probe list | `50-apps/gatus/` | **the probe list is not portable.** Every entry is an assertion about the VPS's network view (`icmp://192.168.0.1`, `http://192.168.133.3:8123`, …). Copying it produces a monitor that is confidently wrong about titan. |
 | `llm` | Endpoints, serving | `50-apps/llm/`, same two bearer keys | **see plan R2**: the VPS's `bearer-auth-service` also emits `X-Auth-User` / `X-Auth-Email` response headers that titan's does not. If that difference is real it is an accepted loss, not none. |
 | `promtail` | DaemonSet | `20-infra/monitoring/` → casa Loki | none — stateless shipper. |
