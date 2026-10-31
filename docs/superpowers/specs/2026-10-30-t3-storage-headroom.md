@@ -89,22 +89,43 @@ So the honest statement is: **the arriving byte volume is unknown, and the metri
 answers is wrong.** It needs `du` on the backing directories. Neither `k8s-reader` identity can do it —
 `auth can-i create pods/exec` is `no` on both clusters.
 
-### What the requests imply, as the interim answer
+### What the requests imply, and what was actually measured
 
-| VPS PVC | Request | Disposition |
-|---|---|---|
-| `databasus-pv-claim` | 10 GiB | arrives if #113 keeps it |
-| `trading-reports-pv-claim` | 1 GiB | arrives (#106) |
-| `postgres-pv-claim` | 6 GiB | merges into titan's CNPG (#102) |
-| `postgres-backup-pv-claim` | 3 GiB | not migrated — titan has its own S3 backup path |
-| `investing-agent-pv-claim` | 10 GiB | titan already has a 10 GiB claim; confirm which is authoritative (#105) |
-| `open-webui-pv-claim` | 5 GiB | **accepted loss** — history disposable (D4); titan has 10 GiB |
-| `grafana-pv-claim` | 100 MiB | **accepted loss** — hand-built dashboards (D4) |
-| `postgresus-pv-claim` | 1 GiB | retires (R1 / #114) |
-| mailserver ×4 | 54.2 GiB | **out of scope** |
+Measured 2026-10-31 with an admin context (`kubectl exec deploy/… -- du -sh`). **The requests were a
+5× overstatement of the bytes that move.**
 
-**Genuinely arriving: ~17 GiB of requests** (databasus + trading-reports + postgres), against **50.75 GiB
-free** — fits with ~34 GiB margin *before* any reclaim.
+| VPS volume | Request | **Actual** | Disposition |
+|---|---|---|---|
+| `postgres-pv-claim` | 6 GiB | **4.2 GiB** | merges into titan's CNPG (#102) |
+| `open-webui-pv-claim` | 5 GiB | 896 MiB | **accepted loss** — not copied (D4) |
+| `postgres-backup-pv-claim` | 3 GiB | 499 MiB | not migrated — titan backs up to S3 |
+| `databasus-pv-claim` | 10 GiB | **89 MiB** | arrives if #113 keeps it |
+| `trading-reports-pv-claim` | 1 GiB | **9.3 MiB** | arrives (#106) |
+| `grafana-pv-claim` | 100 MiB | 6.7 MiB | **accepted loss** — not copied (D4) |
+| `investing-agent-pv-claim` | 10 GiB | **not measured — see below** | #105 |
+| `mailserver-maildata-pvc` | 50 GiB | **25 GiB** | **out of scope** |
+| `mailserver-mailstate-pvc` | 2 GiB | 419 MiB | **out of scope** |
+
+**Genuinely arriving: ~4.4 GiB actual** (postgres 4.2 GiB + databasus 89 MiB + trading-reports 9.3 MiB),
+against **50.75 GiB free** on titan. Not 17 GiB. The disk verdict flips to green.
+
+**The one number that matters is postgres at 4.2 GiB against a 6 GiB claim — 70 % full.** It is the only
+volume anywhere near its request. Two consequences: (a) titan's CNPG `Cluster postgres` (pod `postgres-1`,
+10 GiB PVC) has to absorb it, and titan's own current usage is still unmeasured, so the merge needs that
+number before it happens rather than after; (b) a 4.2 GiB restore into CNPG is a real window, not a
+formality — #102's rollback should budget for it.
+
+**New finding: the VPS `investing-agent` Deployment is scaled to `replicas: 0`.** That is why its `du`
+timed out — there is no ready pod to exec into. The Deployment exists, its pod template does mount
+`investing-agent-pv-claim`, but nothing is running and nothing is writing. Titan already runs a live
+investing-agent (Ingress 3 days old at time of writing). So #105 is not "migrate a running service", it
+is "confirm the dormant VPS copy holds nothing titan's copy lacks, then retire it" — a materially
+different ticket, and it should say so.
+
+The VPS's 77.3 GiB of used disk is only partly PVC data: the measured volumes sum to ~31 GiB, of which
+mail alone is 25 GiB. The remaining ~46 GiB is system, container images and logs on a box that is
+**18.55 GiB from full** — worth knowing because a migration that fills the VPS with copy staging before
+the cutover has nowhere to put it.
 
 ## 5. Verdict
 
@@ -113,19 +134,18 @@ free** — fits with ~34 GiB margin *before* any reclaim.
 | **CPU** | **GREEN** | 7.75 free cores vs ~1.5 arriving |
 | **Memory** | **GREEN** | ~116 GiB free vs ~2 GiB arriving |
 | **GPU** | **GREEN / n/a** | no migrated workload computes locally |
-| **Disk** | **CONDITIONAL** | requests fit (17 GiB into 50.75 GiB free), but actual bytes are unmeasured and the obvious metric is wrong |
-| **Reclaim available** | **up to 90 GiB** | 5 Released PVs; real size unmeasured |
+| **Disk** | **GREEN** | **~4.4 GiB arriving actual** into 50.75 GiB free. Requests overstated it 5× |
+| **Reclaim available** | **up to 90 GiB claim capacity** | 5 Released PVs; real on-disk size still unmeasured |
 
-**The stateful wave (#106, #113, #102) can start on the request-based numbers** — 17 GiB into 50.75 GiB
-free is not close to a wall, and there is a 90 GiB reclaim behind it. What must not happen is starting it
-on the assumption that the Released PVs are already reclaimed, or that `kubelet_volume_stats_used_bytes`
+**The stateful wave (#106, #113, #102) is unblocked.** 4.4 GiB into 50.75 GiB free is not a constraint,
+and there is a 90 GiB reclaim behind it if it ever becomes one. What must not happen is starting it on
+the assumption that the Released PVs are already reclaimed, or that `kubelet_volume_stats_used_bytes`
 measured anything.
 
-Two things to close before the wave, both cheap:
-
-1. `du` the five Released directories and the arriving VPS volumes (commands handed over — needs admin).
-2. Decide, per PV, whether it is junk. `coder-home-recovered` and the two `opencloud-data`/`ocis-data`
-   leftovers each have a plausible reason to exist.
+One thing still open, and it is now the only one: **titan's own postgres usage is unmeasured.** The VPS
+side is 4.2 GiB; titan's CNPG holds authentik, coder, open-webui, grafana, sure and mealie and its volume
+is 10 GiB. The `du` pass on titan's storage root answers it — that is the half of the script that needs
+the temporary probe pod.
 
 ## 6. Policy to record (the ticket's actual file deliverable)
 
