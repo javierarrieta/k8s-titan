@@ -22,7 +22,7 @@ new ticket is opened under a T-number and no work is scheduled against one.
 | TP | **none — new** | access/credentials. #116 says "access needed: varies per item"; no issue aggregates it |
 | T0a | **none — new** | the per-host probe. Posted as a comment on #103 |
 | T0 | **#103** | reconcile the VPS authentik outpost and bearer-auth frontend |
-| T1 | **#100** | traefik ownership — closed by spec D5, with #100's middleware-rewrite correction |
+| T1 | **#100 → superseded by #209** | traefik. #209 is now a **hard prerequisite of this whole plan**, not a decision to make here — see §2 |
 | T2 | **none — new** | monitoring decision + casa scrape re-point |
 | T3 | **none — new** | storage preconditions and destination headroom |
 | TC | **#101** | generic PVC backup before any data copy — this is pre-flight F-G |
@@ -115,23 +115,26 @@ T0a says *whether*; T0 says *with what policy*. It is the source of truth for ev
 - **Rollback:** n/a — read-only against the VPS.
 - **Gates:** none (a doc-only change), but `kustomize-listing` must stay green.
 
-### T1 — traefik: confirm D5, change nothing  ·  **#100**
+### T1 — traefik: blocked by #209  ·  ~~#100~~ → **#209**
 
-Per spec D5 this is no longer a blocking decision. Titan already runs the required surface:
-`apps/teslamate-auth`, `observability/observability-grafana-auth`, `llm/llm-bearer-auth` are live
-`traefik.io/v1alpha1` `Middleware` objects and five Ingresses already use `router.middlewares` with a
-`websecure` pin.
+**This is no longer a ticket to do — it is a gate to wait on.** Per spec D5 the migration lands *after*
+titan replaces k3s's bundled traefik with a Flux-managed chart (#209). #209 supersedes #100 and reverses
+a confirmed founding decision (`nixos-configurations` spec D4), and it has its own open design question —
+what binds the public IPv4 once k3s's ServiceLB is gone. It is not quick and it is not this plan's to do.
+
+What this plan still owes, when #209 lands:
 
 - **Not a no-op, per #100.** The VPS annotates `traefik-system-bearer-auth@kubernetescrd`, coupled to a
-  namespace titan does not have — titan's traefik is in `kube-system`. So every migrated
-  `router.middlewares` annotation is **rewritten, not copied**, and the layout to adopt is titan's own:
-  a `Middleware` in the *app's* namespace, not in traefik's.
-- **Files:** none. A note appended to `titan/docs/` recording D5 and the F19 chart-version risk.
-- **Do:** confirm the three CRD groups the apps consume are present and k3s-owned; confirm no VPS
-  traefik manifest is staged for copy (F-B's actual warning).
-- **Exit:** `kubectl get middleware -A` returns the three existing objects; the note is committed.
-- **Rollback:** n/a.
-- **Gates:** `make check-ci`.
+  namespace titan does not have. Every migrated `router.middlewares` annotation is **rewritten, not
+  copied**, and the layout to adopt is titan's own: a `Middleware` in the *app's* namespace.
+- **Confirm the shape survived the cutover** before the first migrated Ingress: the three existing
+  `Middleware` objects still resolve, `websecure` still exists as an entrypoint, and the NodePort
+  firewall posture is unchanged. Spec D5b says the forwardAuth shape is invariant across the cutover —
+  that is an assertion worth re-proving rather than assuming.
+- **Files:** none here. A note in `titan/docs/` recording the cutover and the new chart pin.
+- **Exit:** `kubectl get middleware -A` returns the three existing objects on the new install, and an
+  unauthenticated request to an already-gated host still 302s to authentik.
+- **Gates:** `make check-ci`, plus `dry-run` once an admin context is in scope.
 
 ### T2 — monitoring decision + scrape re-point
 
@@ -391,9 +394,9 @@ Both are correct about their own half. The likely resolution is to split #113 �
 Waves are a reading order; this is the actual constraint graph.
 
 ```
+#209 → T1 → all Ingress-bearing tickets (T4, T5, T8, T9, T12)   [HARD GATE, not yet designed]
 TP → everything needing credentials
 T0a → T0 → {T4, T5, T8, T9, T12} auth halves; T0 also gates R2
-T1  → all Ingress-bearing tickets (T4, T5, T8, T9, T12)
 T3  → all stateful tickets (T8, T9, T10) — capacity verdict required first
 TC  → all stateful tickets (T8, T9, T10) — copy mechanism proven first
 T10 → T9 (credentials), → R1 → R2
@@ -402,6 +405,10 @@ T7  → R-series only if it retires
 T12 → R3
 R-series → only after a stated observation window
 ```
+
+**#209 is the head of this graph and it is not a small ticket.** It reverses a confirmed founding
+decision, has an open design question about the public IP, and cuts over 14 live hostnames. Nothing
+Ingress-bearing in this plan should be scheduled until it lands.
 
 ## 9. Program-level acceptance
 

@@ -88,7 +88,8 @@ indistinguishable from a restatement.
 | **D2** | **`kanghuru.es` is the one exception to D1, and it migrates last.** It is a public product domain with its own OVH credential, its own DNS-01 issuer and its own wildcard cert. | One ticket carries a `public-dns-tf` change: re-point `kanghuru.es` / `www.kanghuru.es` at `<OVH_PUBLIC_IP>`, and move the `le-prod-kanghuru` issuer, `kanghuru-es-cert` and `kanghuru-ovh-secrets` to titan. Sequenced last so the path is proven before the only public-facing name change. | The one ticket that needs a second repo, `terraform` state, and OVH write access — and the only one where a stale DNS-01 challenge node can actually bite, because kanghuru has its own `Certificate` rather than sharing the wildcard (§5). |
 | **D3** | **titan's authentik is the authority.** Migrated apps are enrolled there; the VPS instance retires. Default pattern is an authentik **proxy provider + Traefik `forwardAuth` Middleware**, per app. | No user-directory lift-and-shift, and no imported authentik objects. Per-app auth is net-new hardening on titan, not a migration. See §3, which is where the correction to the pre-flight lives. | Groups and policies are **re-authored in titan blueprints from the T0 inventory** — that is a policy migration under a different name, and it is mandatory work, not a free pass. It also presumes identity parity (§3.3), which is not yet proven. |
 | **D4** | **The seven already-replicated workloads are done**, with two accepted losses. | Deletes an entire decommission wave from #153's shape — the single largest reduction here. | No standalone decommission *wave*; teardown is folded into whichever ticket replaces each workload (T7, T9, T10) or into a retirement ticket (R1–R3). Accepted losses are in §2.1, and three of them are `unmeasured` rather than none. |
-| **D5** | **titan keeps k3s's bundled traefik; the migration changes no traefik *ownership*.** The VPS's Flux traefik manifests are not copied. Closes #100's choice. | Deletes #100 / pre-flight F-B from the critical path. The migration needs only `Middleware` CRs plus Ingress annotations, and titan already runs that surface in production: `apps/teslamate-auth`, `observability/observability-grafana-auth` and `llm/llm-bearer-auth` are live `traefik.io/v1alpha1` `Middleware` objects, and five Ingresses already use `router.middlewares` with a `websecure` entrypoint pin. `ingress-auth` already enforces correct use of that surface. | **Not a no-op.** Per #100: the VPS annotates `traefik-system-bearer-auth@kubernetescrd`, coupled to a namespace titan does not have, so every migrated `router.middlewares` annotation is **rewritten, not copied**. Titan's own convention is a `Middleware` in the *app's* namespace — adopt that layout, do not port the VPS one. The bundled chart also stays two versions behind the release that fixed F19 (F-B): a titan platform risk with no owner here, recorded in §9 rather than gating nine tickets. |
+| **D5** | **The migration depends on #209: titan replaces k3s's bundled traefik with a Flux-managed chart, and the migration lands *after* that.** The VPS's Flux traefik manifests are still not copied verbatim. | Removes the two-ingress-controller trap F-B warned about by construction rather than by care, and closes the one thing the first version of D5 left unowned: the bundled chart is two versions behind the release that fixed F19. Doing it **before** the migration cuts over 14 live hostnames instead of 27. | Every Ingress-bearing ticket now waits on #209, which is itself P1 and has an open design question (ServiceLB). The forwardAuth surface itself does not change — `Middleware` CRs in the app's namespace plus `router.middlewares` — so the migration's auth work is unaffected by which chart owns traefik. **Not a no-op either:** per #100 the VPS annotates `traefik-system-bearer-auth@kubernetescrd`, coupled to a namespace titan does not have, so migrated middleware references are **rewritten, not copied**. |
+| **D5b** | **The forwardAuth shape is unchanged by #209.** Provider + per-app `Middleware` in the app's own namespace, as titan already runs. | Keeps §3.2 valid across the traefik cutover. Measured: three live `Middleware` objects (`apps/teslamate-auth`, `observability/observability-grafana-auth`, `llm/llm-bearer-auth`) and five Ingresses already using `router.middlewares` with a `websecure` pin; `ingress-auth` enforces it mechanically. | The replacement chart must reproduce the `websecure` entrypoint and the NodePort firewall posture, or the shape is correct and the traffic is cleartext. #209 carries that list. |
 | **D1b** | **The hostname scheme (#99) is `*.titan.arrieta.eu`, adopted, not re-pointed.** | Closes #99, which was P1 and blocked every Ingress-bearing issue in the epic, and which #99 itself noted is "operator only, nothing here is fixable from a workspace". D1 is the answer; #99 can close with a pointer here. | Every migrated app's FQDN changes, which is D1's cost paid once. |
 
 **D5 is the answer to F-B, not a dodge of it.** F-B's real warning is *do not copy the VPS's traefik
@@ -414,10 +415,13 @@ is the authority.
 
 - **#103 precedes every auth half**, and the T0a probe (§3) precedes #103. No ticket may state its auth
   half as fact before both land, which is why §2's Auth column is provisional.
+- **#209 gates every Ingress-bearing ticket.** The migration lands after titan's traefik is a Flux-managed
+  chart rather than k3s's bundled one. #209 supersedes #100 and reverses nixos-configurations spec D4,
+  so it carries its own open design question (ServiceLB) and is not a quick ticket — which is exactly why
+  it is first rather than folded into a workload move.
 - **#99 is closed by D1/D1b** and gates every Ingress-bearing issue; it should close first, with a
   pointer here rather than a new decision.
-- **#100 is closed by D5** and gates every Ingress-bearing ticket — but per D5 it is a confirmation plus
-  a middleware rewrite, not an ownership project.
+- **#100 is closed by D5 as superseded by #209**, not answered on its own terms.
 - **#101 gates every stateful ticket.** Pre-flight F-G gated a working backup path before any data copy,
   and #101 is that gate; the first draft of this spec invented a copy ticket without finding it.
   #101 measured "no generic volume backup on titan" on 2026-10-20 and is now partly satisfied by
@@ -471,7 +475,7 @@ lands.
 | finding | disposition |
 |---|---|
 | F-A | live-cluster state drifts; plan §8 re-measures before any retirement |
-| F-B | **closed by D5 / #100** — keep k3s's bundled traefik, copy nothing; but per #100 the middleware annotations are rewritten, not copied |
+| F-B | **superseded by #209 / D5** — titan moves to a Flux-managed traefik chart before the migration lands, so the two-ingress-controller trap cannot occur. The VPS manifests are still not copied verbatim, and per #100 the middleware annotations are rewritten, not copied |
 | F-C | T2; the alerting gap is the honest residual and stays in §9 |
 | F-D | §5 (one-shot sizing) and T3 (reclamation) |
 | F-E | **k3s version inversion — titan (v1.35.8) is older than the VPS (v1.37.1).** The one measured delta (Gateway API CRDs, 10 vs 8) is inert: nothing uses Gateway API. The migrated manifests are all long-stable core APIs. Residual is a re-check rule for any future manifest written against a 1.36/1.37 surface — see §9 |
@@ -504,9 +508,11 @@ lands.
 Listed as an uncertainty register, not a risk register: several rows below have **no mitigation and no
 owner in this plan**, and that is stated rather than papered over.
 
-- **D5 needs the operator's sign-off.** It is decided here on measured evidence (three live `Middleware`
-  objects, five gated Ingresses, no `HelmChartConfig` anywhere in `titan/`), but F-B framed it as a
-  decision to be made and this spec makes it by argument rather than by instruction.
+- **D5 depends on #209, which is not yet designed.** The first version of D5 concluded "change nothing"
+  on measured evidence; the operator then directed that titan get its own traefik chart instead, so D5 is
+  now a *dependency*, not a conclusion. #209 has an open design question (what binds the public IP once
+  k3s's ServiceLB is gone) and reverses a confirmed founding decision in `nixos-configurations`. Until it
+  lands, no Ingress-bearing ticket in this plan is startable.
 - **Identity parity between the two authentik instances is unproven** (§3.3). Until T0's parity diff
   exists, every auth half in this plan carries a lockout risk that includes the operator.
 - **Destination capacity is unverified** (§5). T3's exit includes the headroom verdict; nothing before
