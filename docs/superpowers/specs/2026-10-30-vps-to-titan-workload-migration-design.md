@@ -227,22 +227,35 @@ the only half that is:
   seven have no `router.middlewares`. Grafana's authentik block is **commented out**
   (`td/apply/50-apps/apps/grafana.yaml:25-35`).
 
-**What is a hypothesis, not a measurement.** The inference "not in git ⇒ it lives in authentik's
-database" has not been tested, and three alternatives are consistent with the evidence above:
+**Settled by measurement, 2026-10-30 — see [`../specs/2026-10-30-vps-auth-probe.md`](2026-10-30-vps-auth-probe.md).**
+The three alternatives below were written before the probe existed; they are kept because they are why
+the probe was run, and the probe is now the authority over all three.
 
-1. **Nothing is protected.** An initial read of that evidence says "nothing on the VPS is
-   authenticated". That read is probably **wrong** — authentik's embedded outpost generates its own
-   Ingresses for each proxy provider's `ingressUrls`, so protection is enforced without ever touching
-   the app's own Ingress, and the operator's statement (*"vps uses imperative defined authentik apps.
-   most would be reverse proxy protected"*, 2026-10-30) points at exactly that mechanism. But the
-   statement is testimony, not measurement.
-2. **The gating is imperative cluster state that is not authentik's.** Traefik `Middleware` CRs or
-   patched Ingress annotations applied from a shell are cluster state, not authentik-DB state, and a
-   DB export would miss them entirely. This is not hypothetical: `td/apply/20-infra/auth/bearer-auth-middleware.yaml:98`
-   contains a `forwardAuth` **in git**, so "not in git" was too strong as written.
-3. **The gating is network-layer** (ufw, mesh-only) — the mechanism this spec itself invokes for T2.
+1. **Nothing is protected.** **Falsified.** Nine hosts 302 to `/outpost.goauthentik.io/start`.
+2. **The gating is imperative cluster state that is not authentik's.** **Partly true, and not for the
+   nine.** The outpost Ingress is authentik-generated cluster state, so "not in git" was right but
+   "not authentik's" was not. The bearer middleware on `llm.v.arrieta.eu` is the genuine instance of
+   this alternative, and it is in git after all (`td/apply/20-infra/auth/bearer-auth-middleware.yaml:98`).
+3. **The gating is network-layer.** **Falsified.** Every host is reachable from the public internet and
+   four of them answer 200 to anyone.
 
-**Consequence, and it is load-bearing for the ticket set:** if the hypothesis holds, the authoritative
+**Measured answer.** Authentik's embedded reverse-proxy outpost enforces at the router for nine hosts
+(`tesla`, `prometheus`, `vert`, `uptime`, `llm-chat`, `agent0`, `q1`, `bentopdf`, `investment-agent`),
+via the authentik-generated Ingress `auth/ak-outpost-reverse-proxy-outpost`, which is why git shows
+nothing. **Each gated host has its own Application and its own OAuth2 `client_id`** — so the unit T0 must
+export is the Application, not the outpost. The gate is router-level: deep paths 302 too, so it is not
+bypassable by deep-linking. Separately, **four in-scope hosts are completely open today** —
+`chiclana-hass`, `databasus`, `openwebui`, `tr` — which makes gating them on titan a behaviour change
+rather than a parity move, and `hass.v.arrieta.eu` answers **400 on every path**, so its health is
+unknown. Grafana is **not** authentik-gated on the VPS; it lands on its own `/login`.
+
+**What remains unknown:** `access_group` per Application (the §9 column), group membership, and identity
+parity. All three are T0's contract. One honest gap found while running the probe: `k8s-reader` is
+**Forbidden** from listing `middlewares.traefik.io` on the VPS, so the middleware half of the
+declared-vs-actual comparison needs an admin context — an empty result set there is a permission
+artifact, not an absence.
+
+**Consequence, and it is load-bearing for the ticket set:** the authoritative
 list of which VPS hosts are protected, by which provider, with which groups, lives in the VPS
 authentik database, and no ticket can state its auth half accurately without reading it. That is
 ticket **T0**, and it is first for that reason. But T0 must be able to *falsify* this, which is why the

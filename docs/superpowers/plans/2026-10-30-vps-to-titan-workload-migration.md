@@ -20,7 +20,7 @@ new ticket is opened under a T-number and no work is scheduled against one.
 | shorthand | canonical issue | note |
 |---|---|---|
 | TP | **none — new** | access/credentials. #116 says "access needed: varies per item"; no issue aggregates it |
-| T0a | **none — new** | the per-host probe. Posted as a comment on #103 |
+| T0a | **none — new** | the per-host probe. **✅ Done 2026-10-30** — results in `specs/2026-10-30-vps-auth-probe.md`; posted as a comment on #103 |
 | T0 | **#103** | reconcile the VPS authentik outpost and bearer-auth frontend |
 | T1 | **#100 → superseded by #209** | traefik. #209 is now a **hard prerequisite of this whole plan**, not a decision to make here — see §2 |
 | T2 | **none — new** | monitoring decision + casa scrape re-point |
@@ -83,20 +83,25 @@ owner; this ticket closes when every row has a named holder.
 
 **Exit:** every row names a holder. **Rollback:** n/a.
 
-### T0a — prove what is actually protected (read-only, do this before T0)
+### T0a — ✅ **DONE 2026-10-30** — proved what is actually protected
 
-The spec's §3 is a hypothesis with three live alternatives, and a DB export cannot falsify it. This
-ticket is the falsification, and it is cheaper than the export.
+**Result:** spec §3's hypothesis is settled. Authentik's embedded outpost gates **nine** hosts at the
+router (`tesla`, `prometheus`, `vert`, `uptime`, `llm-chat`, `agent0`, `q1`, `bentopdf`,
+`investment-agent`), each with its **own Application and OAuth2 `client_id`**. Deep paths 302 too, so the
+gate is not bypassable. **Four in-scope hosts are wide open today** (`chiclana-hass`, `databasus`,
+`openwebui`, `tr`) — gating them on titan is a behaviour change, not parity. `hass.v.arrieta.eu` returns
+**400 on every path**. Grafana is **not** authentik-gated on the VPS.
 
-- **Files:** `titan/docs/superpowers/specs/vps-auth-probe.md` — one row per VPS host.
-- **Copy:** n/a.
-- **Do:** for each host in `td/apply/50-apps/apps/*` with an Ingress, plus `auth.v.arrieta.eu`, record
-  `curl -si https://<host>/` status and `Location`, unauthenticated.
-- **Exit:** the table distinguishes the three hypotheses — nothing protected / authentik proxy
-  providers / network-layer gating. Any host that 302s to `auth.v.arrieta.eu` is authentik-gated; any
-  host that 200s unauthenticated is not gated, whatever git implies.
-- **Rollback:** n/a — read-only.
-- **Gates:** none.
+Full table, method, and the honest limits: [`../specs/2026-10-30-vps-auth-probe.md`](../specs/2026-10-30-vps-auth-probe.md).
+
+- **Files:** ✅ `titan/docs/superpowers/specs/2026-10-30-vps-auth-probe.md`.
+- **Copy:** n/a. **Rollback:** n/a — read-only.
+- **Exit:** ✅ met. The three hypotheses are distinguished; §3 amended from hypothesis to measurement.
+- **Gates:** none (doc-only).
+
+**Carried into T0 (#103):** export **per Application**, one row per `client_id`, `access_group` set
+yes/no — at least nine Applications exist. **Carried into #112/#113/#106:** each needs an explicit
+keep-open-or-gate decision rather than inheriting the forwardAuth default.
 
 ### T0 — export the VPS authentik state  ·  **#103**
 
