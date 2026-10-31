@@ -161,3 +161,38 @@ Two `local-path` behaviours bit this plan and should be written down rather than
   inheriting the default silently gets `local-path`, which deletes the directory on claim deletion.
   Existing titan apps that matter all name `local-path-retain`; the VPS manifests all say plain
   `local-path`, so **every migrated stateful manifest must be edited, not copied.**
+
+## 7. Postgres: the arriving volume was never 4.2 GiB
+
+Prompted by the postgres number, both clusters were queried per-database (`pg_database_size`, not PVC
+bytes). The result re-scoped #102 and is recorded here because it is where it was discovered.
+
+| VPS database | Size | |
+|---|---|---|
+| `teslamate` | 1319 MB | titan has `teslamate` at 1321 MB — likely already migrated |
+| `authentik` | 160 MB | **must not migrate** — D3; titan's secret key derives user IDs |
+| `postgres`, `template0`, `template1` | ~22 MB | system |
+
+titan CNPG for comparison: `teslamate` 1321 MB · `authentik` 148 MB · `sure` 109 MB · `coder` 24 MB ·
+`mealie` 13 MB · `open_webui` 11 MB · `app` 7.8 MB (unattributed — no obvious owner in `k8s-titan`) ·
+system ~23 MB. Datadir 2.2 GiB against a 10 GiB claim.
+
+**Three things follow.**
+
+1. **The VPS Postgres holds no databasus, trading-reports, open-webui or investing-agent database.**
+   open-webui runs SQLite inside its own volume (the 896 MiB measured above); trading-reports is static
+   files; databasus keeps backups on its own volume. The plan's "VPS Postgres → CNPG" framing assumed a
+   payload that does not exist.
+2. **A whole-cluster restore would be unrecoverable.** `pg_dumpall` from the VPS restores over titan's
+   `authentik`, and titan's `AUTHENTIK_SECRET_KEY` derives user IDs — so it changes the identity of every
+   existing user rather than merely overwriting rows. Any Postgres move here is a **named-database
+   allowlist**, never a cluster copy. This is the single worst failure mode available in the migration and
+   the obvious command walks into it.
+3. **The #102 ↔ #113 ordering tension dissolves.** With no merge to sequence, databasus's decision stops
+   being coupled to it. The tension was sound reasoning about a payload nobody had counted.
+
+**Unverified:** the teslamate size match is suggestive, not proof. A row-count comparison on both sides is
+the check. **Also unmeasured:** roles and grants — if a VPS app still connects with a role defined in that
+cluster, retiring it takes those grants with it. And the VPS datadir is 4.2 GiB against ~1.5 GiB of
+databases, so ~2.7 GiB is WAL; on a box with 18.55 GiB free, unbounded WAL is its own problem regardless
+of the migration.

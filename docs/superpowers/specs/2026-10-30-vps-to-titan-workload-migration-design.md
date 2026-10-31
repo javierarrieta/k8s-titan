@@ -448,12 +448,14 @@ is the authority.
   the cluster) are still unmet, so it stays open.
 - **The storage-preconditions ticket gates every stateful ticket**, and its exit includes a
   destination-capacity verdict, not only disk reclamation. It has no existing issue — see the plan's §1.
-- **#102 and #113 have a genuine ordering tension, and it is not resolved here.** This plan says #102
+- **#102 and #113 had an ordering tension that measurement removed, 2026-10-31.** This plan said #102
   (merge the Postgres) precedes #113 (databasus), because databasus re-issues credentials against CNPG.
-  #102 says the opposite: its prerequisite is "the databasus/postgresus retire-or-move decisions — they
-  are this database's remaining consumers". Both are right about their own half. The resolution is
-  probably to split #113's *decision* ahead of #102 and its *move* after it; that is a call for the
-  issue, not for this spec.
+  #102 said the opposite: its prerequisite is "the databasus/postgresus retire-or-move decisions — they
+  are this database's remaining consumers". Both were right about their own half — but the VPS Postgres
+  turns out to hold only `teslamate` and `authentik`, so there is no merge to sequence and the tension
+  was an artifact of assuming a payload nobody had counted. **#113 is now a standalone keep-or-retire
+  decision.** Recorded rather than silently dropped, because the reasoning that produced the tension was
+  sound given what was known.
 - **Retirement never shares a ticket with replacement.** The rollback for a bad auth migration needs
   the VPS Postgres, so if the same ticket copies and retires it, the rollback graph is a cycle.
   Retirement is a separate ticket behind an observation window.

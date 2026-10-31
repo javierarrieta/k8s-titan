@@ -31,7 +31,7 @@ new ticket is opened under a T-number and no work is scheduled against one.
 | T7 | **#107** (bentopdf), **#110** (vert-sh) | |
 | T8 | **#106** | trading-reports |
 | T9 | **#113** | databasus |
-| T10 | **#102** | VPS Postgres → CNPG. **Ordering tension with #113 — see §7** |
+| T10 | **#102** | VPS Postgres → CNPG. **Update 2026-10-31: measured payload appears to be zero databases — see T10.** Ordering tension with #113 dissolves with it |
 | T12 | **#111** | kanghuru |
 | R1 | **#114** (postgresus) + the retire half of #102 | |
 | R2 | **#103** (retire half) | |
@@ -281,6 +281,19 @@ inverted.
 
 ### T10 — VPS `postgres` → titan CNPG  ·  **#102**
 
+> **⚠️ Re-scoped by measurement, 2026-10-31.** The VPS Postgres contains exactly two non-system
+> databases: `teslamate` (1319 MB) and `authentik` (160 MB). There is **no** databasus,
+> trading-reports, open-webui or investing-agent database — their state is in their own volumes (open-webui
+> runs SQLite; measured 896 MiB, 89 MiB and 9.3 MiB respectively). Of the two that exist, `authentik`
+> **must not** be migrated (D3 — titan's `AUTHENTIK_SECRET_KEY` derives user IDs, so restoring over it
+> changes every existing user's identity), and `teslamate` is 1319 MB against titan's 1321 MB, which
+> suggests it is already there.
+>
+> **So this ticket may have nothing to migrate.** Before doing anything below, run the teslamate
+> comparison on #102 and confirm. If it agrees, #102 closes as *nothing to carry* and only the retirement
+> in R1 / #114 remains. **The one instruction that survives regardless: never `pg_dumpall` the cluster —
+> a whole-cluster restore hits `authentik` and is unrecoverable.**
+
 - **Files:** `titan/apply/30-databases/` for the new `Database`/`DatabaseRole` pairs, and
   `titan/apply/50-apps/<app>/<app>-db.yaml` per consumer. **Placement rule (spec BL-9):** a CNPG
   `Database` must share a namespace with its `Cluster`, so the `-db.yaml` lives in `databases` while
@@ -402,10 +415,14 @@ name.
 
 ## 8. Dependency list
 
-**Ordering tension on #102 / #113, unresolved.** This plan puts the Postgres merge before databasus,
-because databasus re-issues its credentials against titan CNPG. #102 states the opposite prerequisite:
-"the databasus/postgresus retire-or-move decisions — they are this database's remaining consumers."
-Both are correct about their own half. The likely resolution is to split #113 — its *decision* ahead of
+**Ordering tension on #102 / #113 — dissolved by measurement, 2026-10-31.** This plan put the Postgres
+merge before databasus because databasus re-issues its credentials against titan CNPG, while #102 stated
+the opposite prerequisite. Both were right about their own half, and the split below was the right shape
+for a merge that turned out not to exist: the VPS Postgres holds only `teslamate` and `authentik`, so
+there is nothing to sequence. **#113 becomes a standalone keep-or-retire decision**, and the coupling was
+an artifact of assuming a payload nobody had counted.
+
+Formerly-proposed resolution, kept for the record: split #113 — its *decision* ahead of
 #102, its *move* after it. That call belongs on the issue, not here.
 
 Waves are a reading order; this is the actual constraint graph.
