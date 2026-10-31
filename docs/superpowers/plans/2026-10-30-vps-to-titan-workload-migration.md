@@ -10,7 +10,40 @@ executed without it; otherwise it cites the spec or the pre-flight.
 **Base:** `titan origin/main@22c5e06`, last-fetched state. Re-verify before the first commit
 (spec §9).
 
-## 0. How to work a ticket
+## 0. Tracker mapping — read this before using any T-number
+
+**The canonical tickets are GitHub issues #99–#116 on `javierarrieta/k8s-titan`, tracked by #116.**
+The T-numbers below are internal shorthand invented by the spec's first draft. They are kept because the
+spec and this plan reference them throughout and a blind rename would break more than it fixes, but no
+new ticket is opened under a T-number and no work is scheduled against one.
+
+| shorthand | canonical issue | note |
+|---|---|---|
+| TP | **none — new** | access/credentials. #116 says "access needed: varies per item"; no issue aggregates it |
+| T0a | **none — new** | the per-host probe. Posted as a comment on #103 |
+| T0 | **#103** | reconcile the VPS authentik outpost and bearer-auth frontend |
+| T1 | **#100** | traefik ownership — closed by spec D5, with #100's middleware-rewrite correction |
+| T2 | **none — new** | monitoring decision + casa scrape re-point |
+| T3 | **none — new** | storage preconditions and destination headroom |
+| TC | **#101** | generic PVC backup before any data copy — this is pre-flight F-G |
+| T4, T5 | **#112** | home-hass, chiclana-hass — and `llm-chiclana`, which this plan had missed |
+| T6 | **#115** | strix. #115's concern is the container-runtime socket; this plan adds the `hostPath` results volume and the unlisted `strix-config` |
+| T7 | **#107** (bentopdf), **#110** (vert-sh) | |
+| T8 | **#106** | trading-reports |
+| T9 | **#113** | databasus |
+| T10 | **#102** | VPS Postgres → CNPG. **Ordering tension with #113 — see §7** |
+| T12 | **#111** | kanghuru |
+| R1 | **#114** (postgresus) + the retire half of #102 | |
+| R2 | **#103** (retire half) | |
+| R3 | **#111** (retire half) | |
+| — | **#99** | hostname scheme — **closed by spec D1/D1b**, should close with a pointer |
+| — | **#104** | mailserver: out of scope by operator instruction |
+| — | **#105**, **#108**, **#109** | investing-agent, unbound, gatus — the three the spec wrongly marked done or out of scope; see spec §0 |
+
+Four tickets in this plan have **no existing issue**: TP, T0a, T2 and T3. Those are the only candidates
+for new issues, and only if the operator wants them tracked.
+
+## 1. How to work a ticket
 
 Every ticket carries the same five blocks. They are not decoration; three of them are the reason this
 plan exists rather than the spec's ticket table.
@@ -32,7 +65,7 @@ deleted. Retirement is its own ticket (R-series), behind a stated observation wi
 PR. Two live instances writing to two volumes is silent divergence, and D4 leaves the VPS side running
 by default.
 
-## 1. Wave 0 — prerequisites; nothing downstream is worth starting until these land
+## 2. Wave 0 — prerequisites; nothing downstream is worth starting until these land
 
 ### TP — access and credentials
 
@@ -65,7 +98,7 @@ ticket is the falsification, and it is cheaper than the export.
 - **Rollback:** n/a — read-only.
 - **Gates:** none.
 
-### T0 — export the VPS authentik state
+### T0 — export the VPS authentik state  ·  **#103**
 
 T0a says *whether*; T0 says *with what policy*. It is the source of truth for every auth half.
 
@@ -82,13 +115,17 @@ T0a says *whether*; T0 says *with what policy*. It is the source of truth for ev
 - **Rollback:** n/a — read-only against the VPS.
 - **Gates:** none (a doc-only change), but `kustomize-listing` must stay green.
 
-### T1 — traefik: confirm D5, change nothing
+### T1 — traefik: confirm D5, change nothing  ·  **#100**
 
 Per spec D5 this is no longer a blocking decision. Titan already runs the required surface:
 `apps/teslamate-auth`, `observability/observability-grafana-auth`, `llm/llm-bearer-auth` are live
 `traefik.io/v1alpha1` `Middleware` objects and five Ingresses already use `router.middlewares` with a
 `websecure` pin.
 
+- **Not a no-op, per #100.** The VPS annotates `traefik-system-bearer-auth@kubernetescrd`, coupled to a
+  namespace titan does not have — titan's traefik is in `kube-system`. So every migrated
+  `router.middlewares` annotation is **rewritten, not copied**, and the layout to adopt is titan's own:
+  a `Middleware` in the *app's* namespace, not in traefik's.
 - **Files:** none. A note appended to `titan/docs/` recording D5 and the F19 chart-version risk.
 - **Do:** confirm the three CRD groups the apps consume are present and k3s-owned; confirm no VPS
   traefik manifest is staged for copy (F-B's actual warning).
@@ -124,7 +161,7 @@ over the mesh (spec §2). But casa scrapes the VPS today and those targets die w
   any.
 - **Gates:** `make check-ci`.
 
-### TC — the copy mechanism
+### TC — the copy mechanism  ·  **#101**
 
 The spec's review found no ticket moves bytes. This ticket builds the one mechanism every stateful
 ticket reuses, and it restores pre-flight F-G, which gated a working backup path *before* any data
@@ -138,12 +175,12 @@ copy and which the spec dropped.
 - **Rollback:** delete the scratch volume.
 - **Gates:** `make backup-coverage`.
 
-## 2. Wave 1 — stateless path builders
+## 3. Wave 1 — stateless path builders
 
 These four prove the manifest port, the secret re-encryption and the auth shape at zero data risk.
 Each is Ingress-bearing, so each depends on T1 and, for its auth half, on T0/T0a.
 
-### T4 — `home-hass` → `hass.titan.arrieta.eu`
+### T4 — `home-hass` → `hass.titan.arrieta.eu`  ·  **#112**
 
 - **Files:** `titan/apply/50-apps/home-hass/home-hass.yaml` (Endpoints + Service + Ingress),
   `titan/apply/50-apps/kustomization.yaml` (+1 line), blueprint `ConfigMap` + `Middleware` + group
@@ -158,11 +195,11 @@ Each is Ingress-bearing, so each depends on T1 and, for its auth half, on T0/T0a
 - **Rollback:** delete the Ingress; clients keep using the old URL.
 - **Gates:** `make check` (or `check-ci`) **and** `make dry-run DRYRUN_CONTEXT=<admin context>`.
 
-### T5 — `chiclana-hass` → `chiclana-hass.titan.arrieta.eu`
+### T5 — `chiclana-hass` → `chiclana-hass.titan.arrieta.eu`  ·  **#112**
 
 Same shape as T4, second site, same sub-decision. **Files:** as T4 with the name substituted.
 
-### T6 — `strix-scans`
+### T6 — `strix-scans`  ·  **#115**
 
 - **Files:** `titan/apply/50-apps/strix/strix.yaml` — the **full** object set from
   `td/apply/50-apps/security/strix.yaml`: `CronJob strix-daily-scan`, `ServiceAccount strix-agent`,
@@ -183,7 +220,7 @@ Same shape as T4, second site, same sub-decision. **Files:** as T4 with the name
 - **Rollback:** delete the namespace objects.
 - **Gates:** `make check` + `dry-run`. No auth half — no host. Record that as a deliberate absence.
 
-### T7 — `bentopdf` and `vert-sh`: host them or retire them
+### T7 — `bentopdf` and `vert-sh`: host them or retire them  ·  **#107**, **#110**
 
 Neither has an Ingress; both are ClusterIP-only and unreachable from outside the cluster today.
 
@@ -195,9 +232,9 @@ Neither has an Ingress; both are ClusterIP-only and unreachable from outside the
 - **Rollback:** delete the Ingress.
 - **Gates:** `make check` + `dry-run` if hosted.
 
-## 3. Wave 2 — stateful
+## 4. Wave 2 — stateful
 
-### T8 — `trading-reports` → `tr.titan.arrieta.eu`
+### T8 — `trading-reports` → `tr.titan.arrieta.eu`  ·  **#106**
 
 Stateful, but with no CNPG dependency, so it does not wait on T10.
 
@@ -222,7 +259,7 @@ Stateful, but with no CNPG dependency, so it does not wait on T10.
 against titan CNPG and therefore needs the CNPG objects T10 creates. The spec's wave order had these
 inverted.
 
-### T10 — VPS `postgres` → titan CNPG
+### T10 — VPS `postgres` → titan CNPG  ·  **#102**
 
 - **Files:** `titan/apply/30-databases/` for the new `Database`/`DatabaseRole` pairs, and
   `titan/apply/50-apps/<app>/<app>-db.yaml` per consumer. **Placement rule (spec BL-9):** a CNPG
@@ -247,7 +284,7 @@ inverted.
   relevant) + `dry-run`.
 - **Retirement is R1, not here.**
 
-### T9 — `databasus`, or its retirement
+### T9 — `databasus`, or its retirement  ·  **#113**
 
 Depends on T10 for its credentials.
 
@@ -261,16 +298,16 @@ Depends on T10 for its credentials.
 - **Rollback:** point clients back at the VPS instance, which is still running.
 - **Gates:** `make check` + `dry-run` + `backup-coverage`.
 
-## 4. Wave 3 — retirement
+## 5. Wave 3 — retirement
 
 Each R ticket is gated on a stated observation window with near-zero traffic on the VPS side (spec
 §2.2's forcing-function substitute). No R ticket runs just because the migration ticket closed.
 
-### R1 — retire the VPS bare `postgres` Deployment and the `postgresus-pvc-only` stub
+### R1 — retire the VPS bare `postgres` Deployment and the `postgresus-pvc-only` stub  ·  **#114**
 
 Gated on T10 verified and observed. This is the ticket whose rollback was previously impossible.
 
-### R2 — retire the VPS authentik, `ak-outpost-reverse-proxy-outpost` and `bearer-auth-service`
+### R2 — retire the VPS authentik, `ak-outpost-reverse-proxy-outpost` and `bearer-auth-service`  ·  **#103**
 
 Gated on T0 (inventory taken), on **the explicit ticket set** that replaced each auth half — T4, T5,
 T8, T9, T12 — and on T10 and R1, because authentik's own DB is on the Postgres being retired. The
@@ -282,13 +319,13 @@ path is equivalent before removing it, and settle the `X-Auth-User` / `X-Auth-Em
 the VPS one emits and titan's does not: either they are needed, in which case titan gains them, or they
 are not, in which case spec §2.1's `llm` row stops saying "none".
 
-### R3 — retire the VPS kanghuru
+### R3 — retire the VPS kanghuru  ·  **#111**
 
 Gated on T12 both halves.
 
-## 5. Wave 4 — last, per D2
+## 6. Wave 4 — last, per D2
 
-### T12 — `kanghuru`
+### T12 — `kanghuru`  ·  **#111**
 
 Two halves, in this order.
 
@@ -311,7 +348,7 @@ Two halves, in this order.
 - **Rollback:** half 1 — delete the Ingress. Half 2 — revert the `tf/` PR; TTL is 300 s.
 - **Gates:** `make check` + `dry-run` for half 1; `tf/`'s own plan for half 2.
 
-## 6. Gates
+## 7. Gates
 
 `make check` where the age key and network are available; otherwise `make check-ci`, **and the PR
 records which ran**. `check` includes `validate` and `db-url-check` (age key) and `chart-values-check`
@@ -343,7 +380,13 @@ in the app namespace). Whether an app earns the shared `apps` stage at all is de
 test in `docs/superpowers/specs/2026-10-19-titan-app-scale-out-design.md` §3.1, not by the directory
 name.
 
-## 7. Dependency list
+## 8. Dependency list
+
+**Ordering tension on #102 / #113, unresolved.** This plan puts the Postgres merge before databasus,
+because databasus re-issues its credentials against titan CNPG. #102 states the opposite prerequisite:
+"the databasus/postgresus retire-or-move decisions — they are this database's remaining consumers."
+Both are correct about their own half. The likely resolution is to split #113 — its *decision* ahead of
+#102, its *move* after it. That call belongs on the issue, not here.
 
 Waves are a reading order; this is the actual constraint graph.
 
@@ -354,12 +397,13 @@ T1  → all Ingress-bearing tickets (T4, T5, T8, T9, T12)
 T3  → all stateful tickets (T8, T9, T10) — capacity verdict required first
 TC  → all stateful tickets (T8, T9, T10) — copy mechanism proven first
 T10 → T9 (credentials), → R1 → R2
+T9's *decision* may need to precede T10 — see the ordering tension below
 T7  → R-series only if it retires
 T12 → R3
 R-series → only after a stated observation window
 ```
 
-## 8. Program-level acceptance
+## 9. Program-level acceptance
 
 Before **any** R ticket runs: confirm near-zero hits per VPS host for a stated window (spec §2.2).
 D1 has no forcing function — the old names keep working until the box dies, so a missed consumer

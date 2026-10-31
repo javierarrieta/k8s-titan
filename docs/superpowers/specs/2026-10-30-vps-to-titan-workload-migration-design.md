@@ -40,11 +40,31 @@ It also corrects one finding in the pre-flight (§3), and it does **not** make t
 Mail stays, and mail is the reason the box exists after this plan completes. §8 is the out-of-scope
 list; §9 is what is not proven.
 
-The tickets themselves are not in this document — they are in
-`docs/superpowers/plans/2026-10-30-vps-to-titan-workload-migration.md` (18 of them: the thirteen
-workload tickets plus a prerequisites ticket, the T0a probe, the copy-mechanism ticket, and three
-retirement tickets split out so the rollback graph is not a cycle). §6 here carries only the
-sequencing constraints the plan may not violate.
+The tickets themselves are not in this document, and **this spec does not open new ones**. The
+workload tickets already exist on `javierarrieta/k8s-titan` as **#99–#116**, all open, all labelled
+`migration`, tracked by **#116**. An earlier draft of this spec invented its own T-numbered ticket set
+and that was wrong — the existing issues are more measured than the draft was, and in three places they
+contradict it (below). Ticket identifiers here are the issue numbers; the plan keeps a short internal
+shorthand and maps it in its §0.
+
+What this spec adds on top of #99–#116 is small and named: the T0a probe and the identity-parity exit
+criterion (§3, §3.3, posted to #103), the strix `hostPath` finding (§ posted to #115), and D5's answer
+to #100 with a correction #100 itself supplies.
+
+**Three places the existing issues proved this spec wrong**, corrected here rather than left in:
+
+- **`unbound` is not a non-ticket.** This spec said it is mailserver's and stays put. #108's point is
+  that the pinned `clusterIP` is an immutable hard dependency, so unbound must move **before**
+  mailserver and blocks that move. Being mailserver's dependency is the reason it has a ticket, not the
+  reason it lacks one.
+- **`investing-agent` and `gatus` are not done.** #105 records a 10 Gi PVC holding "state nothing else
+  has" and a running two-process pod; #109 records that gatus's entire probe list is assertions about
+  the *VPS's* network view and cannot be copied. Both were marked done here on `replicas: 0`, which is
+  evidence about a Deployment and not about a volume.
+- **D5 was too strong.** #100 notes the VPS's middleware annotation is
+  `traefik-system-bearer-auth@kubernetescrd` — coupled to the VPS's `traefik-system` namespace, where
+  titan's traefik does not live. So migrated middlewares are **rewritten, not copied**. D5's claim that
+  no ownership change is needed survives; "changes nothing traefik-side" did not. See D5.
 
 ### Why the plan is smaller than the pre-flight implies
 
@@ -68,7 +88,8 @@ indistinguishable from a restatement.
 | **D2** | **`kanghuru.es` is the one exception to D1, and it migrates last.** It is a public product domain with its own OVH credential, its own DNS-01 issuer and its own wildcard cert. | One ticket carries a `public-dns-tf` change: re-point `kanghuru.es` / `www.kanghuru.es` at `<OVH_PUBLIC_IP>`, and move the `le-prod-kanghuru` issuer, `kanghuru-es-cert` and `kanghuru-ovh-secrets` to titan. Sequenced last so the path is proven before the only public-facing name change. | The one ticket that needs a second repo, `terraform` state, and OVH write access — and the only one where a stale DNS-01 challenge node can actually bite, because kanghuru has its own `Certificate` rather than sharing the wildcard (§5). |
 | **D3** | **titan's authentik is the authority.** Migrated apps are enrolled there; the VPS instance retires. Default pattern is an authentik **proxy provider + Traefik `forwardAuth` Middleware**, per app. | No user-directory lift-and-shift, and no imported authentik objects. Per-app auth is net-new hardening on titan, not a migration. See §3, which is where the correction to the pre-flight lives. | Groups and policies are **re-authored in titan blueprints from the T0 inventory** — that is a policy migration under a different name, and it is mandatory work, not a free pass. It also presumes identity parity (§3.3), which is not yet proven. |
 | **D4** | **The seven already-replicated workloads are done**, with two accepted losses. | Deletes an entire decommission wave from #153's shape — the single largest reduction here. | No standalone decommission *wave*; teardown is folded into whichever ticket replaces each workload (T7, T9, T10) or into a retirement ticket (R1–R3). Accepted losses are in §2.1, and three of them are `unmeasured` rather than none. |
-| **D5** | **titan keeps k3s's bundled traefik; the migration changes nothing traefik-side.** The VPS's Flux traefik manifests are not copied. | Deletes F-B's blocking decision from the critical path. The migration needs only `Middleware` CRs plus Ingress annotations, and titan already runs exactly that surface in production: `apps/teslamate-auth`, `observability/observability-grafana-auth` and `llm/llm-bearer-auth` are live `traefik.io/v1alpha1` `Middleware` objects, and five Ingresses already use `router.middlewares` with a `websecure` entrypoint pin. `ingress-auth` already enforces correct use of that surface. | Nothing, for this plan. The bundled chart stays two versions behind the release that fixed F19 (F-B) — a titan platform risk with no owner here, recorded in §9 rather than gating nine tickets. |
+| **D5** | **titan keeps k3s's bundled traefik; the migration changes no traefik *ownership*.** The VPS's Flux traefik manifests are not copied. Closes #100's choice. | Deletes #100 / pre-flight F-B from the critical path. The migration needs only `Middleware` CRs plus Ingress annotations, and titan already runs that surface in production: `apps/teslamate-auth`, `observability/observability-grafana-auth` and `llm/llm-bearer-auth` are live `traefik.io/v1alpha1` `Middleware` objects, and five Ingresses already use `router.middlewares` with a `websecure` entrypoint pin. `ingress-auth` already enforces correct use of that surface. | **Not a no-op.** Per #100: the VPS annotates `traefik-system-bearer-auth@kubernetescrd`, coupled to a namespace titan does not have, so every migrated `router.middlewares` annotation is **rewritten, not copied**. Titan's own convention is a `Middleware` in the *app's* namespace — adopt that layout, do not port the VPS one. The bundled chart also stays two versions behind the release that fixed F19 (F-B): a titan platform risk with no owner here, recorded in §9 rather than gating nine tickets. |
+| **D1b** | **The hostname scheme (#99) is `*.titan.arrieta.eu`, adopted, not re-pointed.** | Closes #99, which was P1 and blocked every Ingress-bearing issue in the epic, and which #99 itself noted is "operator only, nothing here is fixable from a workspace". D1 is the answer; #99 can close with a pointer here. | Every migrated app's FQDN changes, which is D1's cost paid once. |
 
 **D5 is the answer to F-B, not a dodge of it.** F-B's real warning is *do not copy the VPS's traefik
 manifests*, because that yields two ingress controllers — the regression #122/#123/#19 exist to
@@ -112,12 +133,14 @@ cross-site for auth.
 Mailserver and everything mail-coupled is excluded by operator instruction. Three findings changed
 this table relative to the pre-flight's inventory:
 
-- **`unbound` is mailserver's, not a workload.** Its only consumer in the tree is
-  `td/apply/50-apps/apps/mailserver.yaml:217` (`dnsConfig` → `10.43.22.122 # unbound.apps`). It stays
-  on the VPS with the mail. No ticket.
+- **`unbound` is mailserver's dependency — and therefore a ticket (#108), not a non-ticket.** Its only
+  consumer in the tree is `td/apply/50-apps/apps/mailserver.yaml:217` (`dnsConfig` →
+  `10.43.22.122 # unbound.apps`), and its `Service` **pins** `clusterIP: 10.43.22.122`, which is
+  immutable. So the two files must change together and unbound must be running on titan **before**
+  mailserver can move. Mail itself is out of scope (§8); the dependency that gates it is not.
 - **`bentopdf`, `vert-sh` and `strix` have no Ingress at all** — ConfigMaps, Deployments, ClusterIP
   Services, a CronJob, and no host, no NodePort. They are unreachable from outside the cluster
-  today. For those, "auth" is a *reachability* decision, not an auth decision.
+  today. For those, "auth" is a *reachability* decision, not an auth decision. (#107, #110, #115.)
 - **Secrets cannot be copied.** §4.
 
 The **Auth column is provisional until T0 lands.** §3 explains why: the VPS's per-app auth state is
@@ -149,8 +172,8 @@ volume contents have never been inspected, and an unmeasured loss is not a zero 
 | Workload | VPS state | Titan home | Accepted loss |
 |---|---|---|---|
 | `teslamate` | `replicas: 0` | `60-tesla/` + own CNPG `Database` | **unmeasured.** The VPS instance accumulated charge/drive history before it was stopped, and that history is rows in the VPS Postgres — the same cluster T10 consolidates. T10 must confirm its DSN before this can be called none. |
-| `investing-agent` | `replicas: 0` | `50-apps/investing-agent/` | **unmeasured** — config is in git both sides; the volume was never inspected. |
-| `gatus` | `replicas: 1` | `50-apps/gatus/` | **unmeasured** — config is in git both sides; uptime/incident history and whether the VPS instance even has a PVC are both unestablished. |
+| `investing-agent` | **not done — #105.** 10 Gi PVC, own Secret set, a running two-process pod (`hermes gateway` + `hermes dashboard`) | `50-apps/investing-agent/` (app already on titan) | **the 10 Gi volume.** #105 calls it "state nothing else has". The app being replicated does not make the volume replicated; `replicas: 0` on the VPS says nothing about it. |
+| `gatus` | **not done — #109.** Stateless, but its whole config is a probe list | `50-apps/gatus/` | **the probe list is not portable.** Every entry is an assertion about the VPS's network view (`icmp://192.168.0.1`, `http://192.168.133.3:8123`, …). Copying it produces a monitor that is confidently wrong about titan. |
 | `llm` | Endpoints, serving | `50-apps/llm/`, same two bearer keys | **see plan R2**: the VPS's `bearer-auth-service` also emits `X-Auth-User` / `X-Auth-Email` response headers that titan's does not. If that difference is real it is an accepted loss, not none. |
 | `promtail` | DaemonSet | `20-infra/monitoring/` → casa Loki | none — stateless shipper. |
 | `grafana` | `replicas: 1` | `50-apps/grafana/`, casa Prometheus datasource | **anything hand-built in the VPS UI.** titan provisions from git with `allowUiUpdates: false`. The imperative surface is wider than dashboards: alerting contact points and notification policies, service accounts and API keys, folders and permissions, dashboard versions. T2 retires the VPS Prometheus, so any alert rules living in VPS Grafana die with it — which compounds F-C rather than sitting beside it. |
@@ -385,26 +408,33 @@ probe as a precondition, not a Wave 0 sweep of every migrated host.
 
 ## 6. Sequencing constraints
 
-The tickets are in the plan, not here. What follows is the constraint graph the plan may not
+The tickets are #99–#116, tracked by #116. What follows is the constraint graph the plan may not
 violate; the wave numbers it mentions are the plan's reading order, and the dependency list in the plan
 is the authority.
 
-- **T0a precedes T0, and T0 precedes every auth half.** T0a proves whether anything is protected at all
-  (§3's three hypotheses); T0 exports the policy for whatever T0a found. No ticket may state its auth
+- **#103 precedes every auth half**, and the T0a probe (§3) precedes #103. No ticket may state its auth
   half as fact before both land, which is why §2's Auth column is provisional.
-- **T1 gates every Ingress-bearing ticket** — but per D5 it is a confirmation, not a decision, and it
-  should not take a day.
-- **T3 gates every stateful ticket**, and its exit includes a destination-capacity verdict, not only
-  disk reclamation.
-- **The copy mechanism (TC) gates every stateful ticket.** Pre-flight F-G gated a working backup path
-  before any data copy; this spec dropped F-G and the plan restores it.
-- **Database consolidation precedes the stateful app that consumes it.** `databasus` re-issues its
-  credentials against titan CNPG, so it cannot move before the CNPG objects exist. The first draft of
-  this spec had these in the opposite waves.
+- **#99 is closed by D1/D1b** and gates every Ingress-bearing issue; it should close first, with a
+  pointer here rather than a new decision.
+- **#100 is closed by D5** and gates every Ingress-bearing ticket — but per D5 it is a confirmation plus
+  a middleware rewrite, not an ownership project.
+- **#101 gates every stateful ticket.** Pre-flight F-G gated a working backup path before any data copy,
+  and #101 is that gate; the first draft of this spec invented a copy ticket without finding it.
+  #101 measured "no generic volume backup on titan" on 2026-10-20 and is now partly satisfied by
+  `apply/70-backup/` — but its own done-conditions (a drilled restore, a failure visible from outside
+  the cluster) are still unmet, so it stays open.
+- **The storage-preconditions ticket gates every stateful ticket**, and its exit includes a
+  destination-capacity verdict, not only disk reclamation. It has no existing issue — see the plan's §1.
+- **#102 and #113 have a genuine ordering tension, and it is not resolved here.** This plan says #102
+  (merge the Postgres) precedes #113 (databasus), because databasus re-issues credentials against CNPG.
+  #102 says the opposite: its prerequisite is "the databasus/postgresus retire-or-move decisions — they
+  are this database's remaining consumers". Both are right about their own half. The resolution is
+  probably to split #113's *decision* ahead of #102 and its *move* after it; that is a call for the
+  issue, not for this spec.
 - **Retirement never shares a ticket with replacement.** The rollback for a bad auth migration needs
   the VPS Postgres, so if the same ticket copies and retires it, the rollback graph is a cycle.
   Retirement is a separate ticket behind an observation window.
-- **kanghuru is last** (D2), and its retirement is gated behind its own two halves.
+- **kanghuru (#111) is last** (D2), and its retirement is gated behind its own two halves.
 
 ## 7. Gates
 
@@ -441,12 +471,12 @@ lands.
 | finding | disposition |
 |---|---|
 | F-A | live-cluster state drifts; plan §8 re-measures before any retirement |
-| F-B | **closed by D5** — keep k3s's bundled traefik, copy nothing |
+| F-B | **closed by D5 / #100** — keep k3s's bundled traefik, copy nothing; but per #100 the middleware annotations are rewritten, not copied |
 | F-C | T2; the alerting gap is the honest residual and stays in §9 |
 | F-D | §5 (one-shot sizing) and T3 (reclamation) |
 | F-E | **k3s version inversion — titan is older than the VPS.** Every manifest in T4–T12 is copied from the newer tree. Not closed: recorded in §9 as an unmitigated risk with no owner in this plan |
 | F-F | **this workspace runs on titan**, so cutover must not be driven from the destination. Recorded in §9 |
-| F-G | backup path before data copy — **restored as plan ticket TC**, which the first draft dropped |
+| F-G | backup path before data copy — **#101**, which the first draft of this spec reinvented as its own ticket before finding it |
 | F-H | mail-only, out of scope (§8) |
 | F-I | the DNS half is **closed by D1**; the mail half stays open (§8) |
 
