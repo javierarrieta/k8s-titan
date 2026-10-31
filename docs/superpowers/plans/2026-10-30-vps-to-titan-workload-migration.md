@@ -157,16 +157,28 @@ over the mesh (spec §2). But casa scrapes the VPS today and those targets die w
 - **Rollback:** revert the scrape config PR.
 - **Gates:** none in `titan/`; the casa repo's own checks.
 
-### T3 — storage preconditions and destination headroom
+### T3 — storage preconditions and destination headroom — **✅ done 2026-10-30 (disk verdict CONDITIONAL)**
 
-- **Files:** `titan/apply/` — record the `local-path-retain` + size-from-request rule as policy so
-  T8–T10 inherit it rather than rediscover it.
-- **Do:** reclaim the `Released` `local-path-retain` coder-home PVs (F-D), then measure what titan
-  actually has free against what the arriving set requests (spec §5).
-- **Exit:** freed capacity recorded, **and** a headroom verdict covering compute, memory and GPU — not
-  only disk. No stateful wave starts until this row is green.
-- **Rollback:** n/a — reclamation is destructive, so list every PV removed in the PR before removing
-  any.
+Full measurements: [`../specs/2026-10-30-t3-storage-headroom.md`](../specs/2026-10-30-t3-storage-headroom.md).
+
+- **Compute / memory / GPU: GREEN, not close to a limit.** titan has 7.75 free cores and ~116 GiB free
+  RAM; the arriving set needs ~1.5 cores and ~2 GiB. No GPU anywhere in the migrated set.
+- **Disk: CONDITIONAL.** ~17 GiB of genuine arriving requests against **50.75 GiB free** on titan —
+  fits with margin, so the stateful wave (#106, #113, #102) may start. But actual bytes are unmeasured.
+- **The trap found:** `kubelet_volume_stats_used_bytes` reports the **node's** filesystem for every
+  `local-path` volume — all ten VPS volumes report the same 77.29 GiB, totalling an impossible 772 GiB
+  on a 95.8 GiB disk. Anyone sizing from that metric will be wrong by an order of magnitude. titan's
+  kubelet volume stats are not scraped at all.
+- **F-D reclaim found:** five `Released` `local-path-retain` PVs on titan totalling **90 GiB** of claim
+  capacity (two superseded coder homes, three ocis/opencloud rename leftovers). Real on-disk size
+  unmeasured; `coder-home-recovered` has a name suggesting deliberate recovery — do not delete blind.
+- **Policy recorded** (§6): `local-path` is thin, and titan has two StorageClasses — every migrated
+  stateful manifest must name `local-path-retain` explicitly, so **none of the VPS manifests can be
+  copied verbatim** on this axis.
+- **Files:** ✅ `titan/docs/superpowers/specs/2026-10-30-t3-storage-headroom.md`.
+- **Exit:** ⚠️ partially. Headroom verdict covers compute, memory and GPU as required; the byte-level
+  `du` pass needs an admin context (`k8s-reader` cannot `pods/exec` on either cluster) and is handed over.
+- **Rollback:** n/a — nothing reclaimed yet. PV deletion stays a separate, listed, reviewed step.
 - **Gates:** `make check-ci`.
 
 ### TC — the copy mechanism  ·  **#101**
