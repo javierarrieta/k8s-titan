@@ -30,7 +30,7 @@ new ticket is opened under a T-number and no work is scheduled against one.
 | T6 | **#115** | strix. #115's concern is the container-runtime socket; this plan adds the `hostPath` results volume and the unlisted `strix-config` |
 | T7 | **#107** (bentopdf), **#110** (vert-sh) | |
 | T8 | **#106** | trading-reports |
-| T9 | **#113** | databasus |
+| T9 | **#113** | databasus. **Decision 2026-10-31: do not migrate — retire.** Backups are already managed on titan |
 | T10 | **#102** | VPS Postgres → CNPG. **Update 2026-10-31: measured payload appears to be zero databases — see T10.** Ordering tension with #113 dissolves with it |
 | T12 | **#111** | kanghuru |
 | R1 | **#114** (postgresus) + the retire half of #102 | |
@@ -275,9 +275,10 @@ Stateful, but with no CNPG dependency, so it does not wait on T10.
 - **Retirement is not here** — there is no R ticket for trading-reports yet; it runs when the box is
   released.
 
-**This wave's second ticket depends on the first**, because `databasus` re-issues its credentials
-against titan CNPG and therefore needs the CNPG objects T10 creates. The spec's wave order had these
-inverted.
+~~**This wave's second ticket depends on the first**~~ — that dependency is **gone**. It existed because
+`databasus` re-issues its credentials against titan CNPG and so needed the objects T10 creates. With
+#113 decided as retire-not-migrate (2026-10-31) and T10's measured payload near zero, neither half of the
+dependency survives. The spec's wave order had these inverted; the inversion no longer matters.
 
 ### T10 — VPS `postgres` → titan CNPG  ·  **#102**
 
@@ -317,19 +318,32 @@ inverted.
   relevant) + `dry-run`.
 - **Retirement is R1, not here.**
 
-### T9 — `databasus`, or its retirement  ·  **#113**
+### T9 — `databasus`, or its retirement  ·  **#113** — **decided: retire**
 
-Depends on T10 for its credentials.
+> **Operator decision, 2026-10-31: do not migrate.** Backups are already managed on titan — `apply/70-backup/`
+> (restic → casa's MinIO) and CNPG `ScheduledBackup` → S3 — so databasus would be a second backup tool,
+> not a migrated service. The survive-consolidation question this ticket was built around resolves by
+> retirement. Recorded on #113.
+>
+> **Measured:** the volume holds **89 MiB**, not the 10 GiB it claims. It is not an arrival. With this
+> gone, the largest genuinely migrating volume in the epic is trading-reports at 9.3 MiB.
 
-- **Step 1 is the survive-consolidation question** the pre-flight raises: two DB admin UIs is one too
-  many, and `postgresus` is already a stub. Retiring is a legitimate outcome and cheaper.
-- **Files:** `titan/apply/50-apps/databasus/` + stage kustomization line, if kept.
-- **Copy:** 10 Gi PVC via TC's mechanism, after scaling the VPS writer to 0. Size from request with
-  the spec §5 headroom rule.
-- **Do:** re-issue DB credentials against titan CNPG — never copy the VPS ones (spec §4).
-- **Exit:** databasus reaches its target databases from titan; unauthenticated request → 302.
-- **Rollback:** point clients back at the VPS instance, which is still running.
-- **Gates:** `make check` + `dry-run` + `backup-coverage`.
+**Remaining scope is retirement only:** the VPS Deployment, Service and PVC, plus the
+`databasus.v.arrieta.eu` entry in the VPS authentik outpost. Behind an observation window, per the standing
+rule — and with nothing replacing it, that window is the only safety net.
+
+**One check before the volume is deleted.** Those 89 MiB are databasus's own backup *output*, and titan's
+coverage is newer than whatever is in there, so a dump could predate anything titan can currently restore.
+One `ls -lh` settles it.
+
+T0a found `databasus.v.arrieta.eu` answering **200 unauthenticated**, which the plan had flagged as needing
+an explicit keep-open-or-gate decision. With retirement the question is moot — no host arrives.
+
+- ~~**Files:** `titan/apply/50-apps/databasus/` + stage kustomization line, if kept.~~ Not applicable.
+- ~~**Copy:** 10 Gi PVC via TC's mechanism.~~ Not applicable.
+- **Exit:** no titan-side object exists; the VPS instance is stopped and its outpost entry removed.
+- **Rollback:** restart the VPS Deployment — it is still running until someone stops it.
+- **Gates:** none on the titan side; `backup-coverage` must stay green regardless.
 
 ## 5. Wave 3 — retirement
 

@@ -162,7 +162,7 @@ expected pattern, to be confirmed or corrected by T0.
 | `bentopdf` | none, **no Ingress** | host it or retire it — decision is step 1 of its ticket | forwardAuth *if* hosted |
 | `vert-sh` | none, **no Ingress** | same question, same ticket | forwardAuth *if* hosted |
 | `trading-reports` | 1 Gi PVC | `tr.titan.arrieta.eu`, ns `apps` | forwardAuth |
-| `databasus` | 10 Gi PVC + DB creds | `databasus.titan.arrieta.eu` — **or retire**; two DB admin UIs is one too many | forwardAuth |
+| `databasus` | ~~10 Gi PVC + DB creds~~ **89 MiB measured** | **retire — decided 2026-10-31.** Backups are already managed on titan (`70-backup/` restic + CNPG `ScheduledBackup`), so this would be a second backup tool, not a migration | n/a — no host arrives |
 | `postgres` (bare Deployment) | 6 Gi + 3 Gi backup | merge into titan CNPG as a `Database`/`DatabaseRole` per consumer, then retire | n/a |
 | `postgresus-pvc-only` | 1 Gi orphan stub | retire inside the Postgres ticket | n/a |
 | `authentik` + `ak-outpost-reverse-proxy-outpost` + `bearer-auth-service` | **imperative DB state** | export (§3) → titan blueprints; retire VPS instance | *is* the auth |
@@ -253,7 +253,9 @@ export is the Application, not the outpost. The gate is router-level: deep paths
 bypassable by deep-linking. Separately, **four in-scope hosts are completely open today** —
 `chiclana-hass`, `databasus`, `openwebui`, `tr` — which makes gating them on titan a behaviour change
 rather than a parity move, and `hass.v.arrieta.eu` answers **400 on every path**, so its health is
-unknown. Grafana is **not** authentik-gated on the VPS; it lands on its own `/login`.
+unknown. Grafana is **not** authentik-gated on the VPS; it lands on its own `/login`. Of those four open
+hosts, `databasus` has since been decided as retire-not-migrate (2026-10-31), so its keep-open-or-gate
+question is moot; the other three still need the decision.
 
 **What remains unknown:** `access_group` per Application (the §9 column), group membership, and identity
 parity. All three are T0's contract. One honest gap found while running the probe: `k8s-reader` is
