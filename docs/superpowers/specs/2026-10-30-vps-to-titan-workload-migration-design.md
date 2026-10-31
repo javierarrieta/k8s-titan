@@ -474,7 +474,7 @@ lands.
 | F-B | **closed by D5 / #100** — keep k3s's bundled traefik, copy nothing; but per #100 the middleware annotations are rewritten, not copied |
 | F-C | T2; the alerting gap is the honest residual and stays in §9 |
 | F-D | §5 (one-shot sizing) and T3 (reclamation) |
-| F-E | **k3s version inversion — titan is older than the VPS.** Every manifest in T4–T12 is copied from the newer tree. Not closed: recorded in §9 as an unmitigated risk with no owner in this plan |
+| F-E | **k3s version inversion — titan (v1.35.8) is older than the VPS (v1.37.1).** The one measured delta (Gateway API CRDs, 10 vs 8) is inert: nothing uses Gateway API. The migrated manifests are all long-stable core APIs. Residual is a re-check rule for any future manifest written against a 1.36/1.37 surface — see §9 |
 | F-F | **this workspace runs on titan**, so cutover must not be driven from the destination. Recorded in §9 |
 | F-G | backup path before data copy — **#101**, which the first draft of this spec reinvented as its own ticket before finding it |
 | F-H | mail-only, out of scope (§8) |
@@ -511,10 +511,19 @@ owner in this plan**, and that is stated rather than papered over.
   exists, every auth half in this plan carries a lockout risk that includes the operator.
 - **Destination capacity is unverified** (§5). T3's exit includes the headroom verdict; nothing before
   it can promise titan can absorb the arriving set.
-- **F-E is unmitigated: titan's k3s is older than the VPS's**, and every manifest in T4–T12 is copied
-  from the newer tree. No ticket owns this and no gate in §7 can see it. The honest statement is that
-  the migration moves manifests from a newer cluster to an older one and nothing here proves that is
-  safe.
+- **F-E: titan's k3s is older than the VPS's** — v1.35.8 against v1.37.1, so the migration runs two
+  minor versions *backwards*. This is a real fact and the pre-flight is right to name it, but the
+  exposure here is small and the first draft of this spec inflated it. Checked 2026-10-30:
+  - The one delta the pre-flight measured is Gateway API CRDs — the VPS carries 10 from k3s 1.37's
+    bundled chart, titan carries 8. **Nothing on the VPS uses Gateway API** (zero resources), so the
+    delta is inert.
+  - The manifests this migration copies use only long-stable core APIs — `v1`, `apps/v1`,
+    `networking.k8s.io/v1`, `rbac.authorization.k8s.io/v1`, `batch/v1`. All identical between 1.35 and
+    1.37. There is no version-sensitive surface in the set.
+
+  So the residual is a class-of-error warning, not a live risk: **if anyone later writes a migrated
+  manifest against a 1.36/1.37 API surface, it needs a look before it lands on 1.35.** No ticket owns
+  that check and no gate in §7 would see it, which is the only reason it stays on this list.
 - **F-F: this workspace runs on titan.** Cutover and retirement work must not be driven from the
   destination, and the plan does not say where it is driven from instead.
 - **The client list in §2.2 is incomplete.** `bentopdf` and `vert-sh` are `unknown`, and D1 has no
