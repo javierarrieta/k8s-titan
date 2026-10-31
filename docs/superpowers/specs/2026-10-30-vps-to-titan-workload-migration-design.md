@@ -161,7 +161,7 @@ expected pattern, to be confirmed or corrected by T0.
 | `strix-scans` | CronJob + SA + ClusterRole | port the CronJob; close the second-copy question first (plan T6) | n/a — no host |
 | `bentopdf` | none, **no Ingress** | host it or retire it — decision is step 1 of its ticket | forwardAuth *if* hosted |
 | `vert-sh` | none, **no Ingress** | same question, same ticket | forwardAuth *if* hosted |
-| `trading-reports` | 1 Gi PVC | `tr.titan.arrieta.eu`, ns `apps` | forwardAuth |
+| `trading-reports` | ~~1 Gi PVC~~ **9.3 MiB measured** | **retire — decided 2026-10-31.** With #102, #105 and #113 also resolved, **nothing with a PVC is migrating** | n/a — no host arrives |
 | `databasus` | ~~10 Gi PVC + DB creds~~ **89 MiB measured** | **retire — decided 2026-10-31.** Backups are already managed on titan (`70-backup/` restic + CNPG `ScheduledBackup`), so this would be a second backup tool, not a migration | n/a — no host arrives |
 | `postgres` (bare Deployment) | 6 Gi + 3 Gi backup | merge into titan CNPG as a `Database`/`DatabaseRole` per consumer, then retire | n/a |
 | `postgresus-pvc-only` | 1 Gi orphan stub | retire inside the Postgres ticket | n/a |

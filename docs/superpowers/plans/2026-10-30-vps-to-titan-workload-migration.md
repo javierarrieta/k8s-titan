@@ -29,7 +29,7 @@ new ticket is opened under a T-number and no work is scheduled against one.
 | T4, T5 | **#112** | home-hass, chiclana-hass — and `llm-chiclana`, which this plan had missed |
 | T6 | **#115** | strix. #115's concern is the container-runtime socket; this plan adds the `hostPath` results volume and the unlisted `strix-config` |
 | T7 | **#107** (bentopdf), **#110** (vert-sh) | |
-| T8 | **#106** | trading-reports |
+| T8 | **#106** | trading-reports. **Decision 2026-10-31: do not migrate — retire** |
 | T9 | **#113** | databasus. **Decision 2026-10-31: do not migrate — retire.** Backups are already managed on titan |
 | T10 | **#102** | VPS Postgres → CNPG. **Update 2026-10-31: measured payload appears to be zero databases — see T10.** Ordering tension with #113 dissolves with it |
 | T12 | **#111** | kanghuru |
@@ -101,7 +101,9 @@ Full table, method, and the honest limits: [`../specs/2026-10-30-vps-auth-probe.
 
 **Carried into T0 (#103):** export **per Application**, one row per `client_id`, `access_group` set
 yes/no — at least nine Applications exist. **Carried into #112/#113/#106:** each needs an explicit
-keep-open-or-gate decision rather than inheriting the forwardAuth default.
+keep-open-or-gate decision rather than inheriting the forwardAuth default. **Update 2026-10-31:** #113 and
+#106 were both decided as retire-not-migrate, so only **#112** still owes that decision — and `hass` is the
+one returning 400, so it needs a health check first.
 
 ### T0 — export the VPS authentik state  ·  **#103**
 
@@ -163,8 +165,9 @@ Full measurements: [`../specs/2026-10-30-t3-storage-headroom.md`](../specs/2026-
 
 - **Compute / memory / GPU: GREEN, not close to a limit.** titan has 7.75 free cores and ~116 GiB free
   RAM; the arriving set needs ~1.5 cores and ~2 GiB. No GPU anywhere in the migrated set.
-- **Disk: CONDITIONAL.** ~17 GiB of genuine arriving requests against **50.75 GiB free** on titan —
-  fits with margin, so the stateful wave (#106, #113, #102) may start. But actual bytes are unmeasured.
+- **Disk: GREEN, and then some.** Measured arriving bytes are **~4.4 GiB into 50.75 GiB free** — the PVC
+  requests overstated it 5×. With #106 and #113 since decided as retire-not-migrate and #102 holding no
+  migratable database, **the stateful wave has an empty payload**: nothing with a PVC is migrating.
 - **The trap found:** `kubelet_volume_stats_used_bytes` reports the **node's** filesystem for every
   `local-path` volume — all ten VPS volumes report the same 77.29 GiB, totalling an impossible 772 GiB
   on a 95.8 GiB disk. Anyone sizing from that metric will be wrong by an order of magnitude. titan's
@@ -254,24 +257,28 @@ Neither has an Ingress; both are ClusterIP-only and unreachable from outside the
 
 ## 4. Wave 2 — stateful
 
-### T8 — `trading-reports` → `tr.titan.arrieta.eu`  ·  **#106**
+### T8 — `trading-reports` → `tr.titan.arrieta.eu`  ·  **#106** — **decided: retire**
 
-Stateful, but with no CNPG dependency, so it does not wait on T10.
+> **Operator decision, 2026-10-31: do not migrate.** Recorded on #106.
+>
+> **Measured:** 9.3 MiB against a 1 GiB claim — static generated output behind nginx. Never a meaningful
+> arrival. **This was the last stateful arrival in the epic**: with #102 (no migratable database), #105
+> (already migrated) and #113 (retire) resolved, **nothing with a PVC is migrating.**
+>
+> **Open before the box is released, not after:** are the existing reports worth keeping? 9.3 MiB archives
+> trivially; regenerating them may not be possible if the source data or generator has moved on. If
+> disposable, clean retire; if not, one `tar` to casa's MinIO first.
 
-- **Files:** `titan/apply/50-apps/trading-reports/trading-reports.yaml` (Deployment + PVC + Service +
-  Ingress) + one line in `titan/apply/50-apps/kustomization.yaml`, plus the §3.2 auth objects
-  (blueprint `ConfigMap`, `Middleware`, group entry).
-- **Secrets:** re-encrypted per spec §4 — `stringData`, git-ignored staging name, recipient count 5.
-- **Copy:** 1 Gi PVC via TC's mechanism, after scaling the VPS writer to 0 and recording it. Size per
-  spec §5: `max(request, 2 × usage, 2 Gi)`, `local-path-retain`, backup annotation.
-- **Do:** re-point any outbound webhook the app was configured with — that lives in the source system,
-  not in this manifest (spec §2.2).
-- **Exit:** unauthenticated `curl -si https://tr.titan.arrieta.eu/` → 302 to titan authentik;
-  authenticated → 200 and a report renders; the PVC reports the class and annotation
-  `kubectl -n apps get pvc -o jsonpath` asks for.
-- **Rollback:** delete the Ingress; the VPS instance is still running and clients point back at it.
-- **Gates:** `make check` (or `check-ci`) **and** `make dry-run DRYRUN_CONTEXT=<admin context>`, plus
-  `backup-coverage`.
+Remaining scope is retirement: the VPS Deployment, Service, PVC and the `tr.v.arrieta.eu` entry in the VPS
+authentik outpost. T0a found that host answering **200 unauthenticated**, which the plan had flagged as
+needing a keep-open-or-gate decision — moot now, since no host arrives.
+
+- ~~Stateful, but with no CNPG dependency, so it does not wait on T10.~~ No state moves.
+- ~~**Files:** `titan/apply/50-apps/trading-reports/…` + auth objects.~~ Not applicable.
+- ~~**Copy:** 1 Gi PVC via TC's mechanism.~~ Not applicable.
+- **Exit:** no titan-side object exists; VPS instance stopped and outpost entry removed.
+- **Rollback:** restart the VPS Deployment — it is still running until someone stops it.
+- **Gates:** none on the titan side.
 - **Retirement is not here** — there is no R ticket for trading-reports yet; it runs when the box is
   released.
 
@@ -285,7 +292,7 @@ dependency survives. The spec's wave order had these inverted; the inversion no 
 > **⚠️ Re-scoped by measurement, 2026-10-31.** The VPS Postgres contains exactly two non-system
 > databases: `teslamate` (1319 MB) and `authentik` (160 MB). There is **no** databasus,
 > trading-reports, open-webui or investing-agent database — their state is in their own volumes (open-webui
-> runs SQLite; measured 896 MiB, 89 MiB and 9.3 MiB respectively). Of the two that exist, `authentik`
+> runs SQLite; measured 896 MiB and 9.3 MiB for the others). Of the two that exist, `authentik`
 > **must not** be migrated (D3 — titan's `AUTHENTIK_SECRET_KEY` derives user IDs, so restoring over it
 > changes every existing user's identity), and `teslamate` is 1319 MB against titan's 1321 MB, which
 > suggests it is already there.
@@ -326,7 +333,7 @@ dependency survives. The spec's wave order had these inverted; the inversion no 
 > retirement. Recorded on #113.
 >
 > **Measured:** the volume holds **89 MiB**, not the 10 GiB it claims. It is not an arrival. With this
-> gone, the largest genuinely migrating volume in the epic is trading-reports at 9.3 MiB.
+> gone, and with #106 also decided as retire, **nothing with a PVC is migrating at all.**
 
 **Remaining scope is retirement only:** the VPS Deployment, Service and PVC, plus the
 `databasus.v.arrieta.eu` entry in the VPS authentik outpost. Behind an observation window, per the standing
