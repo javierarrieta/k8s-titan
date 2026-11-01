@@ -17,7 +17,7 @@ svc  kube-system/traefik        type=LoadBalancer  externalIPs=None  loadBalance
                                   web:80->NodePort 31109   websecure:443->NodePort 30431
 ds   kube-system/svclb-traefik-da79b8e7   rancher/klipper-lb:v0.4.17
                                   hostNetwork=false, hostPort 80 and 443 declared
-node InternalIP = 37.187.159.156   ← the public address is the node's own primary address
+node InternalIP = <TITAN_PUBLIC_IP>   ← the public address is the node's own primary address
 ```
 
 `nixos-configurations/hosts/titan/configuration.nix:80` explains why that works:
@@ -49,7 +49,7 @@ The VPS disabled the bundled chart and runs a Flux Traefik. Its service is **not
 
 ```
 svc  traefik-system/traefik   type=ClusterIP
-                               externalIPs=['51.68.46.165']
+                               externalIPs=['<VPS_PUBLIC_IP>']
                                externalTrafficPolicy=Cluster
                                annotations: helm.sh/resource-policy=keep
 pods                           hostNetwork=false, no hostPort 80/443
