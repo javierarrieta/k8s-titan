@@ -122,7 +122,7 @@ Not authentik-gated. Out of migration scope but worth knowing; titan's own dashb
 
 | Ticket | Change forced by this probe |
 |---|---|
-| **#103** (T0) | Contract is confirmed and sharpened: export **per Application**, one row per `client_id`, with `access_group` set yes/no. Nine gated hosts ⇒ at least nine Applications. |
+| **#103** (T0) | Contract was confirmed and sharpened: export **per Application**, one row per `client_id`, with `access_group` set yes/no. **Superseded 2026-10-31:** the operator confirmed the VPS authentik had one account and no real group bindings, so there is nothing to export and T0 collapsed. The host list this probe produced is what titan's fresh bindings get authored from — which turned out to be the only half of T0 that mattered. |
 | **#112** (home-hass, chiclana-hass) | `hass` returns 400 on every path — establish health before migrating. `chiclana-hass` is currently **open**; gating it on titan is a behaviour change for its clients. |
 | **#113** (databasus) | Currently **open**. Decide keep-open vs gate explicitly; do not inherit the forwardAuth default by silence. |
 | **#106** (trading-reports) | Currently **open**. Same decision. |

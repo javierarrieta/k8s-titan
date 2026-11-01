@@ -105,22 +105,37 @@ keep-open-or-gate decision rather than inheriting the forwardAuth default. **Upd
 #106 were both decided as retire-not-migrate, so only **#112** still owes that decision — and `hass` is the
 one returning 400, so it needs a health check first.
 
-### T0 — export the VPS authentik state  ·  **#103**
+### T0 — export the VPS authentik state  ·  **#103** — **collapsed by operator statement, 2026-10-31**
 
-T0a says *whether*; T0 says *with what policy*. It is the source of truth for every auth half.
+> **There is nothing to export.** Operator statement: the VPS authentik was never wired to groups or apps
+> correctly — only the operator had an account — so **fresh bindings are needed regardless.** T0 existed to
+> read policy that turned out not to exist. Recorded on #103.
+>
+> **T0a already did the useful half**: the host list titan needs bindings for came from unauthenticated
+> curl, not from the database, and the database adds nothing beyond it.
+>
+> **This ticket is now:** author fresh authentik state on titan for the hosts actually arriving, from the
+> T0a table plus the retire decisions. Not an export, not a reconciliation, not a parity diff. The
+> API-token / direct-SQL question is moot.
 
-- **Files:** `titan/docs/superpowers/specs/vps-authentik-inventory.yaml`.
-- **Contract:** one entry per Application with: provider type, `ingressUrls`, bound group, policy
-  name, and **`access_group` set: yes/no** — the last column is the one that decides whether a host is
-  gated open to every authenticated account (spec §9). Plus the outpost configuration.
-- **Credential exclusion:** the export contains OAuth2 client secrets. They are **not** written to the
-  inventory file. Re-issued per §4, never copied.
-- **Also in scope — identity parity (spec §3.3):** user count, group list, and per-provider group
-  binding on **both** authentik instances, diffed. This is an exit criterion, not a note.
-- **Exit:** inventory committed and reviewed; parity diff attached; every §2 Auth cell confirmed or
-  corrected against it.
+- ~~**Contract:** one entry per Application with provider type, `ingressUrls`, bound group, policy name,
+  `access_group` yes/no.~~ Nothing to export.
+- ~~**Identity parity (spec §3.3):** user count, group list, per-provider binding, diffed.~~ Parity against
+  a single-user instance is not a meaningful check.
+- **The one gate that survives, and it is not optional:** "only I had an account" is the load-bearing claim
+  behind **D3 and R2 — retiring the VPS authentik entirely.** Verify before retirement:
+  ```sql
+  select count(*) from authentik_core_user;
+  select uid, is_active, is_superuser from authentik_core_user order by uid;
+  select count(*) from authentik_core_group;
+  ```
+  Counts and uids only — no emails, no names. If it is 1–2 users (the operator plus authentik's internal
+  `ak`) and ~0 groups, the claim holds. Anything else is **a person or service account with a live login on
+  a box being switched off**, and the plan has no drilled recovery for that.
+- **Files:** none — the inventory file is not needed.
+- **Exit:** fresh bindings authored on titan for arriving hosts; user/group counts recorded on #103.
 - **Rollback:** n/a — read-only against the VPS.
-- **Gates:** none (a doc-only change), but `kustomize-listing` must stay green.
+- **Gates:** none (doc-only), but `kustomize-listing` must stay green.
 
 ### T1 — traefik: blocked by #209  ·  ~~#100~~ → **#209**
 

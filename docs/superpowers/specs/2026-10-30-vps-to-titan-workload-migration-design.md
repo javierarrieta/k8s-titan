@@ -92,7 +92,7 @@ indistinguishable from a restatement.
 |---|---|---|
 | **D1** | **No DNS cutover.** `*.v.arrieta.eu` is not re-pointed at titan. Clients of migrated apps adopt a new `*.titan.arrieta.eu` URL. | Deletes pre-flight item F-I from the critical path, and deletes the coordinated-cutover window from every ticket. Also means **zero DNS work and zero new certificates** for every migrated app except kanghuru: `tf/records_public.tf:13` already declares `titan = { type = "A", target = local.titan_ip, wildcard = true }` → `<OVH_PUBLIC_IP>`, and `titan/apply/40-certificates/titan-wildcard.yaml` already issues `*.titan.arrieta.eu` as `titan-tls`. A new host served by that wildcard is a new Ingress rule and nothing else. | 13 app URLs change, and §2.2 shows the client list is not fully known. There is **no forcing function**: the old names keep working until the box dies, so a missed consumer breaks silently much later with no visible link to this migration. Rollback is trivial (point clients back), which is the strongest argument for D1 and the reason its cost is survivable. |
 | **D2** | **`kanghuru.es` is the one exception to D1, and it migrates last.** It is a public product domain with its own OVH credential, its own DNS-01 issuer and its own wildcard cert. | One ticket carries a `public-dns-tf` change: re-point `kanghuru.es` / `www.kanghuru.es` at `<OVH_PUBLIC_IP>`, and move the `le-prod-kanghuru` issuer, `kanghuru-es-cert` and `kanghuru-ovh-secrets` to titan. Sequenced last so the path is proven before the only public-facing name change. | The one ticket that needs a second repo, `terraform` state, and OVH write access — and the only one where a stale DNS-01 challenge node can actually bite, because kanghuru has its own `Certificate` rather than sharing the wildcard (§5). |
-| **D3** | **titan's authentik is the authority.** Migrated apps are enrolled there; the VPS instance retires. Default pattern is an authentik **proxy provider + Traefik `forwardAuth` Middleware**, per app. | No user-directory lift-and-shift, and no imported authentik objects. Per-app auth is net-new hardening on titan, not a migration. See §3, which is where the correction to the pre-flight lives. | Groups and policies are **re-authored in titan blueprints from the T0 inventory** — that is a policy migration under a different name, and it is mandatory work, not a free pass. It also presumes identity parity (§3.3), which is not yet proven. |
+| **D3** | **titan's authentik is the authority.** Migrated apps are enrolled there; the VPS instance retires. Default pattern is an authentik **proxy provider + Traefik `forwardAuth` Middleware**, per app. | No user-directory lift-and-shift, and no imported authentik objects. Per-app auth is net-new hardening on titan, not a migration. See §3, which is where the correction to the pre-flight lives. | Groups and policies are **re-authored in titan blueprints from the T0 inventory** — that is a policy migration under a different name, and it is mandatory work, not a free pass. It also presumes identity parity (§3.3), which was since resolved by operator statement: the VPS instance had a single account and no real group bindings, so there is no population to lose. |
 | **D4** | **The seven already-replicated workloads are done**, with two accepted losses. | Deletes an entire decommission wave from #153's shape — the single largest reduction here. | No standalone decommission *wave*; teardown is folded into whichever ticket replaces each workload (T7, T9, T10) or into a retirement ticket (R1–R3). Accepted losses are in §2.1, and three of them are `unmeasured` rather than none. |
 | **D5** | **The migration depends on #209: titan replaces k3s's bundled traefik with a Flux-managed chart, and the migration lands *after* that.** The VPS's Flux traefik manifests are still not copied verbatim. | Removes the two-ingress-controller trap F-B warned about by construction rather than by care, and closes the one thing the first version of D5 left unowned: the bundled chart is two versions behind the release that fixed F19. Doing it **before** the migration cuts over 14 live hostnames instead of 27. | Every Ingress-bearing ticket now waits on #209, which is itself P1 and has an open design question (ServiceLB). The forwardAuth surface itself does not change — `Middleware` CRs in the app's namespace plus `router.middlewares` — so the migration's auth work is unaffected by which chart owns traefik. **Not a no-op either:** per #100 the VPS annotates `traefik-system-bearer-auth@kubernetescrd`, coupled to a namespace titan does not have, so migrated middleware references are **rewritten, not copied**. |
 | **D5b** | **The forwardAuth shape is unchanged by #209.** Provider + per-app `Middleware` in the app's own namespace, as titan already runs. | Keeps §3.2 valid across the traefik cutover. Measured: three live `Middleware` objects (`apps/teslamate-auth`, `observability/observability-grafana-auth`, `llm/llm-bearer-auth`) and five Ingresses already using `router.middlewares` with a `websecure` pin; `ingress-auth` enforces it mechanically. | The replacement chart must reproduce the `websecure` entrypoint and the NodePort firewall posture, or the shape is correct and the traffic is cleartext. #209 carries that list. |
@@ -338,9 +338,21 @@ DB. At least one identity divergence is proven and was accepted — which makes 
 assumption for the forwardAuth apps more dangerous, not less, because a group binding naming an empty
 group is a lockout that includes the operator.
 
-So identity parity is an explicit **exit criterion of T0**: user count, group list, and per-provider
-group binding on both instances, diffed. Until that diff exists it stays in §9 as unproven, and no
-auth half may be flipped from the VPS instance to titan's without it.
+So identity parity was an explicit **exit criterion of T0**: user count, group list, and per-provider
+group binding on both instances, diffed.
+
+**Resolved by operator statement, 2026-10-31 — and it resolved far smaller than feared.** The VPS
+authentik was never wired to groups or apps correctly; **only the operator had an account**. There is no
+population to lose, so the parity diff this section demanded has no second side to diff against, and T0
+collapsed with it (§3, plan T0). The bindings on titan are authored fresh, which was always the plan — the
+T0a probe supplied the host list empirically, so nothing depended on reading the VPS database after all.
+
+**What survives is the narrow version of the same fear, and it is a gate on R2 rather than a precondition
+on every auth half:** the claim "only I had an account" is what makes retiring the VPS authentik safe. It
+is two `count(*)` queries against `authentik_core_user` and `authentik_core_group`. If a user or a service
+account appears that the operator had forgotten, retiring the VPS instance locks it out with no drilled
+recovery. Verify, don't infer — the original reasoning here was correct even though the risk turned out to
+be one person instead of a directory.
 
 ## 4. Secrets cannot be copied
 
@@ -536,10 +548,12 @@ owner in this plan**, and that is stated rather than papered over.
   now a *dependency*, not a conclusion. #209 has an open design question (what binds the public IP once
   k3s's ServiceLB is gone) and reverses a confirmed founding decision in `nixos-configurations`. Until it
   lands, no Ingress-bearing ticket in this plan is startable.
-- **Identity parity between the two authentik instances is unproven** (§3.3). Until T0's parity diff
-  exists, every auth half in this plan carries a lockout risk that includes the operator.
-- **Destination capacity is unverified** (§5). T3's exit includes the headroom verdict; nothing before
-  it can promise titan can absorb the arriving set.
+- ~~**Identity parity between the two authentik instances is unproven** (§3.3).~~ **Resolved 2026-10-31:**
+  the VPS instance had one account and no real group bindings, so there is no population to lose and T0
+  collapsed. The residual is narrow and gated on R2: verify the user and group counts before retiring it.
+- ~~**Destination capacity is unverified** (§5).~~ **Resolved by T3:** compute and memory are green by an
+  order of magnitude, and the measured arrival was ~4.4 GiB into 50.75 GiB free — then shrank to nothing
+  as #102/#106/#113 resolved. See `2026-10-30-t3-storage-headroom.md`.
 - **F-E: titan's k3s is older than the VPS's** — v1.35.8 against v1.37.1, so the migration runs two
   minor versions *backwards*. This is a real fact and the pre-flight is right to name it, but the
   exposure here is small and the first draft of this spec inflated it. Checked 2026-10-30:
