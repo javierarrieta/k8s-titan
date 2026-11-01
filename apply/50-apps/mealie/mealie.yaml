@@ -82,7 +82,7 @@ spec:
         # Pinned to a specific release, never :latest (the fleet rule). v3.29.0 is the current upstream
         # release; the Import with AI page this app exists for landed in v3.23.0, and v3.21.0 is the
         # release that turned on the email_verified requirement the OIDC block below has to answer.
-        image: ghcr.io/mealie-recipes/mealie:v3.29.0
+        image: ghcr.io/mealie-recipes/mealie:v3.30.0
         ports:
         - name: http
           containerPort: 9000
