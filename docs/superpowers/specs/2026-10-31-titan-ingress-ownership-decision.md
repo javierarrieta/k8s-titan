@@ -129,6 +129,26 @@ Under D, `nixos-configurations` spec D4 is fully reversed rather than half-prese
 founding decision and reversing it deserves a sentence about why the reason it was made no longer holds —
 ServiceLB was kept because there was no LoadBalancer controller, and it turns out one was never needed.
 
+## 7b. Decision — **D, adopted 2026-10-31**
+
+Operator chose **D: ClusterIP + `externalIPs`, with both `traefik` and `servicelb` disabled** in
+`nixos-configurations`. Option A was offered as the lower-risk alternative and declined; the consequence is
+that §8's checks move from "worth doing" to **mandatory**, because D changes the packet path for all 14
+live hostnames and its failure mode is a black hole with a healthy pod.
+
+What D commits to, stated plainly:
+
+- `disable = [ "traefik", "servicelb" ]` — nixos-configurations spec D4 is **fully reversed**, not
+  half-preserved. The PR should say why the reason D4 was made no longer holds: ServiceLB was kept because
+  there was no LoadBalancer controller, and it turns out one was never needed.
+- The Traefik `Service` is owned by Flux, with `externalIPs` naming the node's public address and
+  `helm.sh/resource-policy: keep` — matching the VPS manifest that has run for a year.
+- **`externalTrafficPolicy` must be chosen deliberately, not inherited.** The VPS manifest says `Cluster`,
+  which SNATs and hides the client IP. On a single node `Local` is safe and restores it. Copying the VPS
+  manifest verbatim would carry the blind spot across.
+- The two NodePorts disappear, so the firewall allow-list shrinks to 80/443. Say so in the PR rather than
+  leaving it implicit.
+
 ## 8. Before committing to D
 
 1. **Verify the CRD behaviour** of `--disable=traefik` on a scratch cluster or by reading the k3s version in
