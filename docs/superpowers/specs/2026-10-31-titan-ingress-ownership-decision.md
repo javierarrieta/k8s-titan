@@ -107,10 +107,19 @@ inheriting `Cluster` by copy-paste from the VPS manifest.
 
 Carried from #209, unchanged by the choice above:
 
-- **A `websecure` entrypoint that terminates TLS.** `investing-agent` and `llm` pin
+- **A `websecure` entrypoint that terminates TLS** — confirmed live as `--entryPoints.websecure.http.tls=true`
+  on the current Deployment, so the replacement must carry the equivalent
+  (`ports.websecure.http.tls.enabled`, which the upstream chart already defaults to true).
+  `investing-agent` and `llm` pin
   `router.entrypoints: websecure`; `investing-agent.yaml:299` calls that pin the most important line in
   the object. Without it Traefik binds both entrypoints and the dashboard answers on cleartext.
-- **Dashboard and API off.** The current install has them off; upstream chart defaults do not.
+- **Dashboard and API, correctly characterised.** The current install does **not** have them off — the
+  live Deployment carries `--api.dashboard=true` and `--ping=true`. It is unreachable rather than disabled:
+  the Service exposes only `web`/`websecure`, the `traefik` entrypoint (`:8080`) is not in the Service, and
+  no `IngressRoute` exists, so the dashboard answers only from inside the pod network. Setting
+  `api.dashboard: false` on the replacement is therefore **stricter than today, not equivalent** — say so,
+  because "matches current behaviour" would be a false claim about this line. Verified 2026-10-31 by reading
+  the live Deployment args.
 - **`Middleware` CRs in the app's own namespace**, referenced as `<name>@kubernetescrd` — titan's existing
   convention (`apps/teslamate-auth`, `observability/observability-grafana-auth`, `llm/llm-bearer-auth`).
   The VPS annotates `traefik-system-bearer-auth@kubernetescrd`, coupled to a namespace titan does not have,
