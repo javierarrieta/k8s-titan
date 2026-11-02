@@ -27,6 +27,29 @@
 # certificates. A Traefik HelmRelease that will not go Ready therefore blocks certificate renewals,
 # every app, the whole tesla stage, and the restic backups. cert-manager's own comment states this
 # cost; Traefik inherits it exactly.
+# The Namespace lives HERE, not in apply/00-bootstrap/namespaces.yaml, and that makes it the second
+# exception to the central-declaration rule after k8s-reader. Two reasons, both load-bearing:
+#
+# A HelmRelease and its HelmRepository must live in the namespace the release installs into, so the
+# namespace and this release are one object graph, not a dependency between stages.
+#
+# And `make dry-run` would otherwise be unable to validate this stage at all. dry-run-check.sh runs
+# `apply --dry-run=server` one stage at a time, and server-side dry-run does not persist anything -
+# so a Namespace declared in 00-bootstrap is not there when 20-infra is asked. Declaring it centrally
+# here produced `Error from server (NotFound): namespaces "traefik-system" not found` and a red gate.
+# Keeping it in the stage that first uses it is what makes the stage self-contained enough to check.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: traefik-system
+  labels:
+    name: traefik-system
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: latest
+  annotations:
+    kubernetes.io/metadata.name: traefik-system
+    kubernetes.io/description: "Flux-managed Traefik, the cluster's ingress path (issue #209)"
+---
 apiVersion: source.toolkit.fluxcd.io/v1
 kind: HelmRepository
 metadata:
