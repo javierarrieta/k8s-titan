@@ -39,6 +39,59 @@ STAGES=()
 # diagnostics is worse than no check at all.
 filter_noise() { grep -v '^Warning: ' || true; }
 
+# new_namespace_gap <stage> <errfile> — exit 0 when a stage's ONLY failures are objects placed in a
+# namespace that this tree declares (in this stage or an earlier one) and the cluster does not have
+# yet. That is not a defect in the manifests; it is a limit of asking the API server about something
+# that does not exist.
+#
+# Measured 2026-10-31 on PR #211: `20-infra` was rejected with two
+# `Error from server (NotFound): namespaces "traefik-system" not found` lines - the HelmRepository and
+# the HelmRelease - on a tree that would have applied fine, because Flux applies 00-bootstrap before
+# 20-infra for real and server-side dry-run persists nothing. The Namespace is accepted and then is
+# not there for the objects that follow it, even inside a single invocation, so declaring it in the
+# same stage as its consumers does not help; it only moves the failure. The fix was to land the
+# namespace first as its own change (#212). This function exists so the gate says that instead of
+# going red, because a red gate on a correct tree trains you to run the gate with the flag that
+# ignores it.
+#
+# It is deliberately narrow, and each condition is load-bearing:
+#   - EVERY error line must be of this form. One unrelated rejection and the stage is judged on its
+#     real failure, not waved through because a namespace was also missing.
+#   - The namespace must be declared by the tree, in this stage or an earlier one. A typo'd namespace
+#     is a real bug and stays red. (namespace-check catches that class separately; this is defence in
+#     depth, not the only line.)
+#   - The cluster must not already have it. If it does, a NotFound naming it means something else.
+new_namespace_gap() {
+  local stage="$1" errfile="$2" total ns_total ns
+  total=$(grep -c '^Error from server' "$errfile" 2>/dev/null || true)
+  [ "${total:-0}" -gt 0 ] || return 1
+  ns_total=$(grep -cE '^Error from server \(NotFound\): namespaces "[^"]+" not found$' "$errfile" 2>/dev/null || true)
+  [ "${ns_total:-0}" -eq "${total}" ] || return 1
+  for ns in $(sed -n 's/^Error from server (NotFound): namespaces "\([^"]*\)" not found$/\1/p' "$errfile" | sort -u); do
+    kubectl --context "$CTX" get namespace "$ns" >/dev/null 2>&1 && return 1
+    namespace_declared_upto "$stage" "$ns" || return 1
+  done
+  return 0
+}
+
+# Walks stages in Flux's own order and stops at the failing one - a namespace first declared in a
+# LATER stage is an ordering bug, and an ordering bug should stay red.
+namespace_declared_upto() {
+  local upto="$1" want="$2" stage
+  for stage in "${STAGES[@]}"; do
+    if kubectl kustomize "$root/apply/$stage" 2>/dev/null \
+       | python3 -c 'import sys, yaml
+for d in yaml.safe_load_all(sys.stdin):
+    if d and d.get("kind") == "Namespace" and d.get("metadata", {}).get("name") == sys.argv[1]:
+        sys.exit(0)
+sys.exit(1)' "$want"; then
+      return 0
+    fi
+    [ "$stage" = "$upto" ] && break
+  done
+  return 1
+}
+
 count_objects() {
   python3 -c 'import sys, yaml; print(len([d for d in yaml.safe_load_all(open(sys.argv[1])) if d]))' "$1"
 }
@@ -75,6 +128,7 @@ fi
 
 err=$(mktemp); trap 'rm -f "$err"' EXIT
 checked=0
+skipped_stages=()
 for stage in "${STAGES[@]}"; do
   printf '%-18s ' "$stage"
   built=$(mktemp); stripped=$(mktemp)
@@ -118,6 +172,12 @@ for stage in "${STAGES[@]}"; do
     echo "ok ($n_out objects)"
     checked=$((checked + 1))
   else
+    if new_namespace_gap "$stage" "$err"; then
+      echo "SKIPPED — not validated (new namespace not live yet)"
+      skipped_stages+=("$stage")
+      filter_noise <"$err" >&2
+      continue
+    fi
     echo "REJECTED"
     filter_noise <"$err" >&2
     echo "" >&2
@@ -126,4 +186,13 @@ for stage in "${STAGES[@]}"; do
   fi
 done
 
-echo "dry-run: ${#STAGES[@]} stage(s) built, $checked accepted by the API server"
+if [ "${#skipped_stages[@]}" -gt 0 ]; then
+  echo "" >&2
+  echo "dry-run: ${#STAGES[@]} stage(s) built, $checked accepted, ${#skipped_stages[@]} SKIPPED: ${skipped_stages[*]}" >&2
+  echo "dry-run: A SKIPPED STAGE WAS NOT CHECKED. It places objects in a namespace this tree declares" >&2
+  echo "dry-run:   that the cluster does not have yet, and server-side dry-run cannot create what a" >&2
+  echo "dry-run:   later dry-run needs. Land the Namespace as its own change first, then re-run." >&2
+  echo "dry-run:   This is the one case the gate cannot validate from inside; it is not a pass." >&2
+else
+  echo "dry-run: ${#STAGES[@]} stage(s) built, $checked accepted by the API server"
+fi
