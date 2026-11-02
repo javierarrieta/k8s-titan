@@ -148,12 +148,25 @@ spec:
         # Phase B adds externalIPs: [<TITAN_PUBLIC_IP>] — the node's own address, which is why no
         # LoadBalancer controller and no MetalLB is needed at all.
         type: ClusterIP
-        # Chosen, not inherited. Both titan today and the sibling box run Cluster, which SNATs, so
-        # Traefik has never seen a real client source IP here. On a single node Local is safe and
-        # restores it; that is half the reason this exposure mechanism was picked. The footgun is
-        # written down: the day a second node appears or this pod is unschedulable, Local drops all
-        # traffic instead of load-balancing.
-        externalTrafficPolicy: Local
+        # externalTrafficPolicy is DELIBERATELY ABSENT in phase A, and it is not an oversight.
+        #
+        # The API server refuses it: `spec.externalTrafficPolicy: Invalid value: "Local": may only be
+        # set for externally-accessible services`. Measured on the live cluster 2026-11-02 — this
+        # value was merged in #211 and the HelmRelease went InstallFailed, which stalled stage-infra
+        # and with it certificates, apps, tesla, databases and backup, because stage-infra waits.
+        # "Externally accessible" means NodePort, LoadBalancer, or a non-empty externalIPs. A phase A
+        # Service is a bare ClusterIP with no externalIPs, so it is not externally accessible and the
+        # field is not merely useless here, it is illegal.
+        #
+        # Nothing is lost by omitting it: externalTrafficPolicy only governs traffic arriving through
+        # externalIPs/NodePort/LoadBalancer, and in phase A no such traffic exists.
+        #
+        # It belongs in phase B, set in the SAME change that adds externalIPs — the two are a pair,
+        # and splitting them is what produced this failure. Chosen there, not inherited: both titan
+        # today and the sibling box run Cluster, which SNATs, so Traefik has never seen a real client
+        # source IP here. On a single node Local is safe and restores it; that is half the reason this
+        # exposure mechanism was picked. The footgun is written down there too: the day a second node
+        # appears or this pod is unschedulable, Local drops all traffic instead of load-balancing.
         ipFamilyPolicy: PreferDualStack
 
     providers:
