@@ -104,6 +104,23 @@ NOT_PROXY_GATED = {
     ("apps", "tesla-streaming"): "wss intake whose public host exists only for a real certificate; "
                                  "its caller is the in-cluster forwarder "
                                  "(apply/60-tesla/streaming.yaml)",
+    # Both Home Assistant passthroughs, migrated from ../k8s-techdelivery 2026-11-02. The migration
+    # spec §3.2 demanded an explicit HA sub-decision rather than an inherited default, and the operator
+    # made it in issue #112: HA authenticates natively and that is considered sufficient. It is also
+    # the parity answer, not a regression — T0a measured chiclana-hass answering 200 unauthenticated on
+    # the VPS and hass answering 400 on every path, so no working gate existed to copy. HA's companion
+    # apps do not follow a 302 to an external IdP and its websockets are what proxy auth breaks, so an
+    # outpost would have bought nothing and cost the phones. The whole edge is now HA's own login; see
+    # each file's Ingress header, and note both pin router.entrypoints: websecure because of it.
+    ("apps", "home-assistant-home-ingress"): "no proxy-side gate by operator decision 2026-11-02; Home "
+                                             "Assistant authenticates natively and its own login is "
+                                             "considered sufficient (issue #112; "
+                                             "apply/50-apps/home-hass/home-hass.yaml)",
+    ("apps", "home-assistant-chiclana-ingress"): "same decision as home-assistant-home-ingress, and "
+                                                 "T0a measured this host answering 200 unauthenticated "
+                                                 "on the VPS, so a gate here would be a behaviour "
+                                                 "change rather than parity (issue #112; "
+                                                 "apply/50-apps/chiclana-hass/chiclana-hass.yaml)",
 }
 
 

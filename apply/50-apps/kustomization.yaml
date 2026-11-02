@@ -144,3 +144,18 @@ resources:
   # file. It is listed next to its only consumer's dependency rather than as a platform service on
   # purpose — if a second client ever appears, that is the change which argues for a namespace.
   - searxng/searxng.yaml
+  # The two Home Assistant passthroughs, migrated from ../k8s-techdelivery with their object names
+  # intact. Neither is a workload: each is Endpoints + Service + Ingress and no pod, because Home
+  # Assistant runs on its own box outside the cluster and the cluster only forwards to it. That is why
+  # they pass the §3.1 admission test for the shared `apps` namespace without buying one — no pod, no
+  # database, no Secret, no Certificate, no DNS record, and `apps` was already on the Reflector
+  # allow-list, so the hostnames cost the cluster nothing (the 2026-10-27 amendment is the reading
+  # that applies). Two files rather than one because they are two different physical machines on two
+  # different networks — a home-LAN address reached over the OPNsense peer, and a mesh address reached
+  # natively — and a bad field in one should read as that site, not as both.
+  #
+  # Neither carries a proxy-side auth gate, by operator decision 2026-11-02; the citation lives in
+  # tools/ingress-auth-check.py's NOT_PROXY_GATED, which is the gate that makes the decision mandatory
+  # rather than merely stated.
+  - home-hass/home-hass.yaml
+  - chiclana-hass/chiclana-hass.yaml
