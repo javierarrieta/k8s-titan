@@ -667,6 +667,14 @@ py-deps:
 # ggshield instead of pretending to have scanned.
 #
 #   make dry-run DRYRUN_CONTEXT=<admin kube context>
+#
+# One case it cannot validate, and it is structural rather than a gap to close: a stage that introduces
+# a Namespace AND namespaced objects in the same change. Server-side dry-run persists nothing, so the
+# Namespace is accepted and then is not there for the objects after it, even inside one invocation.
+# The script reports that as SKIPPED with the stage named, not REJECTED - a red gate on a correct tree
+# is how you end up running the gate with the flag that ignores it - and a skipped stage is said out
+# loud in the summary as not a pass. The fix is to land the Namespace as its own change first; see
+# scripts/dry-run-check.sh for the three conditions that keep the skip narrow.
 dry-run:
 	@scripts/dry-run-check.sh "$${DRYRUN_CONTEXT}"
 
