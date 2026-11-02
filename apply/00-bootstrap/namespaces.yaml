@@ -223,3 +223,32 @@ metadata:
   annotations:
     kubernetes.io/metadata.name: sure
     kubernetes.io/description: "Sure personal-finance tracker, authenticated by authentik, data in the shared CNPG cluster"
+---
+# Titan's Flux-managed Traefik, replacing the k3s-bundled one (issue #209). Declared here, centrally,
+# like every namespace except k8s-reader — and it has to be, because it lands as its own change ahead
+# of the HelmRelease that uses it.
+#
+# Why it is split out: `make dry-run` applies each stage with `apply --dry-run=server`, and server-side
+# dry-run persists nothing. A Namespace is therefore invisible to the objects that follow it even
+# inside a single invocation, so any stage that introduces a new namespace AND namespaced objects
+# cannot be validated until that namespace exists live. Putting the Namespace in the same stage as its
+# consumers does not help; it just moves the failure. Landing it first, through Flux, is the only way
+# the gate can check the rest.
+#
+# The pod-security answer is the same one `coder` and `monitoring` give: warn, not enforce. The 41.1.1
+# chart's default containerSecurityContext (drop ALL, runAsNonRoot, readOnlyRootFilesystem, no
+# privilege escalation) already satisfies `restricted`, so this label carries a warning category with
+# no warnings behind it. Checked against the rendered pod spec rather than assumed — `open-webui` and
+# `files` deliberately omit the label with a comment saying why, and an undocumented absence is what
+# those comments exist to prevent.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: traefik-system
+  labels:
+    name: traefik-system
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: latest
+  annotations:
+    kubernetes.io/metadata.name: traefik-system
+    kubernetes.io/description: "Flux-managed Traefik, the cluster's ingress path (issue #209)"
