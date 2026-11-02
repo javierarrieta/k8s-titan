@@ -1,0 +1,488 @@
+# VPS → titan workload migration — implementation plan
+
+**Date:** 2026-10-30.
+**Design:** `docs/superpowers/specs/2026-10-30-vps-to-titan-workload-migration-design.md` — read it
+first. This plan is the executable half; the spec holds the decisions (D1–D5), the inventory (§2) and
+the constraints (§3–§5). Where this plan restates a measurement it is because the ticket cannot be
+executed without it; otherwise it cites the spec or the pre-flight.
+**Repos:** `td/` = `k8s-techdelivery` (VPS), `titan/` = `k8s-titan` (destination), `tf/` =
+`public-dns-tf`.
+**Base:** `titan origin/main@22c5e06`, last-fetched state. Re-verify before the first commit
+(spec §9).
+
+## 0. Tracker mapping — read this before using any T-number
+
+**The canonical tickets are GitHub issues #99–#116 on `javierarrieta/k8s-titan`, tracked by #116.**
+The T-numbers below are internal shorthand invented by the spec's first draft. They are kept because the
+spec and this plan reference them throughout and a blind rename would break more than it fixes, but no
+new ticket is opened under a T-number and no work is scheduled against one.
+
+| shorthand | canonical issue | note |
+|---|---|---|
+| TP | **none — new** | access/credentials. #116 says "access needed: varies per item"; no issue aggregates it |
+| T0a | **none — new** | the per-host probe. **✅ Done 2026-10-30** — results in `specs/2026-10-30-vps-auth-probe.md`; posted as a comment on #103 |
+| T0 | **#103** | reconcile the VPS authentik outpost and bearer-auth frontend |
+| T1 | **#100 → superseded by #209** | traefik. #209 is now a **hard prerequisite of this whole plan**, not a decision to make here — see §2 |
+| T2 | **none — new** | monitoring decision + casa scrape re-point |
+| T3 | **none — new** | storage preconditions and destination headroom |
+| TC | **#101** | generic PVC backup before any data copy — this is pre-flight F-G |
+| T4, T5 | **#112** | home-hass, chiclana-hass — and `llm-chiclana`, which this plan had missed |
+| T6 | **#115** | strix. #115's concern is the container-runtime socket; this plan adds the `hostPath` results volume and the unlisted `strix-config` |
+| T7 | **#107** (bentopdf), **#110** (vert-sh) | |
+| T8 | **#106** | trading-reports. **Decision 2026-10-31: do not migrate — retire** |
+| T9 | **#113** | databasus. **Decision 2026-10-31: do not migrate — retire.** Backups are already managed on titan |
+| T10 | **#102** | VPS Postgres → CNPG. **Update 2026-10-31: measured payload appears to be zero databases — see T10.** Ordering tension with #113 dissolves with it |
+| T12 | **#111** | kanghuru |
+| R1 | **#114** (postgresus) + the retire half of #102 | |
+| R2 | **#103** (retire half) | |
+| R3 | **#111** (retire half) | |
+| — | **#99** | hostname scheme — **closed by spec D1/D1b**, should close with a pointer |
+| — | **#104** | mailserver: out of scope by operator instruction |
+| — | **#105**, **#108**, **#109** | investing-agent, unbound, gatus — the three the spec wrongly marked done or out of scope; see spec §0. **Update 2026-10-31:** #105's data is confirmed migrated (operator), so it reduces to retiring the VPS Deployment and its 10 Gi PVC |
+
+Four tickets in this plan have **no existing issue**: TP, T0a, T2 and T3. Those are the only candidates
+for new issues, and only if the operator wants them tracked.
+
+## 1. How to work a ticket
+
+Every ticket carries the same five blocks. They are not decoration; three of them are the reason this
+plan exists rather than the spec's ticket table.
+
+- **Files:** the exact paths created or edited. A ticket that cannot name its files is not scoped.
+- **Copy:** how state moves, if any. `n/a` for stateless.
+- **Exit:** one observable command and the output that proves it. Build gates are necessary and not
+  sufficient — every gate here is static, and none of them can tell you HA loads.
+- **Rollback:** the artifact and the command. For D1 apps rollback is cheap (spec D1 cost column): the
+  old name keeps working until the box dies, so revert = point clients back.
+- **Gates:** `make check` where the age key and network are available; otherwise `make check-ci`, and
+  the PR records which one ran. `dry-run` is **not** in `check` and must be run explicitly.
+
+**Retirement is never in the ticket that replaces.** The spec's review found the rollback graph was a
+cycle: T10 copied the Postgres *and* retired the VPS one, and T11's rollback needed the database T10
+deleted. Retirement is its own ticket (R-series), behind a stated observation window.
+
+**Write-freeze.** Before any copy, the VPS writer is scaled to 0 and the scale-down is recorded in the
+PR. Two live instances writing to two volumes is silent divergence, and D4 leaves the VPS side running
+by default.
+
+## 2. Wave 0 — prerequisites; nothing downstream is worth starting until these land
+
+### TP — access and credentials
+
+Six tickets are hard-blocked on access the plan must provision first. One row per credential, with an
+owner; this ticket closes when every row has a named holder.
+
+| credential | needed by | why `k8s-reader` is not enough |
+|---|---|---|
+| VPS cluster age key + read on VPS `Secret`s | §4 in every ticket, T0, T10 | `k8s-reader` cannot read Secrets (spec §9) |
+| authentik admin on the VPS instance | T0 | the data is in authentik's DB, not a kubectl role |
+| admin kube context on titan | every ticket's `dry-run` | `k8s-reader` is Forbidden for dry-run |
+| shell on titan | T3 | PV reclaim is a node-level operation |
+| shell on the VPS | T6 | the podman store is outside the cluster |
+| `terraform` + OVH write on `tf/` | T12 | DNS and issuer move |
+
+**Exit:** every row names a holder. **Rollback:** n/a.
+
+### T0a — ✅ **DONE 2026-10-30** — proved what is actually protected
+
+**Result:** spec §3's hypothesis is settled. Authentik's embedded outpost gates **nine** hosts at the
+router (`tesla`, `prometheus`, `vert`, `uptime`, `llm-chat`, `agent0`, `q1`, `bentopdf`,
+`investment-agent`), each with its **own Application and OAuth2 `client_id`**. Deep paths 302 too, so the
+gate is not bypassable. **Four in-scope hosts are wide open today** (`chiclana-hass`, `databasus`,
+`openwebui`, `tr`) — gating them on titan is a behaviour change, not parity. `hass.v.arrieta.eu` returns
+**400 on every path**. Grafana is **not** authentik-gated on the VPS.
+
+Full table, method, and the honest limits: [`../specs/2026-10-30-vps-auth-probe.md`](../specs/2026-10-30-vps-auth-probe.md).
+
+- **Files:** ✅ `titan/docs/superpowers/specs/2026-10-30-vps-auth-probe.md`.
+- **Copy:** n/a. **Rollback:** n/a — read-only.
+- **Exit:** ✅ met. The three hypotheses are distinguished; §3 amended from hypothesis to measurement.
+- **Gates:** none (doc-only).
+
+**Carried into T0 (#103):** export **per Application**, one row per `client_id`, `access_group` set
+yes/no — at least nine Applications exist. **Carried into #112/#113/#106:** each needs an explicit
+keep-open-or-gate decision rather than inheriting the forwardAuth default. **Update 2026-10-31:** #113 and
+#106 were both decided as retire-not-migrate, so only **#112** still owes that decision — and `hass` is the
+one returning 400, so it needs a health check first.
+
+### T0 — export the VPS authentik state  ·  **#103** — **collapsed by operator statement, 2026-10-31**
+
+> **There is nothing to export.** Operator statement: the VPS authentik was never wired to groups or apps
+> correctly — only the operator had an account — so **fresh bindings are needed regardless.** T0 existed to
+> read policy that turned out not to exist. Recorded on #103.
+>
+> **T0a already did the useful half**: the host list titan needs bindings for came from unauthenticated
+> curl, not from the database, and the database adds nothing beyond it.
+>
+> **This ticket is now:** author fresh authentik state on titan for the hosts actually arriving, from the
+> T0a table plus the retire decisions. Not an export, not a reconciliation, not a parity diff. The
+> API-token / direct-SQL question is moot.
+
+- ~~**Contract:** one entry per Application with provider type, `ingressUrls`, bound group, policy name,
+  `access_group` yes/no.~~ Nothing to export.
+- ~~**Identity parity (spec §3.3):** user count, group list, per-provider binding, diffed.~~ Parity against
+  a single-user instance is not a meaningful check.
+- **The one gate that survives, and it is not optional:** "only I had an account" is the load-bearing claim
+  behind **D3 and R2 — retiring the VPS authentik entirely.** Verify before retirement:
+  ```sql
+  select count(*) from authentik_core_user;
+  select uid, is_active, is_superuser from authentik_core_user order by uid;
+  select count(*) from authentik_core_group;
+  ```
+  Counts and uids only — no emails, no names. If it is 1–2 users (the operator plus authentik's internal
+  `ak`) and ~0 groups, the claim holds. Anything else is **a person or service account with a live login on
+  a box being switched off**, and the plan has no drilled recovery for that.
+- **Files:** none — the inventory file is not needed.
+- **Exit:** fresh bindings authored on titan for arriving hosts; user/group counts recorded on #103.
+- **Rollback:** n/a — read-only against the VPS.
+- **Gates:** none (doc-only), but `kustomize-listing` must stay green.
+
+### T1 — traefik: blocked by #209  ·  ~~#100~~ → **#209**
+
+**This is no longer a ticket to do — it is a gate to wait on.** Per spec D5 the migration lands *after*
+titan replaces k3s's bundled traefik with a Flux-managed chart (#209). #209 supersedes #100 and reverses
+a confirmed founding decision (`nixos-configurations` spec D4), and it has its own open design question —
+what binds the public IPv4 once k3s's ServiceLB is gone. It is not quick and it is not this plan's to do.
+
+What this plan still owes, when #209 lands:
+
+- **Not a no-op, per #100.** The VPS annotates `traefik-system-bearer-auth@kubernetescrd`, coupled to a
+  namespace titan does not have. Every migrated `router.middlewares` annotation is **rewritten, not
+  copied**, and the layout to adopt is titan's own: a `Middleware` in the *app's* namespace.
+- **Confirm the shape survived the cutover** before the first migrated Ingress: the three existing
+  `Middleware` objects still resolve, `websecure` still exists as an entrypoint, and the NodePort
+  firewall posture is unchanged. Spec D5b says the forwardAuth shape is invariant across the cutover —
+  that is an assertion worth re-proving rather than assuming.
+- **Files:** none here. A note in `titan/docs/` recording the cutover and the new chart pin.
+- **Exit:** `kubectl get middleware -A` returns the three existing objects on the new install, and an
+  unauthenticated request to an already-gated host still 302s to authentik.
+- **Gates:** `make check-ci`, plus `dry-run` once an admin context is in scope.
+
+### T2 — monitoring decision + scrape re-point
+
+`kube-prometheus-stack` retires rather than migrates: titan's Grafana already reads casa's Prometheus
+over the mesh (spec §2). But casa scrapes the VPS today and those targets die with the box.
+
+- **Files:** `nixos-configurations` — the casa Prometheus scrape config and the
+  `wireguard`/`public-host.nix` allow on the destination. **Cross-repo: this ticket does not live in
+  `titan/` and no `titan/` gate covers it.** State the target file and the PR repo in the ticket body.
+- **Do:** re-point casa's VPS scrape targets at titan (F-C carries the port and mesh details). Fold a
+  Grafana provision-YAML export of the VPS instance into this ticket — T2 owns the monitoring
+  decision, and any alert rule living in VPS Grafana dies with it (spec §2.1).
+- **Exit:** casa's targets page shows titan's node, control-plane, kubelet, cAdvisor and
+  kube-state-metrics up, and the VPS targets removed.
+- **Rollback:** revert the scrape config PR.
+- **Gates:** none in `titan/`; the casa repo's own checks.
+
+### T3 — storage preconditions and destination headroom — **✅ done 2026-10-30 (disk verdict CONDITIONAL)**
+
+Full measurements: [`../specs/2026-10-30-t3-storage-headroom.md`](../specs/2026-10-30-t3-storage-headroom.md).
+
+- **Compute / memory / GPU: GREEN, not close to a limit.** titan has 7.75 free cores and ~116 GiB free
+  RAM; the arriving set needs ~1.5 cores and ~2 GiB. No GPU anywhere in the migrated set.
+- **Disk: GREEN, and then some.** Measured arriving bytes are **~4.4 GiB into 50.75 GiB free** — the PVC
+  requests overstated it 5×. With #106 and #113 since decided as retire-not-migrate and #102 holding no
+  migratable database, **the stateful wave has an empty payload**: nothing with a PVC is migrating.
+- **The trap found:** `kubelet_volume_stats_used_bytes` reports the **node's** filesystem for every
+  `local-path` volume — all ten VPS volumes report the same 77.29 GiB, totalling an impossible 772 GiB
+  on a 95.8 GiB disk. Anyone sizing from that metric will be wrong by an order of magnitude. titan's
+  kubelet volume stats are not scraped at all.
+- **F-D reclaim found:** five `Released` `local-path-retain` PVs on titan totalling **90 GiB** of claim
+  capacity (two superseded coder homes, three ocis/opencloud rename leftovers). Real on-disk size
+  unmeasured; `coder-home-recovered` has a name suggesting deliberate recovery — do not delete blind.
+- **Policy recorded** (§6): `local-path` is thin, and titan has two StorageClasses — every migrated
+  stateful manifest must name `local-path-retain` explicitly, so **none of the VPS manifests can be
+  copied verbatim** on this axis.
+- **Files:** ✅ `titan/docs/superpowers/specs/2026-10-30-t3-storage-headroom.md`.
+- **Exit:** ⚠️ partially. Headroom verdict covers compute, memory and GPU as required; the byte-level
+  `du` pass needs an admin context (`k8s-reader` cannot `pods/exec` on either cluster) and is handed over.
+- **Rollback:** n/a — nothing reclaimed yet. PV deletion stays a separate, listed, reviewed step.
+- **Gates:** `make check-ci`.
+
+### TC — the copy mechanism  ·  **#101**
+
+The spec's review found no ticket moves bytes. This ticket builds the one mechanism every stateful
+ticket reuses, and it restores pre-flight F-G, which gated a working backup path *before* any data
+copy and which the spec dropped.
+
+- **Files:** a documented runbook under `titan/docs/`, plus whatever job spec the mechanism needs.
+- **Do:** pick one mechanism — the obvious reuse is restic into casa's MinIO, which
+  `titan/apply/70-backup/` already owns — and prove it end to end on a scratch volume. State whether
+  titan's annotation-driven restic supersedes F-G's parity requirement, or restore F-G as a ticket.
+- **Exit:** a volume copied VPS→titan and verified by checksum, and the runbook committed.
+- **Rollback:** delete the scratch volume.
+- **Gates:** `make backup-coverage`.
+
+## 3. Wave 1 — stateless path builders
+
+These four prove the manifest port, the secret re-encryption and the auth shape at zero data risk.
+Each is Ingress-bearing, so each depends on T1 and, for its auth half, on T0/T0a.
+
+### T4 — `home-hass` → `hass.titan.arrieta.eu`  ·  **#112**
+
+- **Files:** `titan/apply/50-apps/home-hass/home-hass.yaml` (Endpoints + Service + Ingress),
+  `titan/apply/50-apps/kustomization.yaml` (+1 line), blueprint `ConfigMap` + `Middleware` + group
+  entry per spec §3.2.
+- **Copy:** n/a — the data lives on the external HA box, not in the cluster.
+- **Do first:** re-verify the external HA address is reachable from titan's network (different LAN than
+  the VPS's), **and** decide the HA sub-decision from spec §3.2: browser-only SSO with a documented
+  companion-app path, or an allow-listed bypass for the API/websocket surface. Also state current vs
+  intended reachability — this host becomes reachable at titan's public IP.
+- **Exit:** unauthenticated `curl -si https://hass.titan.arrieta.eu/` → 302 to titan authentik;
+  authenticated → 200 and the HA overview renders; a phone companion app still works.
+- **Rollback:** delete the Ingress; clients keep using the old URL.
+- **Gates:** `make check` (or `check-ci`) **and** `make dry-run DRYRUN_CONTEXT=<admin context>`.
+
+### T5 — `chiclana-hass` → `chiclana-hass.titan.arrieta.eu`  ·  **#112**
+
+Same shape as T4, second site, same sub-decision. **Files:** as T4 with the name substituted.
+
+### T6 — `strix-scans`  ·  **#115**
+
+- **Files:** `titan/apply/50-apps/strix/strix.yaml` — the **full** object set from
+  `td/apply/50-apps/security/strix.yaml`: `CronJob strix-daily-scan`, `ServiceAccount strix-agent`,
+  `ClusterRole strix-reader`, `ClusterRoleBinding strix-reader-binding`, **`ConfigMap strix-config`**
+  (omitted by the spec's ticket — `kustomize-listing` will fail without it), and `Secret strix-secrets`
+  re-encrypted per §4.
+- **Copy:** the results store. **The VPS CronJob persists results via a `hostPath` at
+  `/opt/data/strix_runs`, which does not exist on titan.** Replace it with a `local-path-retain` PVC
+  sized per spec §5 and carrying the backup annotation, **or** record the deliberate decision to keep
+  results ephemeral. As written the spec's ticket loses scan results silently and §5 never fires,
+  because there is no PVC to annotate.
+- **Do first:** close the second-copy question — a 4.18 GB `strix-sandbox:1.3.0` lived in the VPS
+  **podman** store independent of the containerd copy the CronJob uses; it was removed 2026-10-16, and
+  if it has reappeared an automated consumer exists and is unaccounted for. Also state the schedule and
+  the target namespace, and note the VPS image is `python:3.12.15-slim-bookworm`, not the sandbox image.
+- **Exit:** one manual `cronjob suspend=false` run completes and writes to the PVC (or to the recorded
+  ephemeral decision).
+- **Rollback:** delete the namespace objects.
+- **Gates:** `make check` + `dry-run`. No auth half — no host. Record that as a deliberate absence.
+
+### T7 — `bentopdf` and `vert-sh`: host them or retire them  ·  **#107**, **#110**
+
+Neither has an Ingress; both are ClusterIP-only and unreachable from outside the cluster today.
+
+- **Step 1 is the operator decision for each**, and it is a decision, not a step to discover later.
+- **If hosted:** new `*.titan.arrieta.eu` host + the full §3.2 auth shape. **Files:** one directory per
+  app under `titan/apply/50-apps/`, +1 line each in the stage kustomization.
+- **If retired:** confirm nothing in-cluster consumes them, and stop. No manifest is written.
+- **Exit:** a written decision per app, and for hosted apps the T4 exit pattern.
+- **Rollback:** delete the Ingress.
+- **Gates:** `make check` + `dry-run` if hosted.
+
+## 4. Wave 2 — stateful
+
+### T8 — `trading-reports` → `tr.titan.arrieta.eu`  ·  **#106** — **decided: retire**
+
+> **Operator decision, 2026-10-31: do not migrate.** Recorded on #106.
+>
+> **Measured:** 9.3 MiB against a 1 GiB claim — static generated output behind nginx. Never a meaningful
+> arrival. **This was the last stateful arrival in the epic**: with #102 (no migratable database), #105
+> (already migrated) and #113 (retire) resolved, **nothing with a PVC is migrating.**
+>
+> **Open before the box is released, not after:** are the existing reports worth keeping? 9.3 MiB archives
+> trivially; regenerating them may not be possible if the source data or generator has moved on. If
+> disposable, clean retire; if not, one `tar` to casa's MinIO first.
+
+Remaining scope is retirement: the VPS Deployment, Service, PVC and the `tr.v.arrieta.eu` entry in the VPS
+authentik outpost. T0a found that host answering **200 unauthenticated**, which the plan had flagged as
+needing a keep-open-or-gate decision — moot now, since no host arrives.
+
+- ~~Stateful, but with no CNPG dependency, so it does not wait on T10.~~ No state moves.
+- ~~**Files:** `titan/apply/50-apps/trading-reports/…` + auth objects.~~ Not applicable.
+- ~~**Copy:** 1 Gi PVC via TC's mechanism.~~ Not applicable.
+- **Exit:** no titan-side object exists; VPS instance stopped and outpost entry removed.
+- **Rollback:** restart the VPS Deployment — it is still running until someone stops it.
+- **Gates:** none on the titan side.
+- **Retirement is not here** — there is no R ticket for trading-reports yet; it runs when the box is
+  released.
+
+~~**This wave's second ticket depends on the first**~~ — that dependency is **gone**. It existed because
+`databasus` re-issues its credentials against titan CNPG and so needed the objects T10 creates. With
+#113 decided as retire-not-migrate (2026-10-31) and T10's measured payload near zero, neither half of the
+dependency survives. The spec's wave order had these inverted; the inversion no longer matters.
+
+### T10 — VPS `postgres` → titan CNPG  ·  **#102**
+
+> **⚠️ Re-scoped by measurement, 2026-10-31.** The VPS Postgres contains exactly two non-system
+> databases: `teslamate` (1319 MB) and `authentik` (160 MB). There is **no** databasus,
+> trading-reports, open-webui or investing-agent database — their state is in their own volumes (open-webui
+> runs SQLite; measured 896 MiB and 9.3 MiB for the others). Of the two that exist, `authentik`
+> **must not** be migrated (D3 — titan's `AUTHENTIK_SECRET_KEY` derives user IDs, so restoring over it
+> changes every existing user's identity), and `teslamate` is 1319 MB against titan's 1321 MB, which
+> suggests it is already there.
+>
+> **So this ticket may have nothing to migrate.** Before doing anything below, run the teslamate
+> comparison on #102 and confirm. If it agrees, #102 closes as *nothing to carry* and only the retirement
+> in R1 / #114 remains. **The one instruction that survives regardless: never `pg_dumpall` the cluster —
+> a whole-cluster restore hits `authentik` and is unrecoverable.**
+
+- **Files:** `titan/apply/30-databases/` for the new `Database`/`DatabaseRole` pairs, and
+  `titan/apply/50-apps/<app>/<app>-db.yaml` per consumer. **Placement rule (spec BL-9):** a CNPG
+  `Database` must share a namespace with its `Cluster`, so the `-db.yaml` lives in `databases` while
+  the app lives in its own namespace. That is why `mealie/` and `sure/` each contribute **two** lines
+  to the stage kustomization, `coder/` three and `auth/` five — "one line per app" is wrong and this
+  ticket is where it bites.
+- **Copy:** dump the VPS Postgres and restore into a CNPG `Database` per consumer, matching the shape
+  `auth/`, `coder/`, `open-webui/`, `sure/`, `mealie/` and `60-tesla/` already use. Consumers found
+  in-repo: VPS authentik, `databasus`, `postgresus`. **`teslamate` is unconfirmed** — its DSN is inside
+  a SOPS secret and must be read, not guessed, before the dump; if it points at the VPS Postgres then
+  TeslaMate's driving history is in scope and spec §2.1's `unmeasured` becomes a real migration.
+- **Write-freeze:** scale the VPS Postgres Deployment to 0 before the dump and record it.
+- **Also archive, even if nothing imports it:** the open-webui VPS volume and the three `unmeasured`
+  §2.1 volumes. The dump path is already being built here, so an archive is nearly free and it converts
+  three unmeasured losses into recoverable ones.
+- **Exit:** each new `Database` reports healthy in CNPG; a row count or checksum comparison per
+  consumer database matches the source; the archive exists at a stated path.
+- **Rollback:** the VPS Postgres is untouched at this point — that is the whole point of splitting
+  retirement out. Scale it back up.
+- **Gates:** `make check` (this ticket changes Postgres URLs, so `db-url-check` is specifically
+  relevant) + `dry-run`.
+- **Retirement is R1, not here.**
+
+### T9 — `databasus`, or its retirement  ·  **#113** — **decided: retire**
+
+> **Operator decision, 2026-10-31: do not migrate.** Backups are already managed on titan — `apply/70-backup/`
+> (restic → casa's MinIO) and CNPG `ScheduledBackup` → S3 — so databasus would be a second backup tool,
+> not a migrated service. The survive-consolidation question this ticket was built around resolves by
+> retirement. Recorded on #113.
+>
+> **Measured:** the volume holds **89 MiB**, not the 10 GiB it claims. It is not an arrival. With this
+> gone, and with #106 also decided as retire, **nothing with a PVC is migrating at all.**
+
+**Remaining scope is retirement only:** the VPS Deployment, Service and PVC, plus the
+`databasus.v.arrieta.eu` entry in the VPS authentik outpost. Behind an observation window, per the standing
+rule — and with nothing replacing it, that window is the only safety net.
+
+**One check before the volume is deleted.** Those 89 MiB are databasus's own backup *output*, and titan's
+coverage is newer than whatever is in there, so a dump could predate anything titan can currently restore.
+One `ls -lh` settles it.
+
+T0a found `databasus.v.arrieta.eu` answering **200 unauthenticated**, which the plan had flagged as needing
+an explicit keep-open-or-gate decision. With retirement the question is moot — no host arrives.
+
+- ~~**Files:** `titan/apply/50-apps/databasus/` + stage kustomization line, if kept.~~ Not applicable.
+- ~~**Copy:** 10 Gi PVC via TC's mechanism.~~ Not applicable.
+- **Exit:** no titan-side object exists; the VPS instance is stopped and its outpost entry removed.
+- **Rollback:** restart the VPS Deployment — it is still running until someone stops it.
+- **Gates:** none on the titan side; `backup-coverage` must stay green regardless.
+
+## 5. Wave 3 — retirement
+
+Each R ticket is gated on a stated observation window with near-zero traffic on the VPS side (spec
+§2.2's forcing-function substitute). No R ticket runs just because the migration ticket closed.
+
+### R1 — retire the VPS bare `postgres` Deployment and the `postgresus-pvc-only` stub  ·  **#114**
+
+Gated on T10 verified and observed. This is the ticket whose rollback was previously impossible.
+
+### R2 — retire the VPS authentik, `ak-outpost-reverse-proxy-outpost` and `bearer-auth-service`  ·  **#103**
+
+Gated on T0 (inventory taken), on **the explicit ticket set** that replaced each auth half — T4, T5,
+T8, T9, T12 — and on T10 and R1, because authentik's own DB is on the Postgres being retired. The
+spec gated this on "every app enrolled", which silently included kanghuru in Wave 5; the set is named
+here instead.
+
+`bearer-auth-service` is the VPS's answer to what titan already does for `llm`. Confirm titan's bearer
+path is equivalent before removing it, and settle the `X-Auth-User` / `X-Auth-Email` response headers
+the VPS one emits and titan's does not: either they are needed, in which case titan gains them, or they
+are not, in which case spec §2.1's `llm` row stops saying "none".
+
+### R3 — retire the VPS kanghuru  ·  **#111**
+
+Gated on T12 both halves.
+
+## 6. Wave 4 — last, per D2
+
+### T12 — `kanghuru`  ·  **#111**
+
+Two halves, in this order.
+
+1. **`kanghuru.titan.arrieta.eu` on titan with forwardAuth, verified.** **Files:**
+   `titan/apply/50-apps/kanghuru/` + stage kustomization line + the §3.2 auth objects.
+2. **The only DNS change in the plan.** Re-point `kanghuru.es` and `www.kanghuru.es` at
+   `<OVH_PUBLIC_IP>` in `tf/`, and move the `le-prod-kanghuru` issuer, `kanghuru-es-cert` and
+   `kanghuru-ovh-secrets` to titan.
+
+- **Import before declaring.** `kanghuru.es` is **not** in `tf/` today, so this ticket starts by
+  importing the existing records: `tf/`'s own rule is that declaring a record that already exists
+  without importing it makes OVH silently create a second copy.
+- **Post-renewal NODATA probe (spec §5).** kanghuru has its own `Certificate`, so it is the one
+  migrated host exposed to the stale-challenge-node shadowing that took `streaming.titan` dark on
+  2026-10-19. After the first renewal following the move, probe `kanghuru.es` for NODATA and declare an
+  explicit A record if a stale node is present — the documented `coder.titan` / `streaming.titan`
+  remedy.
+- **Exit:** half 1 verified before half 2 is raised; after half 2, `kanghuru.es` resolves and serves
+  from titan, and the renewal probe is scheduled.
+- **Rollback:** half 1 — delete the Ingress. Half 2 — revert the `tf/` PR; TTL is 300 s.
+- **Gates:** `make check` + `dry-run` for half 1; `tf/`'s own plan for half 2.
+
+## 7. Gates
+
+`make check` where the age key and network are available; otherwise `make check-ci`, **and the PR
+records which ran**. `check` includes `validate` and `db-url-check` (age key) and `chart-values-check`
+(network), so it cannot complete in a workspace without them; `check-ci` is the keyless/offline subset
+and still covers `kustomize-listing`, `secrets-placement`, `release-secrets`, `secret-refs`,
+`ingress-auth`, `blueprint-mount-check`, `backup-coverage`, `crd-check` and `namespace-check`.
+
+**`dry-run` is not part of `check`** and must be run explicitly:
+`make dry-run DRYRUN_CONTEXT=<admin kube context>`. It is the only gate that asks the live API server,
+and spec §4 leans on it as the thing that catches a `data:`/`stringData` mistake — so a ticket that
+runs only `make check` never sees it, and never sees it skip either.
+
+Gates that specifically bite this migration, beyond the always-on set:
+
+| gate | why here |
+|---|---|
+| `secrets-placement` / `secret-refs` / `release-secrets` | every ticket re-encrypts Secrets into `10-secrets` (spec §4) |
+| `ingress-auth` | every Ingress-bearing ticket adds a gated host (spec §3.2) |
+| `blueprint-mount-check` | every auth half adds a blueprint `ConfigMap` |
+| `db-url-check` | T10 changes Postgres URLs — this gate exists for exactly that |
+| `backup-coverage` | every stateful ticket annotates a PVC (spec §5) |
+| `namespace-check` | any new namespace (spec §5) |
+| `chart-values-check` | only if a `HelmRelease` moves |
+
+Structural rule: **one numbered directory is one stage is one Flux `Kustomization`.** These apps are
+not new stages — they are subdirectories under `titan/apply/50-apps/`, one kustomization line per
+manifest, and a stateful app contributes two (`<app>/<app>-db.yaml` in `databases` + `<app>/<app>.yaml`
+in the app namespace). Whether an app earns the shared `apps` stage at all is decided by the admission
+test in `docs/superpowers/specs/2026-10-19-titan-app-scale-out-design.md` §3.1, not by the directory
+name.
+
+## 8. Dependency list
+
+**Ordering tension on #102 / #113 — dissolved by measurement, 2026-10-31.** This plan put the Postgres
+merge before databasus because databasus re-issues its credentials against titan CNPG, while #102 stated
+the opposite prerequisite. Both were right about their own half, and the split below was the right shape
+for a merge that turned out not to exist: the VPS Postgres holds only `teslamate` and `authentik`, so
+there is nothing to sequence. **#113 becomes a standalone keep-or-retire decision**, and the coupling was
+an artifact of assuming a payload nobody had counted.
+
+Formerly-proposed resolution, kept for the record: split #113 — its *decision* ahead of
+#102, its *move* after it. That call belongs on the issue, not here.
+
+Waves are a reading order; this is the actual constraint graph.
+
+```
+#209 → T1 → all Ingress-bearing tickets (T4, T5, T8, T9, T12)   [HARD GATE, not yet designed]
+TP → everything needing credentials
+T0a → T0 → {T4, T5, T8, T9, T12} auth halves; T0 also gates R2
+T3  → all stateful tickets (T8, T9, T10) — capacity verdict required first
+TC  → all stateful tickets (T8, T9, T10) — copy mechanism proven first
+T10 → T9 (credentials), → R1 → R2
+T9's *decision* may need to precede T10 — see the ordering tension below
+T7  → R-series only if it retires
+T12 → R3
+R-series → only after a stated observation window
+```
+
+**#209 is the head of this graph and it is not a small ticket.** It reverses a confirmed founding
+decision, has an open design question about the public IP, and cuts over 14 live hostnames. Nothing
+Ingress-bearing in this plan should be scheduled until it lands.
+
+## 9. Program-level acceptance
+
+Before **any** R ticket runs: confirm near-zero hits per VPS host for a stated window (spec §2.2).
+D1 has no forcing function — the old names keep working until the box dies, so a missed consumer
+breaks silently much later with no visible link to this migration. Traffic on the old names is the
+only evidence that the client list in spec §2.2 is complete.
