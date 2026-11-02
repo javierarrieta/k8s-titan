@@ -106,12 +106,17 @@ kubectl --context titan get ingressclass traefik \
 
 ---
 
-## C3 — merge phase B and watch it
+## C3 — merge phase B: installs the path, does not move traffic
 
-**Merging #215 is the cutover.** There is no staged rollout: when Flux syncs, the public address
-DNATs to the new Traefik and it claims the routes. Four things move together because any subset
-is an outage — `externalIPs`, `externalTrafficPolicy: Local`, the IngressClass claim, and
+**Merging #215 installs the new path. It does NOT move traffic** — see C5 for why the shadowing
+rule keeps serving the old Traefik, which was not understood when this line was first written.
+Four things move together in this change because any subset would be an outage once traffic does
+arrive — `externalIPs`, `externalTrafficPolicy: Local`, the IngressClass claim, and
 `publishedService`.
+
+Expect the HelmRelease to go `Ready` and the Ingress statuses to rewrite to the public address
+while the new pod's access log stays empty. **That is the expected state at the end of C3, not a
+failure.** The traffic moves in C5.
 
 ```fish
 kubectl --context titan -n traefik-system get helmrelease traefik -w
@@ -125,8 +130,8 @@ kubectl --context titan get middleware -A --no-headers | wc -l    # must still b
 kubectl --context titan get crd | grep -c traefik.io              # must still be 25
 ```
 
-The old Traefik keeps running with its `hostPort` bind, so it stays reachable on the node's other
-addresses. That is the safety net for this window.
+The old Traefik keeps running with its `hostPort` bind and keeps serving everything. That is the
+safety net, and it is also the thing C5 has to remove.
 
 `make dry-run` cannot validate any of this: it applies the `HelmRelease` object, and
 `spec.values` is `x-kubernetes-preserve-unknown-fields` in the Flux CRD, so the API server never
@@ -183,20 +188,116 @@ in advance.
 
 ---
 
-## C4 — only after traffic is proven on the new path
+## C4 — prove the new path serves, without touching the live path
 
-Apply `nixos-configurations#163` (`nixos-rebuild switch` on titan). This is what makes the change
-survive a k3s restart. Afterwards:
+Do this before removing anything. The new Traefik's entrypoints are **`web=:8000` and
+`websecure=:8443`**, not 80/443 — the Service maps `443 → targetPort websecure`. Hitting the pod IP
+on port 443 returns `000` (connection refused) and proves nothing; that mistake cost a detour
+during the real cutover.
 
 ```fish
-kubectl --context titan -n kube-system get helmcharts.helm.cattle.io traefik traefik-crd   # gone, NOT Terminating
-kubectl --context titan get crd | grep -c traefik.io      # still 25 — this is the proof C1 worked
-kubectl --context titan get middleware -A --no-headers | wc -l    # still 3
-kubectl --context titan get ingress -A --no-headers | wc -l       # still 15
+# direct to the pod, correct entrypoint port
+kubectl --context titan -n traefik-system get endpointslices -o jsonpath='{.items[*].endpoints[*].addresses}{"\n"}'
+curl -sk -o /dev/null -w '%{http_code}\n' \
+  --resolve coder.titan.arrieta.eu:8443:10.62.0.78 https://coder.titan.arrieta.eu:8443/
+
+# through the Service, which exercises the 443 -> 8443 mapping kube-proxy does in production
+curl -sk -o /dev/null -w '%{http_code}\n' \
+  --resolve coder.titan.arrieta.eu:443:10.63.18.64 https://coder.titan.arrieta.eu/
 ```
 
-If the HelmCharts are stuck `Terminating`, C1's finalizer strip did not take. Do not force it;
-re-run the two `--type=merge` patches and read the result.
+Both must return `200`, and the access log must grow:
+
+```fish
+kubectl --context titan -n traefik-system logs deploy/traefik --tail=3
+```
+
+A log line naming a `routerName=...@kubernetes` and a backend URL is the proof you want — it shows
+routes were built from the IngressClass and that `Middleware` objects were read. During the real
+cutover the line showed `middlewareType=ForwardAuth` on the llm router, which is what proved the
+CRD path was intact rather than merely present.
+
+---
+
+## C5 — the teardown, and why the flag alone does NOT cut over
+
+**This is the step the first version of this runbook got wrong.** Applying
+`nixos-configurations#163` does not move traffic, and the reason is invisible from every k8s-titan
+gate because they all read git.
+
+k3s' ServiceLB publishes the **node IP as the LoadBalancer ingress IP** of `kube-system/traefik`.
+kube-proxy therefore programs a `loadbalancer IP` rule for `37.187.159.156:80/443` — and
+iptables evaluates in order and stops at the first jump:
+
+```
+KUBE-SERVICES -d 37.187.159.156 -p tcp --dport 443
+  -> "kube-system/traefik:websecure loadbalancer IP"     <- matched FIRST
+  -> "traefik-system/traefik:websecure external IP"      <- never reached
+```
+
+So the new Service's `externalIPs` DNAT is installed, correct, and **shadowed**. Observed during the
+real cutover: `Ready=True`, endpoints ready, Ingress statuses rewritten, and **zero** requests in
+the new pod's access log across repeated external hits. `--accesslog=true` was confirmed live, so
+the silence was real, not a logging gap.
+
+Check it directly on the node:
+
+```fish
+sudo iptables-save | grep '37.187.159.156'
+```
+
+And the second trap: because C1 marks the traefik HelmChart `unmanaged`, **nothing deletes the old
+`kube-system/traefik` Service when the flag lands.** Its `status.loadBalancer.ingress` keeps
+advertising the node IP, so the shadowing rule survives indefinitely. `servicelb`'s HelmChart is
+*not* unmanaged, so the DaemonSet does go away — which removes the `hostPort` safety net while
+leaving the shadow in place. Everything appears to work; the cutover silently did not happen.
+
+### The sequence
+
+```fish
+# 0. save the rollback objects FIRST — the old Service is helm-owned and nothing will recreate it
+kubectl --context titan -n kube-system get svc traefik -o yaml > /tmp/old-traefik-svc.yaml
+kubectl --context titan -n kube-system get deploy traefik -o yaml > /tmp/old-traefik-deploy.yaml
+
+# 1. apply the flag (nixos-rebuild switch on titan). No traffic change.
+#    Expect: svclb DaemonSet deleted; old traefik Deployment and Service STILL PRESENT.
+
+# 2. confirm the prediction before proceeding
+kubectl --context titan -n kube-system get ds | grep svclb          # gone
+kubectl --context titan -n kube-system get svc traefik \
+  -o jsonpath='{.status.loadBalancer.ingress[0].ip}{"\n"}'          # still the node IP = still shadowing
+
+# 3. THE ACTUAL CUTOVER: delete the old Service. The shadowing rule disappears and the
+#    external IP rule takes over within seconds.
+kubectl --context titan -n kube-system delete svc traefik
+
+# 4. prove it from outside, then clean up
+for h in coder grafana auth tesla; printf "%-8s %s\n" $h (curl -s -o /dev/null -w '%{http_code}' https://$h.titan.arrieta.eu); end
+kubectl --context titan -n traefik-system logs deploy/traefik --tail=5
+kubectl --context titan -n kube-system delete deploy traefik
+```
+
+### After the flag lands
+
+```fish
+kubectl --context titan -n kube-system get helmcharts.helm.cattle.io traefik traefik-crd
+#   ^ they are STILL THERE. That is correct and expected — `unmanaged` is what keeps the CRDs alive.
+#     An earlier version of this file said they should be "gone, NOT Terminating". That was wrong.
+kubectl --context titan get crd | grep -c traefik.io               # still 25 — the proof C1 worked
+kubectl --context titan get middleware -A --no-headers | wc -l     # still 3
+kubectl --context titan get ingress -A --no-headers | wc -l        # still 15
+```
+
+If a HelmChart is stuck `Terminating`, C1's finalizer strip did not take. Do not force it; re-run
+the two `--type=merge` patches and read the result.
+
+### Rollback after step 3
+
+`kubectl apply -f /tmp/old-traefik-svc.yaml` restores the object, but with `servicelb` gone nothing
+assigns it a `status.loadBalancer`, so the shadowing rule does **not** come back and traffic stays
+on the new Traefik. The real rollback after step 3 is `nixos-rebuild` to the previous generation,
+which restores `servicelb` and therefore the old path. Decide which you want before you run step 3,
+not during it.
 
 ---
 
