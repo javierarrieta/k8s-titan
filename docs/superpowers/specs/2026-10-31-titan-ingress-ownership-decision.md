@@ -131,7 +131,7 @@ Carried from #209, unchanged by the choice above:
 
 D5 makes the migration land **after** this. That ordering is the argument for doing it now: the cutover
 touches **14 live hostnames instead of 27**, and it closes the chart-version gap D5 left unowned — the
-bundled chart is 40.1.4, two versions behind the release that fixed F19.
+bundled chart is 40.1.4+up40.1.0 shipping Traefik 3.7.8, against upstream 42.2.0 shipping 3.7.16. Owning the chart in Flux is what makes that distance closable; the cutover deliberately does not close it, because the pin holds the proxy at 3.7.8 so the exposure change is the only thing in flight.
 
 Under D, `nixos-configurations` spec D4 is fully reversed rather than half-preserved:
 `disable = [ "traefik", "servicelb" ]`. That should be said plainly in the PR, because D4 was a confirmed
