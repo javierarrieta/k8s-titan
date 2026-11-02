@@ -1,0 +1,98 @@
+# chiclana-hass.titan.arrieta.eu — Home Assistant at the Chiclana site, proxied from titan.
+#
+# THE OTHER HALF OF issue #112 and the same shape as `../home-hass/home-hass.yaml`: three objects, no
+# pod. Home Assistant runs on its own box; the cluster only forwards to it. Read that file's header for
+# the reasoning shared by both — the measured-not-assumed backend, the no-readiness caveat of a
+# hand-written Endpoints, and the exposure delta spec §3.2 requires of every HA ticket.
+#
+# MIGRATED FROM `chiclana-hass.v.arrieta.eu`, hostnames adopted rather than re-pointed per D1b
+# (docs/superpowers/specs/2026-10-30-vps-to-titan-workload-migration-design.md §1). No certificate and
+# no DNS work: `*.titan.arrieta.eu` is one wildcard, in the cluster and in DNS already.
+#
+# THE BACKEND IS ON THE MESH, WHICH IS WHY THIS HALF IS THE EASIER ONE. 192.168.133.3 is inside
+# 192.168.133.0/24, the WireGuard mesh, and titan is the mesh hub — titan's own address on it is
+# 192.168.133.1, which is what `docs/titan-metrics-scrape.md` scrapes node metrics over. The source
+# file's comment (`../k8s-techdelivery apply/50-apps/apps/chiclana-hass.yaml:8-9`) records that on the
+# VPS the traffic "leaves via the VPS's wg-mesh peer"; here there is no peer to hop through, the route
+# is native to the host.
+#
+# MEASURED FROM A POD IN THIS CLUSTER 2026-11-02, same probe and same source address as the home half:
+#
+#     curl -si http://192.168.133.3:8123/  ->  200, aiohttp headers, 5948 bytes
+#
+# Serving, not merely routable. The two instances are distinguishable by response size alone (9507 vs
+# 5948 bytes of the onboarding HTML), which is the cheap way to confirm which box a hostname is
+# actually hitting when both answer 200.
+---
+# Bare Endpoints, no selector, nothing reconciling it — see the home half for why that is the correct
+# shape for an out-of-cluster backend and what it costs (no readiness, no lifecycle, a 502 with no pod
+# log when the box disappears).
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: home-assistant-chiclana
+  namespace: apps
+subsets:
+  - addresses:
+      # The Chiclana box's address on the titan-managed WireGuard mesh. Not cluster-local.
+      - ip: 192.168.133.3
+    ports:
+      - name: web
+        port: 8123
+---
+# No selector, on purpose — with one, the endpoints controller would empty the Endpoints above.
+# Port 80 in, 8123 out.
+apiVersion: v1
+kind: Service
+metadata:
+  name: home-assistant-chiclana
+  namespace: apps
+spec:
+  ports:
+    - name: web
+      protocol: TCP
+      port: 80
+      targetPort: web
+---
+# NO PROXY-SIDE GATE, same operator decision as the home half (issue #112, 2026-11-02), and here the
+# evidence is stronger than a preference: T0a measured `chiclana-hass.v.arrieta.eu` answering **200
+# unauthenticated** (docs/superpowers/specs/2026-10-30-vps-auth-probe.md), so this host is wide open
+# today and putting a forwardAuth in front of it would have been a behaviour change sold as a
+# migration. Recorded in `tools/ingress-auth-check.py`'s `NOT_PROXY_GATED` with this file as its
+# citation, because the gate fails an apex Ingress with no `router.middlewares` unless the decision is
+# written down.
+#
+# Residual risk, stated once: this host is reachable from the public internet with nothing in front but
+# Home Assistant's own login, and unlike the home half it has been reachable that way for as long as
+# the VPS has served it. Whatever HA enforces is the entire edge.
+#
+# The `websecure` pin is the other line that matters, for the same reason as the home half: with no
+# proxy-side auth, HA's own credential is the only thing on the wire, and this cluster has no global
+# HTTP->HTTPS redirect. Nothing in this tree reads this annotation — see the home half's Ingress header
+# for the measurement and for which files do pin.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: home-assistant-chiclana-ingress
+  namespace: apps
+  annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+spec:
+  ingressClassName: traefik
+  rules:
+  - host: chiclana-hass.titan.arrieta.eu
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: home-assistant-chiclana
+            port:
+              name: web
+  tls:
+  - hosts:
+    - chiclana-hass.titan.arrieta.eu
+    # The cluster wildcard, reflected into `apps` by the allow-list on
+    # apply/40-certificates/titan-wildcard.yaml — already on it, so no certificate work.
+    secretName: titan-tls

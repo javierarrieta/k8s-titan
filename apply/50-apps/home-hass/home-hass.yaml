@@ -1,0 +1,131 @@
+# hass.titan.arrieta.eu — Home Assistant at the home site, proxied from titan.
+#
+# THIS IS NOT A WORKLOAD. There is no Deployment and no StatefulSet here because Home Assistant does
+# not run in this cluster: it runs on its own box at 192.168.0.5 on the home LAN. What migrated from
+# ../k8s-techdelivery apply/50-apps/apps/home-hass.yaml is a proxy definition — Endpoints + Service +
+# Ingress, three objects and no pod — so there was no image, no volume and no state to move. The
+# cluster only forwards to it.
+#
+# MIGRATED FROM `hass.v.arrieta.eu`, hostnames adopted rather than re-pointed per D1b
+# (docs/superpowers/specs/2026-10-30-vps-to-titan-workload-migration-design.md §1). The wildcard
+# certificate already covers `*.titan.arrieta.eu`, so no Certificate and no DNS record were needed:
+# `*.titan` is a wildcard A at titan's own address in ../public-dns-tf records_public.tf:13.
+#
+# REACHABILITY WAS MEASURED BEFORE THIS FILE WAS WRITTEN, from a pod in this cluster (a coder
+# workspace, source 10.62.0.75, gateway 10.62.0.1), 2026-11-02:
+#
+#     curl -si http://192.168.0.5:8123/  ->  200, `Server:` empty, aiohttp headers, 9507 bytes
+#
+# Reachable-and-serving, not merely answering ICMP. That distinction is the whole reason this is a
+# hand-written `Endpoints` rather than a mesh name: a bare Endpoints is created happily by an address
+# that refuses TCP, and the Ingress then 502s with a healthy-looking Service and no pod log to explain
+# it. Same trap `apply/50-apps/llm/llm.yaml` records for its own backend.
+#
+# THE PATH IS THE OPNsense WireGuard PEER, not titan's own mesh interface. 192.168.0.0/24 is the home
+# LAN and titan is an OVH VPS; the peer's allowedIPs carry that range, which is also how
+# `apply/50-apps/llm/llm.yaml` reaches 192.168.0.29. That peer is a single point of failure for this
+# hostname and there is no second path to fall back to.
+#
+# EXPOSURE CLASS CHANGED, and spec §3.2 requires each HA ticket to say so rather than let it be
+# discovered. Current and intended are both public internet, so the delta is the *front door*, not the
+# reachability: `hass.v.arrieta.eu` answered 400 on every path through the VPS outpost (measured
+# 2026-10-30, docs/superpowers/specs/2026-10-30-vps-auth-probe.md), which means nothing working was
+# gating it either. Here nothing gates it deliberately — see the Ingress below.
+#
+# WHAT MOVING THE PROXY BREAKS BY HAND, none of it fixable from this file: anything configured against
+# `hass.v.arrieta.eu` — the companion app, webhooks, any auth provider, dashboards. Separately, if
+# this instance uses `homeassistant.trusted_networks` or `http.use_x_forwarded_for`, the client address
+# HA sees changes with the proxy: it becomes titan's egress address on that peer unless HA is told to
+# trust `X-Forwarded-For`. Not verified from here — HA's own configuration is on the box, not in this
+# tree — and it is the item most likely to read as "the login stopped working" after the cutover.
+---
+# A bare Endpoints with no selector, because the backend is a host outside the cluster. The endpoints
+# controller only owns the Endpoints of a Service that HAS a selector, so nothing reconciles this one
+# and nothing overwrites it. Same shape, same reasoning, and the same v1-deprecation tradeoff as
+# `apply/50-apps/llm/llm.yaml`; the source cluster has run this object unchanged since before titan
+# existed.
+#
+# THE CAVEAT THAT COMES WITH IT: a hand-written Endpoints has no readiness and no lifecycle. If this
+# box goes away the Service keeps load-balancing to nothing and the Ingress answers 502 with no pod
+# log to read. Nothing in this tree watches it — `apply/50-apps/gatus/gatus.yaml` probes casa and
+# nothing here — so the address and the range above are the record of which machine this is.
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: home-assistant-home
+  namespace: apps
+subsets:
+  - addresses:
+      # The home site's LAN address, reached over the OPNsense WireGuard peer. Not cluster-local, not
+      # a mesh address — see the header.
+      - ip: 192.168.0.5
+    ports:
+      - name: web
+        port: 8123
+---
+# No selector, on purpose: with a selector the endpoints controller takes ownership of the Endpoints
+# object and reconciles it against the pods that match, of which there are none, so it would empty the
+# one above. Port 80 in, 8123 out, so the Ingress backend reads like every other Ingress in this tree.
+apiVersion: v1
+kind: Service
+metadata:
+  name: home-assistant-home
+  namespace: apps
+spec:
+  ports:
+    - name: web
+      protocol: TCP
+      port: 80
+      targetPort: web
+---
+# NO PROXY-SIDE GATE, by explicit operator decision 2026-11-02 (issue #112): Home Assistant
+# authenticates natively and its own login is considered sufficient. That is a decision the migration
+# spec §3.2 demanded be made in the ticket rather than inherited by silence, and it is the right one
+# here for a reason beyond taste — HA's companion apps do not follow a 302 to an external IdP and its
+# long-lived websockets are exactly what proxy auth breaks, so a forwardAuth outpost would have
+# broken the phones to buy nothing.
+#
+# `make ingress-auth` enforces the alternative by default, so the decision is recorded in
+# `tools/ingress-auth-check.py`'s `NOT_PROXY_GATED` with this file as its citation. That allow-list is
+# keyed by (namespace, Ingress name) and an entry matching nothing is itself a gate failure, so
+# renaming this Ingress turns the gate red rather than opening the host quietly.
+#
+# THE RESIDUAL RISK, on the record rather than discovered later: this host is reachable from the
+# public internet with nothing in front but Home Assistant's own login. Whatever HA enforces —
+# password strength, MFA, lockout — is the entire edge.
+#
+# THE `websecure` PIN IS THE OTHER LINE THAT MATTERS HERE, and for the same reason the gate does not
+# exist: with no proxy-side auth, the credential crossing the wire is HA's own, and a router left on
+# both entry points serves a HA login POST in cleartext. This cluster has no global HTTP->HTTPS
+# redirect to fall back on — measured, `http://meals.titan.arrieta.eu/` answers 200 while
+# `http://llm.titan.arrieta.eu/` answers 404 — and nothing reads this annotation: `make ingress-auth`
+# deliberately does not, and `crd-check` walks custom resources. For the pin, this comment is the only
+# guard. Same shape as `apply/50-apps/llm/llm.yaml` and
+# `apply/50-apps/investing-agent/investing-agent.yaml`.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: home-assistant-home-ingress
+  namespace: apps
+  annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+spec:
+  ingressClassName: traefik
+  rules:
+  - host: hass.titan.arrieta.eu
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: home-assistant-home
+            port:
+              name: web
+  tls:
+  - hosts:
+    - hass.titan.arrieta.eu
+    # The cluster wildcard, reflected into `apps` by the allow-list on
+    # apply/40-certificates/titan-wildcard.yaml. `apps` is already on that list, so this needed no
+    # certificate work and no hand-copied Secret.
+    secretName: titan-tls
