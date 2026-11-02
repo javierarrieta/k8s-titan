@@ -106,7 +106,25 @@ spec:
     # Ingress unserved in the gap. C3 hands it over instead. `name: traefik` is set so that when
     # phase B flips enabled to true the object it creates is the one the Ingresses already name.
     ingressClass:
-      enabled: false
+      # PHASE B. Flipping this to true is what makes the new Traefik route anything: Traefik resolves
+      # the class filter from IngressClass objects whose spec.controller is
+      # traefik.io/ingress-controller — 41.1.1 never emits an --providers.kubernetesingress.
+      # ingress-class argument at all, so there is no flag to grep and no arg to set.
+      #
+      # HARD PRECONDITION, and it is the same class of failure that stalled the cluster on 2026-11-02.
+      # IngressClass/traefik already exists and is owned by helm release `traefik` in namespace
+      # `kube-system` (verified: meta.helm.sh/release-name=traefik, release-namespace=kube-system).
+      # If this merges before that ownership is handed over, helm refuses with `IngressClass "traefik"
+      # already exists`, the HelmRelease goes InstallFailed, stage-infra waits, and certificates, apps,
+      # tesla, databases and backup all drop to DependencyNotReady. Hand the ownership over FIRST:
+      #   kubectl -n kube-system annotate helmcharts.helm.cattle.io traefik \
+      #     helmcharts.helm.cattle.io/unmanaged=true --overwrite
+      #   kubectl -n kube-system patch helmcharts.helm.cattle.io traefik -p '{"metadata":{"finalizers":null}}'
+      #   kubectl patch ingressclass traefik -p '{"metadata":{"annotations":{"meta.helm.sh/release-name":"traefik","meta.helm.sh/release-namespace":"traefik-system"}}}'
+      # The last line is the adoption; the first two are what stop the old release from taking the CRDs
+      # with it. Do not reorder them — annotating before stripping the finalizer is what makes the
+      # strip safe.
+      enabled: true
       isDefaultClass: true
       name: traefik
 
@@ -147,6 +165,39 @@ spec:
         # Phase A: ClusterIP with no externalIPs, so nothing reaches this Traefik from outside.
         # Phase B adds externalIPs: [<TITAN_PUBLIC_IP>] — the node's own address, which is why no
         # LoadBalancer controller and no MetalLB is needed at all.
+        # The address is committed in the clear on purpose, and it is a deliberate exception to the
+        # repo's "no concrete public IPv4" rule, allow-listed in leak-check with this file as its
+        # citation. It is not a secret: it is the address every client dials, it is in DNS, and the
+        # manifest cannot work with a placeholder. Hiding it in a sops Secret would buy no
+        # confidentiality and would add a real failure mode — a mis-named key or an empty list leaves
+        # the release Ready with nothing answering on 80/443. tools/traefik-exposure-check.py is what
+        # makes that shape fail loudly instead.
+        # Paired with externalIPs, in this change, deliberately. #214 exists because these two were
+        # split across phases: externalTrafficPolicy may only be set on an externally-accessible
+        # Service, and the Service only becomes externally accessible when externalIPs appears.
+        # Setting it here is legal for the first time. Chosen, not inherited — both titan today and
+        # the sibling box run Cluster, which SNATs, so Traefik has never seen a real client source IP
+        # here; Local restores it, and on a single node it is safe. The footgun is real and written
+        # down: the day a second node appears or this pod is unschedulable, Local drops all traffic
+        # instead of load-balancing.
+        # The address is committed in the clear on purpose, and it is a deliberate exception to the
+        # repo's "no concrete public IPv4" rule, allow-listed in leak-check with this file as its
+        # citation. It is not a secret: it is the address every client dials, it is in DNS, and the
+        # manifest cannot work with a placeholder. Hiding it in a sops Secret would buy no
+        # confidentiality and would add a real failure mode — a mis-named key or an empty list leaves
+        # the release Ready with nothing answering on 80/443. tools/traefik-exposure-check.py is what
+        # makes that shape fail loudly instead.
+        externalIPs:
+          - "37.187.159.156"
+        # Paired with externalIPs in this change, deliberately — #214 exists because these two were
+        # split across phases. externalTrafficPolicy may only be set on an externally-accessible
+        # Service, and the Service only becomes externally accessible when externalIPs appears, so
+        # this is the first point at which the value is legal. Chosen, not inherited: both titan
+        # today and the sibling box run Cluster, which SNATs, so Traefik has never seen a real client
+        # source IP here; Local restores it, and on a single node it is safe. The footgun is written
+        # down: the day a second node appears or this pod is unschedulable, Local drops all traffic
+        # instead of load-balancing.
+        externalTrafficPolicy: Local
         type: ClusterIP
         # externalTrafficPolicy is DELIBERATELY ABSENT in phase A, and it is not an oversight.
         #
@@ -172,10 +223,14 @@ spec:
     providers:
       kubernetesIngress:
         publishedService:
-          # Phase A: with no externalIPs, publishing would copy this Service's ClusterIP into every
-          # Ingress .status while the old Traefik is still the real path. Turn it on in C4 together
-          # with externalIPs, so the status only ever moves to an address that actually answers.
-          enabled: false
+          # PHASE B, in the same change as externalIPs, and the pairing is the point. With
+          # externalIPs set, publishing copies the public address into every Ingress .status.
+          # Turning it on BEFORE the address exists would copy this Service's ClusterIP into every
+          # Ingress while the old Traefik is still the real path — i.e. rewrite every status to an
+          # address no client can reach. Turning it off after the address exists leaves every status
+          # pointing at the old path. Either way the release reports Ready and the damage is invisible
+          # from the gates, so tools/traefik-exposure-check.py asserts the pairing in both directions.
+          enabled: true
 
     priorityClassName: system-cluster-critical
     tolerations:

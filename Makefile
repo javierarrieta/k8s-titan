@@ -13,12 +13,12 @@ KUSTOMIZE_DIRS := $(shell find apply -name kustomization.yaml 2>/dev/null | sed 
 # not be able to slip between the encryption rule and the validation glob.
 SECRET_FIND := find apply/10-secrets \( -name '*.yaml' -o -name '*.yml' \) ! -name kustomization.yaml
 
-.PHONY: check check-ci kustomize-check kustomize-listing dry-run py-deps validate update-keys scan leak-check secrets-placement secrets-list secrets-present release-secrets secret-refs ingress-auth backup-coverage db-url-check oidc-check grafana-oidc-check observability-oidc-check open-webui-oidc-check mealie-check sure-check crd-check namespace-check tesla-forwarder-test chart-values-check update-cnpg-crds update-crds blueprint-mount-check
+.PHONY: check check-ci kustomize-check kustomize-listing dry-run py-deps validate update-keys scan leak-check secrets-placement secrets-list secrets-present release-secrets secret-refs ingress-auth backup-coverage db-url-check oidc-check grafana-oidc-check observability-oidc-check open-webui-oidc-check mealie-check sure-check crd-check namespace-check tesla-forwarder-test chart-values-check traefik-exposure-check update-cnpg-crds update-crds blueprint-mount-check
 
 # leak-check runs FIRST: make has no -k, so it stops at the first failing prerequisite.
 # validate needs the age key, so an operator who forgot SOPS_AGE_KEY_FILE would never
 # reach a leak gate placed behind it.
-check: py-deps leak-check kustomize-check kustomize-listing validate secrets-placement release-secrets secret-refs ingress-auth blueprint-mount-check backup-coverage db-url-check oidc-check grafana-oidc-check observability-oidc-check open-webui-oidc-check mealie-check sure-check crd-check namespace-check chart-values-check tesla-forwarder-test
+check: py-deps leak-check kustomize-check kustomize-listing validate secrets-placement release-secrets secret-refs ingress-auth blueprint-mount-check backup-coverage db-url-check oidc-check grafana-oidc-check observability-oidc-check open-webui-oidc-check mealie-check sure-check crd-check namespace-check chart-values-check traefik-exposure-check tesla-forwarder-test
 	@echo "check: all offline gates passed"
 
 # The subset provable from the tree alone - no age key, no cluster, no network.
@@ -310,12 +310,24 @@ secrets-placement: secrets-present
 # Diff tiers scan ADDED lines only. A credential being deleted is the fix, not the leak
 # - and this repo's own plan history had to delete a line quoting the checker's pattern,
 # which a whole-diff grep flagged as a leak.
+#
+# ONE allow-listed public IPv4: 37.187.159.156, titan's own node address. This is a deliberate
+# exception to the "no concrete public IPv4" rule and it is named here rather than slipped in.
+# The rule exists to keep credentials and accidental addresses out of a public repo; this is
+# neither. It is the address every client dials, it is published in DNS, and a Service
+# `externalIPs` entry cannot be written as a placeholder and still work - the manifest needs the
+# literal. The alternative considered was a sops Secret merged in via HelmRelease valuesFrom, and
+# it was rejected: it buys no confidentiality for a value that is in DNS, and it puts a decryption
+# on the ingress path with a silent failure mode - a mis-named key or an empty list leaves the
+# HelmRelease Ready with nothing answering on 80/443. Precedent in this same regex: 213.186.33.99
+# (OVH's public DNS resolver) is allow-listed by name for the same kind of reason.
+# tools/traefik-exposure-check.py guards the property this address exists to provide - see there.
 leak-check:
 	@age='AGE-SECRET-KEY-1[A-Z2-9]{40,}'; pem='BEGIN [A-Z ]*PRIVATE KEY'; ssh='ssh-ed25519 AA''AA'; \
 	ovh='OVH_(APPLICATION_KEY|APPLICATION_SECRET|CONSUMER_KEY): *[A-Za-z0-9]{16,}$$'; \
 	aws='AKIA[A-Z0-9]{16}'; \
 	ip='([0-9]{1,3}\.){3}[0-9]{1,3}'; \
-	allow='(^|[^0-9.])(10\.|127\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.|100\.64\.|169\.254\.|0\.0\.0\.0|1\.1\.1\.1|8\.8\.[48]\.4|213\.186\.33\.99|224\.|255\.255\.255\.255)'; \
+	allow='(^|[^0-9.])(10\.|127\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.|100\.64\.|169\.254\.|0\.0\.0\.0|1\.1\.1\.1|8\.8\.[48]\.4|213\.186\.33\.99|37\.187\.159\.156|224\.|255\.255\.255\.255)'; \
 	shapes="$$age|$$pem|$$ssh|$$ovh|$$aws"; rc=0; \
 	if ! git rev-parse --verify HEAD >/dev/null 2>&1; then \
 	  echo "leak-check: cannot resolve HEAD - refusing to report clean"; exit 1; fi; \
@@ -598,6 +610,23 @@ backup-coverage:
 # check-ci. Set CHART_CHECK_CACHE=<dir> to keep pulled charts between runs; without it every
 # run re-downloads all nine. Its honest limits are in the tool's docstring - above all, it
 # proves the values render, not that the rendered manifest is what was meant.
+# traefik-exposure-check: prove the Flux-managed Traefik is actually reachable from outside.
+#
+# This exists because "the HelmRelease is Ready" is not the property anyone cares about. A Service
+# with an empty or mis-named externalIPs list renders fine, applies fine, and leaves the release
+# Ready while nothing answers on 80/443 - the exact shape of failure this repo keeps meeting.
+# chart-values-check proves the values render; this proves the rendered Service is the one the
+# cutover was designed to produce: ClusterIP, carrying the node address, with the traffic policy
+# that only that combination makes legal, and with the IngressClass actually claimed.
+#
+# Needs helm and the network, so it is in `check` and in the chart-gate CI job, not in check-ci.
+traefik-exposure-check:
+	@command -v helm >/dev/null 2>&1 \
+	  || { echo "traefik-exposure-check: helm is missing - refusing to report clean"; exit 1; }; \
+	python3 -c 'import yaml' >/dev/null 2>&1 \
+	  || { echo "traefik-exposure-check: PyYAML is missing (pip install pyyaml) - refusing to report clean"; exit 1; }; \
+	python3 tools/traefik-exposure-check.py
+
 chart-values-check:
 	@command -v helm >/dev/null 2>&1 \
 	  || { echo "chart-values-check: helm is missing - refusing to report clean"; exit 1; }; \
