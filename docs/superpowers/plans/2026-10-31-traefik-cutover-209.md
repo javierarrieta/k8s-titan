@@ -41,6 +41,26 @@ What D commits to, and what is therefore **out of scope for this plan to reconsi
   design. Spec §3 and pre-flight Q3.2 both say so; the fleet precedent is the VPS, where it has run
   for a year. Saying "we know" is the requirement, not re-arguing it.
 
+**Downtime budget: up to one hour, set by the operator on 2026-10-31.** This is a change to the plan's
+premises and it is recorded here rather than left as "under 60 seconds" in one paragraph. Titan's
+downtime is not critical; an hour of dark hostnames is an acceptable cost of doing this properly.
+
+What that buys, and what it does not:
+
+- **It buys slack, not sloppiness.** Every phase can now be verified slowly and deliberately instead of
+  raced. **The requirement that the new path be verified before the old one is torn down is unchanged,
+  and the requirement that a rollback exists for every phase is unchanged.** "Downtime is fine" is not
+  "checks are optional" — a slow cutover that skips §7.2 is strictly worse than a fast one that does
+  not, because the failure it produces is a black hole with a healthy pod, and no gate in this repo
+  would show it.
+- **It makes the bad paths schedulable instead of frightening.** §6's C1 fallback (let the CRD cascade
+  happen, restore from disk) is now a maintenance window with a known duration, not a panic. C3's
+  bounded-gap fallback is plainly acceptable rather than a grudging escape hatch.
+- **It does not make the cascade cheap.** Restoring 25 CRDs and the CRs that depend on them is still
+  work with a window in which every forwardAuth gate is down. It is merely *schedulable* work now.
+
+Estimated windows are stated in each phase as **estimates against this one-hour budget**, not ceilings.
+
 ### 0.1 The chart pin — and one corrected assumption
 
 **Pin: chart `41.1.1`, `image.repository: rancher/mirrored-library-traefik`, `image.tag: "3.7.8"`.**
@@ -113,13 +133,38 @@ CRDs go with the `traefik-crd` release, every `Middleware` and `IngressRouteTCP`
 cascade-deleted — **while `crd-check` and `ingress-auth` stay green, because both read
 `vendor/traefik-crds/` in this repo rather than the cluster.**
 
-**The escape hatch, and the finding that decides how it must be used.** helm-controller's
-`shouldManage()` returns false when a HelmChart carries `helmcharts.helm.cattle.io/unmanaged`, and
-that single predicate gates **both** `OnChange` and the scoped `OnRemove` handler
-(`RegisterScopedOnRemoveHandler(... c.shouldManage ...)`), so no uninstall Job is created at all.
-That upgrades the pre-flight's "medium confidence" to source-verified intent — but it is still the
-intent of a version this workspace cannot run, so **P4 proves it on a scratch cluster before anything
-touches titan.**
+**The escape hatch, and it is now proven from source at the pinned version — no scratch cluster is
+required.** k3s `v1.35.8+k3s1` pins `github.com/k3s-io/helm-controller v0.17.7`
+([go.mod](https://raw.githubusercontent.com/k3s-io/k3s/v1.35.8%2Bk3s1/go.mod), line 109 — verified
+2026-10-31, not inferred). At **that** tag, not `master`:
+
+- `pkg/controllers/chart/chart.go:59` defines `AnnotationUnmanaged = "helmcharts.helm.cattle.io/unmanaged"`.
+- `shouldManage()` (`chart.go:510`) returns false when that key is **merely present** — `chart.go:522`
+  is `if _, ok := chart.Annotations[AnnotationUnmanaged]; ok { return false, nil }`. No value parsing;
+  `=true`, `=`, any value, all identical.
+- The uninstall is therefore **double-gated**, and this is the part the pre-flight could not see:
+  1. `remove.RegisterScopedOnRemoveHandler` is registered with a scope predicate that calls
+     `c.shouldManage(helmChart)` (`chart.go:185-196`). `pkg/remove/handler.go` returns `obj, nil`
+     **without calling `onRemove`** when the scope check fails, so the remove handler is never invoked.
+  2. `OnRemove()` itself re-checks `shouldManage()` at the top (`chart.go:419-423`) and returns
+     `nil, nil` when false.
+
+  Either gate alone is sufficient. Both hold. **No uninstall Job is created, the `traefik-crd` release
+  is never uninstalled, and the 25 CRDs survive.** P4 is closed on this reading; see P4 for what it
+  still does and does not prove.
+
+**The price of the escape hatch: the finalizer is never released, and C1 must strip it by hand.**
+The same `pkg/remove/handler.go` shows why. `RegisterScopedOnRemoveHandler` wraps the handler in
+wrangler's `generic.NewRemoveHandler` (`wrangler/v3 v3.3.3`, `pkg/generic/remove.go`), and that wrapper
+is the only thing that **both adds and removes** the finalizer `wrangler.cattle.io/on-helm-chart-remove`.
+When the scope check fails, the wrapper is bypassed entirely — so nothing ever removes the finalizer it
+already added. Both `helmchart/traefik` and `helmchart/traefik-crd` on titan carry
+`finalizers: ['wrangler.cattle.io/on-helm-chart-remove']` today (confirmed live 2026-10-31). So after
+`unmanaged` is set, when k3s deletes the HelmCharts on the flag landing they **hang in `Terminating`
+indefinitely**. That is inert — helm-controller will not act on an unmanaged chart, and k3s will not
+recreate a disabled one — but it looks exactly like a stuck teardown, and it is also the reason C5's
+"`kubectl get helmchart` is empty" exit would otherwise fail. **C1 therefore strips the finalizer
+after annotating, in that order, for both charts.** The order is load-bearing and C1 explains it.
 
 **And the trap inside the trap: annotating the live CRDs with `helm.sh/resource-policy: keep` does
 nothing.** Helm's `filterManifestsToKeep` (`pkg/action/resource_policy.go`, v4.3.0) reads the
@@ -202,11 +247,12 @@ This is the check that decides whether orphaning is mandatory or merely prudent.
   **PASS (expected):** no `helm.sh/resource-policy` anywhere, `managed-by: Helm`, no
   `ownerReferences`, and exactly **25** rows. That is the dangerous result: it means the old chart's
   rendered manifest does not carry the keep annotation, so `helm uninstall` **will** delete them, and
-  the only surviving protection is P4's `unmanaged` proof.
+  the only thing that stops the uninstall happening at all is C1's `unmanaged` annotation — whose
+  mechanism is proven from source in P4, at the pinned helm-controller version.
   **PASS (lucky):** every CRD already carries `helm.sh/resource-policy: keep`. Then the old chart
-  rendered it, the annotation is in the stored manifest, and the uninstall is survivable — but P4 is
-  still run, because a keep-annotated CRD is still *deleted from the release* and left unmanaged, and
-  the IngressClass hazard is untouched either way.
+  rendered it, the annotation is in the stored manifest, and the uninstall would be survivable — but
+  C1 is still done, because a keep-annotated CRD is still *deleted from the release* and left
+  unmanaged, and the IngressClass hazard is untouched either way.
   **FAIL:** anything that names an `ownerReference` to a namespaced object, or a CRD count other than
   25. Re-read before proceeding; the model in this plan is wrong.
 - **Gates:** none (read-only).
@@ -351,46 +397,50 @@ Spec §8.2 and §8.4.
   handover safe in both directions.
   **FAIL:** the log line contains `v3.` — then assume the old release **will** delete the IngressClass
   on uninstall, and use C3's fallback.
-  **UNKNOWN:** no Job exists to read an image from. Take the image from the scratch cluster's Job spec
-  in P4 instead, and until this returns a version treat it as UNKNOWN — which makes C4's old-release
-  uninstall conditional (see C4).
+  **UNKNOWN:** no Job exists to read an image from. Read the image off the scratch cluster's Job spec
+  if one is stood up for any other reason, and otherwise treat this as UNKNOWN — which makes C4's
+  old-release uninstall conditional (see C4). P4 no longer supplies this: it is closed on source and
+  needs no scratch cluster.
 - **Gates:** none (read-only).
 
-### P4 — scratch-cluster proof that `unmanaged` actually suppresses the uninstall
+### P4 — does `unmanaged` actually suppress the uninstall? — **✅ RESOLVED 2026-10-31 from source at the pinned version. No scratch cluster needed.**
 
-**This is the highest-value task in the plan and it is not optional.** Everything in §4 assumes that
-annotating both HelmCharts `unmanaged` prevents helm-controller from running the uninstall Job. The
-pre-flight rated that medium confidence because upstream documents the annotation as "the chart is
-not updated", not "not uninstalled". The source reading in §1.1 says the predicate gates `OnRemove`
-too — but it is a reading of `master`, and titan runs a pinned build.
+This was the highest-value task in the plan, and it is now closed from source instead of from a scratch
+cluster. The pre-flight rated it medium confidence because upstream documents the annotation as "the
+chart is not updated", not "not uninstalled", and §1.1's original reading was of `master` while titan
+runs a pinned build. Both objections are gone: the reading is now of the **exact pinned version**.
 
-- **Files:** none in git. A scratch k3s at **exactly `v1.35.8+k3s1`** (the version is load-bearing:
-  the two-HelmCharts-in-one-file layout is what makes this a hazard at all).
-- **Copy:** n/a.
-- **Exit:** all four assertions hold.
+- **Files:** none. **Copy:** n/a. **Gates:** none.
+- **The evidence chain, every link at the version titan actually runs:**
 
-  1. Bring up k3s with defaults; confirm `traefik` and `traefik-crd` HelmCharts and 25 traefik CRDs.
-     ```bash
-     kubectl get helmchart -n kube-system
-     kubectl get crd --no-headers | grep -cE 'traefik\.io|hub\.traefik\.io'
-     ```
-  2. Create a `Middleware` in a non-`kube-system` namespace so a cascade is observable.
-  3. Annotate **both** charts, then disable the add-on the way titan will (flip `--disable=traefik
-     --disable=servicelb` and restart, not just `kubectl delete helmchart`):
-     ```bash
-     kubectl -n kube-system annotate helmchart traefik     helmcharts.helm.cattle.io/unmanaged=true --overwrite
-     kubectl -n kube-system annotate helmchart traefik-crd helmcharts.helm.cattle.io/unmanaged=true --overwrite
-     ```
-  4. **PASS:** after the restart, the HelmChart objects are gone, **no uninstall Job ever appears**
-     (`kubectl -n kube-system jobs` and `kubectl get events | grep -i uninstall`), the Traefik
-     Deployment and Service still exist, all 25 CRDs still exist, and the `Middleware` still resolves.
-     **FAIL:** a Job appears, or the CRDs or the `Middleware` disappear. Then §4 must be re-sequenced
-     around the fallback in §6.C1 — **do not improvise on titan.**
-  5. Also record, on the scratch cluster, whether the `unmanaged` annotation survives the k3s restart.
-     k3s re-applies bundled manifests through an `Addon` + checksum skip and does not re-create an
-     unchanged file, and it applies with its own field manager, so a `kubectl annotate` should
-     survive — but "should" is exactly what this task exists to replace.
-- **Gates:** none (scratch cluster).
+  | # | claim | source |
+  |---|---|---|
+  | 1 | k3s `v1.35.8+k3s1` pins `github.com/k3s-io/helm-controller v0.17.7` | [`go.mod` line 109](https://raw.githubusercontent.com/k3s-io/k3s/v1.35.8%2Bk3s1/go.mod) — fetched and read 2026-10-31 |
+  | 2 | `AnnotationUnmanaged = "helmcharts.helm.cattle.io/unmanaged"` | helm-controller `v0.17.7` `pkg/controllers/chart/chart.go:59` |
+  | 3 | `shouldManage()` returns false when that key is **present**, value irrelevant | `chart.go:510` (func), `:522` (`if _, ok := chart.Annotations[AnnotationUnmanaged]; ok { return false, nil }`) |
+  | 4 | the scoped remove handler's **scope predicate** calls `shouldManage`, and `RegisterScopedOnRemoveHandler` returns `obj, nil` without invoking `onRemove` when it fails | `chart.go:185-196`; `pkg/remove/handler.go` (v0.17.7) |
+  | 5 | `OnRemove()` **independently** re-checks `shouldManage()` and returns `nil, nil` | `chart.go:419-423` |
+  | 6 | wrangler's `generic.NewRemoveHandler` is the only adder/remover of `wrangler.cattle.io/on-helm-chart-remove`, and it is bypassed when the scope check fails | `rancher/wrangler/v3 v3.3.3` `pkg/generic/remove.go` (`sync`, `addFinalizer`, `removeFinalizer`) |
+
+  Two independent gates, either sufficient: the scoped handler never reaches the remove handler, and
+  even if it did, `OnRemove` returns early. **No uninstall Job is created. The CRDs survive.**
+- **What this closes.** §4 no longer needs a scratch rehearsal of the cascade, §6's C1 fallback stops
+  being a scenario to rehearse blind and becomes a contingency with a known trigger, and C1's
+  annotation is a change whose effect is known rather than hoped for.
+- **What this does NOT close — do not over-read it.**
+  1. It proves the controller's behaviour, not that **k3s deletes the HelmCharts** on `--disable=traefik`
+     in the way §1.1 describes. That is a separate k3s-side claim, still resting on the manifest-layout
+     reading in §1.1 and still observed live at C5.
+  2. It does not prove the `unmanaged` annotation **survives a k3s restart**. k3s re-applies bundled
+     manifests through an `Addon` + checksum skip with its own field manager; a `kubectl annotate`
+     should survive, and the whole point of the annotation being on the *object* rather than the file
+     is that k3s has no reason to rewrite it. C5 is where this is actually observed, and C5's exit
+     already re-checks the CRDs after the restart — that check is now the only empirical link left in
+     the chain, and it stays.
+  3. It says nothing about which **helm** the uninstall Job would have used. That is P3c, still open,
+     and it still gates C4's `helm uninstall traefik`.
+  4. It creates the finalizer problem in §1.1. Proving the uninstall is suppressed is what makes the
+     never-removed finalizer certain rather than hypothetical. C1 handles it.
 
 ### P5 — chart and proxy pin — **✅ DONE 2026-10-31**
 
@@ -778,8 +828,16 @@ remove the old path. Each phase has its own rollback in §6.
 ### C0 — freeze and snapshot
 
 - Announce the window. Take P2d's CR dump again immediately before C1 if anything changed.
-- Confirm `kubectl -n kube-system get helmchart` shows both charts, and that P4 passed on a scratch
-  cluster at the same k3s version.
+  **The window budget is one hour** (§0 premises): that is permission to work slowly and verify
+  thoroughly, not permission to skip anything.
+- Confirm `kubectl -n kube-system get helmchart` shows both charts, and that both still carry
+  `finalizers: ['wrangler.cattle.io/on-helm-chart-remove']` — C1 strips them and needs to know they
+  were there:
+  ```bash
+  kubectl -n kube-system get helmchart -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.metadata.finalizers}{"\n"}{end}'
+  ```
+  CRD survival no longer needs a scratch rehearsal: P4 is closed from source at the pinned
+  helm-controller `v0.17.7` (§1.1, P4).
 - **Take the rollback record now, before anything is deleted.** §6's C4 and C5 rollbacks both restore
   from this file, and a record taken after the deletion cannot record what it deleted.
   ```bash
@@ -797,27 +855,62 @@ remove the old path. Each phase has its own rollback in §6.
 
 ### C1 — orphan the CRDs (and the old workloads) deliberately
 
+Two changes per HelmChart, **in this order, for both `traefik` and `traefik-crd`.**
+
+**(a) Annotate `unmanaged`.** This is what stops the uninstall Job (§1.1, P4).
+
 ```bash
 kubectl -n kube-system annotate helmchart traefik     helmcharts.helm.cattle.io/unmanaged=true --overwrite
 kubectl -n kube-system annotate helmchart traefik-crd helmcharts.helm.cattle.io/unmanaged=true --overwrite
-kubectl -n kube-system get helmchart -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.metadata.annotations}{"\n"}{end}'
+```
+
+**(b) Then strip the finalizer.** With `unmanaged` set, helm-controller's scoped remove handler is
+never invoked, and wrangler's `generic.NewRemoveHandler` — the only thing that removes
+`wrangler.cattle.io/on-helm-chart-remove` — is bypassed with it. Nothing will ever release that
+finalizer, so when k3s deletes the HelmCharts on the C5 flag landing they hang in `Terminating`
+forever.
+
+```bash
+kubectl -n kube-system patch helmchart traefik     -p '{"metadata":{"finalizers":null}}' --type=merge
+kubectl -n kube-system patch helmchart traefik-crd -p '{"metadata":{"finalizers":null}}' --type=merge
+```
+
+**Why the order is not interchangeable.** `shouldManage()` is the single predicate that stops the
+controller from re-claiming the chart **and** from re-adding the finalizer on its next sync. Two
+separate mechanisms, both driven by it: `shouldManage()` itself patches
+`helmcharts.cattle.io/managed-by` onto the chart when the annotation is absent (`chart.go:533-542`, the
+claim path), and wrangler's `sync()` calls `addFinalizer` on **every** sync where the object has no
+deletionTimestamp and lacks the finalizer — not only on delete. Strip the finalizer **first** and there
+is a window in which the chart is still managed: the next sync re-adds the finalizer, and the next
+deletion then runs a real `OnRemove` — the uninstall Job, the cascade, everything C1 exists to prevent.
+Annotate first, always.
+
+**(c) Verify.**
+
+```bash
+kubectl -n kube-system get helmchart -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.metadata.annotations}{"\t"}{.metadata.finalizers}{"\t"}{.metadata.deletionTimestamp}{"\n"}{end}'
 ```
 
 - **This is a live, git-invisible change to objects this repo does not own.** It is not the
   HelmRelease drift AGENTS.md warns about — those are Flux's — but it is still out-of-band and must be
   written into the PR body and the runbook, because `make dry-run` cannot see it and `driftDetection`
-  will never report it.
-- **Exit — and it deliberately proves less than it looks like it should.** The only thing C1 changes is
-  the presence of two annotations, so that is the only thing C1 can assert: **both HelmCharts carry
-  `helmcharts.helm.cattle.io/unmanaged=true` in that output, and no `helm-install-*`/`helm-delete-*`
-  Job appeared.** That is all. Annotating the HelmCharts does not delete anything, so "the 25 CRDs are
-  still there" and "the Middleware still resolves" are **true before C1 runs and would be true if the
-  annotation did nothing** — asserting them here is a tautology and must not be mistaken for evidence.
-  **CRD survival is proven by P4 on a scratch cluster at the same k3s version, and re-proven live at
-  C5**, where the flag actually lands and the check already sits. Do not record C1 as "CRD survival
-  confirmed".
-- **If the annotation is absent or a Job appears** — **stop** and use §6.C1's fallback. Do not continue
-  into C2 on a cluster whose CRD survival rests on an annotation that did not take.
+  will never report it. Record both the annotation and the finalizer removal, not just the annotation.
+- **Exit — falsifiable, and it asserts only what C1 actually changes.** In the output above, for
+  **both** HelmCharts:
+  1. the `helmcharts.helm.cattle.io/unmanaged` key is present in the annotations column;
+  2. the finalizers column is **empty**;
+  3. the deletionTimestamp column is empty — `kubectl -n kube-system get helmchart` shows **no object
+     carrying a `deletionTimestamp`**, i.e. nothing is already stuck in `Terminating`.
+  Plus: no `helm-install-*`/`helm-delete-*` Job appeared.
+  **FAIL:** any chart still showing a finalizer (the patch did not land, or it ran before the
+  annotation and was re-added — re-run (a) then (b)), or any Job appeared. Do not continue into C2.
+- **What C1 does NOT prove, and must not be recorded as proving.** "The 25 CRDs are still there" and
+  "the Middleware still resolves" are true before C1 runs and would be true if both changes did
+  nothing — asserting them here is a tautology. CRD survival rests on P4's source proof and is
+  **observed live at C5**, where the flag lands and the check already sits.
+- **If a chart is stuck `Terminating`** — expected if step (b) was skipped or ran too late — patch the
+  finalizer to null (see §6). It is safe precisely because `unmanaged` is set: with the scope check
+  failing, releasing the finalizer cannot cause an uninstall, because there is no handler left to run.
 
 ### C2 — land PR 1 and verify the new Traefik internally
 
@@ -868,7 +961,7 @@ kubectl -n traefik-system run probe --rm -i --restart=Never --image=curlimages/c
   `kubectl -n kube-system get deploy traefik -o jsonpath='{.spec.replicas}'` is unchanged.
 - **Gates:** `make check-ci`, `make chart-values-check`, `make dry-run`.
 
-### C3 — hand over the IngressClass, with no gap
+### C3 — hand over the IngressClass. Preferred path: no gap at all
 
 Two Helm releases cannot both own `IngressClass/traefik`, and Helm refuses to install over an object it
 does not own. The fix is Helm's own adoption rule, read from `pkg/action/validate.go` (v4.3.0):
@@ -880,7 +973,9 @@ does not own. The fix is Helm's own adoption rule, read from `pkg/action/validat
 
 and helm v4's `verifyOwnershipBeforeDelete` then makes the **old** release skip that object when it is
 uninstalled. So the handover is safe in both directions, and there is no window in which the
-IngressClass is missing.
+IngressClass is missing. **This remains the preferred path** — a handover nobody notices is better than
+a gap anyone has to explain — but with the one-hour budget (§0) a gap is no longer a failure, so the
+fallback below is a legitimate plan rather than a last resort.
 
 ```bash
 # 0. escape hatch first. `stage-infra.yaml` runs wait:true / timeout:10m0s and every later stage
@@ -916,10 +1011,13 @@ changes — `docs/flux-manual-sync.md`).
   brake, not a substitute for the adoption succeeding — C3 is not done until `flux get hr traefik`
   reports the release Ready with the new generation.
 - **Fallback if adoption is refused** (P3c said helm 3.x, or the install errors "exists and cannot be
-  imported"): accept a **bounded** gap instead of an unbounded one — delete `ingressclass traefik`
-  immediately after the phase-B commit is applied and sync immediately, so the class is absent for
-  seconds rather than minutes. State the gap in the PR. Do not leave two releases fighting over one
-  object.
+  imported"): take the **gap**. Delete `ingressclass traefik`, apply the phase-B commit, sync, and let
+  the class come back with the new release. With the one-hour downtime budget (§0) a few minutes of dark
+  hostnames is an acceptable outcome and this is a legitimate plan, not an escape hatch — the only
+  thing still to avoid is an *unbounded* gap, i.e. two releases left fighting over one object, or a
+  class deleted with the new release not yet Ready. Still prefer the adoption above: it is strictly
+  better and costs nothing extra. Either way, state in the PR what the class was absent for and for how
+  long.
 - **Gates:** `make chart-values-check`, `make dry-run`.
 
 ### C4 — move the address and remove the old path. **This is the outage.**
@@ -929,9 +1027,16 @@ The two paths cannot be trusted side by side on one node address: `svclb-traefik
 DNAT the same `node:80`/`node:443` in `nat PREROUTING`. Overlapping them is an ambiguity, not a
 graceful handover. So the swap is deliberate and short.
 
-**Outage window:** from the moment the old path is torn down (step 1) until kube-proxy programs the
-externalIPs rules (step 2, already applied and synced). **Plan for under 60 seconds.** Pre-stage the
-phase-B commit before starting so step 2 is a sync, not an edit.
+**Outage window — an estimate, not a ceiling.** From the moment the old path is torn down (step 1) until
+kube-proxy programs the externalIPs rules (step 2, already applied and synced), the realistic estimate
+is **under a minute**. The operator's budget is **one hour** (§0), so there is no reason to race: if
+step 2 does not land cleanly, stop, diagnose, and take the time the diagnosis needs. Pre-stage the
+phase-B commit before starting so step 2 is a sync, not an edit — that is about removing avoidable
+risk, not about beating a clock.
+
+**What the budget does not buy:** the right to tear down the old path before the new one is proven. C2's
+routing proof and §7.2 stay exactly where they are. A one-hour budget is permission to verify slowly,
+not permission to verify less.
 
 **Affected hostnames: all of them — derive the list, do not type it.** §1 already requires that any
 count of affected hostnames come from the cluster, and a tree-derived list is exactly the blind spot
@@ -1026,9 +1131,20 @@ bundled Traefik is an unmanaged orphan, which is exactly the state the transitio
 Expect a k3s restart when the flags change. The control plane blips; the data plane and the new
 Traefik pod keep serving.
 
+This is also where the plan's one remaining empirical unknown is settled: whether the `unmanaged`
+annotation **survives the restart** and k3s does not re-claim the charts. P4 proves the controller's
+logic from source; it cannot prove that k3s leaves the annotation alone across a restart. The CRD and
+Middleware checks below are what actually observe that.
+
+The HelmChart objects should be **gone**, not `Terminating` — because C1(b) released their finalizers.
+If they are stuck, that is §6's "HelmChart stuck Terminating" row, and it is also why C5's exit below
+would otherwise never be reachable.
+
 - **Exit:** `ps -o args= -C k3s | tr ' ' '\n' | grep disable` shows `traefik` and `servicelb`;
-  `kubectl -n kube-system get helmchart` is empty; the 25 CRDs and the 3 Middlewares still exist;
-  `kubectl -n kube-system get ds,pod | grep svclb-` is empty.
+  `kubectl -n kube-system get helmchart` is **empty** (not merely Terminating — a Terminating chart with
+  a finalizer still on it is C1(b) not having run); the 25 CRDs and the 3 Middlewares still exist;
+  `kubectl -n kube-system get jobs` shows no `helm-delete-*` Job; `kubectl -n kube-system get ds,pod
+  | grep svclb-` is empty.
 - **Gates:** `nix`'s own.
 
 ### C6 — post-cutover hygiene
@@ -1052,7 +1168,7 @@ Traefik pod keep serving.
 | order | repo | PR | why here |
 |---|---|---|---|
 | **1** | `titan` | `apply/20-infra/traefik/` + namespace + kustomization line, **phase-A values**, plus a note in the PR saying why `vendor/traefik-crds/` is deliberately untouched (T1) | It is the only change that can land with zero user-visible effect, and every later step is a rollback away only if it is already in place and proven. Landing anything else first means the first risky step happens before the new path exists. |
-| — | live | **C1** — annotate both HelmCharts `unmanaged` | Must precede the flag that deletes the HelmCharts. This is the CRD-survival precondition and it is not negotiable. |
+| — | live | **C1** — annotate both HelmCharts `unmanaged`, **then strip their finalizers** | Must precede the flag that deletes the HelmCharts. This is the CRD-survival precondition and it is not negotiable; the finalizer strip is what lets the HelmCharts actually go away instead of hanging `Terminating` (C1 explains why the order matters). |
 | **2** | `titan` | phase B: `ingressClass.enabled: true`, `publishedService.enabled: true`, `service.spec.externalIPs` — preceded by the IngressClass ownership patch | The address move and the old-path teardown are one window; the IngressClass handover is gap-free only if it happens while the old release is still installed but no longer owns the object. This PR is landed and synced as **C3**, and the address actually moves in **C4**. |
 | — | live | **C4** — the outage: `externalIPs` go live, the old Deployment/Service are removed by hand | Everything user-visible happens here, once. |
 | **3** | `nix` | `disable = [ "traefik", "servicelb" ]` + comment + `ingressTCPPorts` description | **Deliberately after C4, not before.** See the note below. |
@@ -1076,13 +1192,14 @@ and the only rollback is "undo everything".
 
 | phase | what to undo | how | what it costs |
 |---|---|---|---|
-| **C1** | the `unmanaged` annotations | `kubectl -n kube-system annotate helmchart <c> helmcharts.helm.cattle.io/unmanaged-` | Nothing, **as long as the flag has not landed**. Once `--disable=traefik` is live the HelmCharts are gone and the annotation is moot — but say precisely what that costs: the CRDs survive from C5 onwards because the release records went with them, **not** because anything is still guarding them. The `traefik-crd` release record is deliberately kept (§1.1), so from C1 the only thing standing between a stray `helm uninstall` and a 25-CRD cascade is the warning in §1.1 and the discipline in C4. |
-| **C1 fallback** | if `unmanaged` did **not** suppress the uninstall | Let the cascade happen, then restore: `kubectl apply` the 25 CRDs from 41.1.1's `crds/` (already on disk from P5's `helm pull`), wait for establishment, then `kubectl apply -f /tmp/traefik-cr-dump-*.yaml` to restore the Middlewares and the IngressRouteTCP. | A real outage **and** a window in which the forwardAuth middlewares do not exist. Traefik disables a router whose middleware is missing, so gated hosts answer 404 rather than serving open — bad, not catastrophic. Schedule it as a full outage, not a swap. **If P4 failed, do this on the scratch cluster first.** |
+| **C1** | the `unmanaged` annotations | `kubectl -n kube-system annotate helmchart <c> helmcharts.helm.cattle.io/unmanaged-` | Nothing, **as long as the flag has not landed**. The controller resumes managing the chart and re-adds `wrangler.cattle.io/on-helm-chart-remove` on its next sync, so the finalizer strip needs no separate undo. Once `--disable=traefik` is live the HelmCharts are gone and the annotation is moot — but say precisely what that costs: the CRDs survive from C5 onwards because the release records went with them, **not** because anything is still guarding them. The `traefik-crd` release record is deliberately kept (§1.1), so from C1 the only thing standing between a stray `helm uninstall` and a 25-CRD cascade is the warning in §1.1 and the discipline in C4. |
+| **C1 — HelmChart stuck `Terminating`** | the finalizer was never released (step (b) skipped, or run before the annotation and re-added) | `kubectl -n kube-system patch helmchart <c> -p '{"metadata":{"finalizers":null}}' --type=merge` | Nothing, **and this is safe only because `unmanaged` is set.** With the scope check failing there is no remove handler left to invoke, so releasing the finalizer deletes the object without running an uninstall. Do the annotation first, always; patching finalizers on a *managed* chart is exactly how you fire the Job by hand. The object is inert either way — helm-controller will not touch an unmanaged chart and k3s will not recreate a disabled one — so this is tidiness, not damage control, but it will look like a stuck teardown to whoever is watching. |
+| **C1 fallback** | the CRD cascade actually happened (P4's reading wrong in some way the source did not show) | Let it happen, then restore: `kubectl apply` the 25 CRDs from 41.1.1's `crds/` (already on disk from P5's `helm pull`), wait for establishment, then `kubectl apply -f /tmp/traefik-cr-dump-*.yaml` to restore the Middlewares and the IngressRouteTCP. | **Now a schedulable maintenance window, not a panic** — the one-hour budget (§0) covers it comfortably, and P4's source proof makes it very unlikely. It is still a real outage with a window in which the forwardAuth middlewares do not exist: Traefik disables a router whose middleware is missing, so gated hosts answer 404 rather than serving open. Schedule it as a full outage, not a swap, and rehearse the restore rather than improvising it. |
 | **C2** | the new release | revert PR 1; Flux uninstalls it | Nothing user-visible. The old path never stopped. |
 | **C3** | the IngressClass handover | re-point the two `meta.helm.sh/*` annotations back to `traefik`/`kube-system`, set `ingressClass.enabled: false`, sync | Brief confusion; the object is never absent, so no Ingress goes unserved. |
 | **C4** | the address move | remove `externalIPs` from the values and sync; re-create the old `Service type: LoadBalancer` in `kube-system` from the **C0 record** (`/tmp/kube-system-traefik-<date>.yaml`) so ServiceLB re-provisions its DaemonSet | A second outage of similar length. **Two hard preconditions.** This rollback exists only **while `servicelb` is still enabled**, i.e. before PR 3 lands — which is why §5 puts PR 3 after C4 and not before. And re-creating the Service needs an **admin context**, as does C4's `helm uninstall`, because Helm release records are Secrets and `k8s-reader` cannot read them. |
-| **C5** | the flags | revert PR 3, restart k3s | Restores the bundled Traefik **only if** its resources were never uninstalled. After C4 deleted the old Deployment/Service by hand, rollback means re-applying them from the **C0 record**, not just flipping the flag. That record was taken in C0 precisely so that it exists before the deletion it is for. |
 | **C4 — old release uninstall** | `helm -n kube-system uninstall traefik` deleted `IngressClass/traefik` (the helm-3 case P3c cannot rule out) | Re-create the class from the phase-B chart output (`helm template` of the pinned 41.1.1 with `ingressClass.enabled: true`, or `kubectl apply` the single rendered `IngressClass` document), then `flux -n traefik-system reconcile hr traefik --with-source` and confirm the ownership annotations landed. | A second full outage of the same length, on every hostname, with a healthy Traefik pod the whole time — which is what makes it confusing rather than merely bad. This is why C4 gates the uninstall on §7 and on P3c. |
+| **C5** | the flags | revert PR 3, restart k3s | Restores the bundled Traefik **only if** its resources were never uninstalled. After C4 deleted the old Deployment/Service by hand, rollback means re-applying them from the **C0 record**, not just flipping the flag. That record was taken in C0 precisely so that it exists before the deletion it is for. |
 | **any** | everything | `git revert` each PR in reverse order | Only works phase-by-phase. There is no single revert that undoes a live cutover. |
 
 ---
@@ -1198,14 +1315,16 @@ ADDR:.status.loadBalancer.ingress[0].ip
 
 ## 8. Open questions — what could not be settled from this repo
 
-These are the honest gaps. None of them blocks writing this plan; **P1–P4 must be answered before C1
-runs**, and the rest before C4.
+These are the honest gaps. None of them blocks writing this plan; **P1–P3 must be answered before C1
+runs**, and the rest before C4. (P4 used to be on that list. It is closed from source.)
 
-1. **Does `helmcharts.helm.cattle.io/unmanaged` suppress the uninstall Job on the helm-controller
-   build shipped in `v1.35.8+k3s1`?** Source on `master` says yes — `shouldManage()` gates the scoped
-   `OnRemove` handler as well as `OnChange` — but that is a reading of `master`, and the pre-flight
-   rated it medium confidence for good reason. **P4 is the answer.** If P4 fails, §6's C1 fallback is
-   a full outage, not a swap, and this plan must be re-sequenced rather than improvised around.
+1. ~~**Does `helmcharts.helm.cattle.io/unmanaged` suppress the uninstall Job on the helm-controller
+   build shipped in `v1.35.8+k3s1`?**~~ **Resolved 2026-10-31 from source at the pinned version — see
+   P4 and §1.1.** k3s `v1.35.8+k3s1` pins helm-controller `v0.17.7`; at that tag the uninstall is
+   double-gated by `shouldManage()` (the scoped remove handler's predicate, and `OnRemove`'s own
+   re-check), so no uninstall Job is created and the CRDs survive. No scratch cluster needed. **The one
+   thing still not proven empirically** is that the annotation survives a k3s restart — C5's CRD and
+   Middleware checks are where that is actually observed, and they stay.
 2. **Do the live traefik CRDs carry `helm.sh/resource-policy: keep`?** P1. Expected answer: no. Note
    that "no" cannot be fixed by annotating them — helm reads that annotation from the stored release
    manifest, never from the live object.
@@ -1239,21 +1358,23 @@ runs**, and the rest before C4.
    spec's D5 and the ingress-ownership decision doc now state the version distance in plain terms
    instead of citing an undefined finding id, so there is nothing left to repair and no meaning for
    this plan to invent. Recorded here only so the history is visible.
-10. **`review/209-preflight-findings.md` and `review/209-plan-review.md` are untracked** in this
-    workspace (`git status` shows `?? review/`). This plan cites them heavily. **Assignment: both files
-    land in PR 4** (the titan CRD re-vendor + `AGENTS.md` + runbook PR), under `docs/` — the durable
-    parts of the pre-flight findings belong in the cutover runbook, and the review belongs beside it —
-    and every `review/…` citation in this plan is rewritten to the committed path in the same PR. They
-    must not be cited from PR 1–PR 3 as though they existed on `main`, because they do not. If PR 4 is
-    ever landed before this plan is executed, the citations in PR 1's PR body should quote the relevant
-    finding inline instead of pointing at a path.
-11. **The ServiceLB finalizer string is not known from this repo.** C4 deletes the old `Service type:
-    LoadBalancer`, and if k3s's embedded cloud provider does not clear the finalizer the Service sits
-    `Terminating` forever and the outage does not end. The plan says "remove the finalizer explicitly"
-    but cannot name the string, because it is set by k3s' cloud controller, not by anything in this
-    tree. **P2a must capture it** — `kubectl -n kube-system get svc traefik -o jsonpath='{.metadata.finalizers}'`
+10. ~~**`review/209-preflight-findings.md` and `review/209-plan-review.md` are untracked.**~~
+    **Resolved 2026-10-31: both are committed under `review/`** (commit `11cbe45`), so every `review/…`
+    citation in this plan and in the pre-flight resolves against `main`. The original concern — a
+    committed plan citing a file that does not exist on `main`, the same class as an unlisted manifest —
+    is gone, and the files stay where they are rather than moving under `docs/`: they are review
+    artefacts, not runbook material. What PR 4 still owes is the durable *content* — the pre-flight's
+    load-bearing findings belong restated in the cutover runbook, because a runbook that cites a review
+    thread is a runbook that has to be read next to a review thread.
+11. **The ServiceLB finalizer string on the old `Service` is not known from this repo.** C4 deletes the
+    old `Service type: LoadBalancer`, and if k3s's embedded cloud provider does not clear the finalizer
+    the Service sits `Terminating` forever and the outage does not end. The plan says "remove the
+    finalizer explicitly" but cannot name the string, because it is set by k3s' cloud controller, not by
+    anything in this tree. **P2a must capture it** — `kubectl -n kube-system get svc traefik -o jsonpath='{.metadata.finalizers}'`
     — and the exact value belongs in the C4 PR body, so the operator is not guessing it live under an
-    outage clock. Treat it as an owned open item, not a detail.
+    outage clock. Treat it as an owned open item, not a detail. **Do not confuse this with the
+    `HelmChart` finalizer** (`wrangler.cattle.io/on-helm-chart-remove`), which *is* known and confirmed
+    live, and which C1 strips. Two different objects, two different owners, two different fixes.
 
 ### 8.1 Constraints honoured, restated so a reviewer can check them in one pass
 
