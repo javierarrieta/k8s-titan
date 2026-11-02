@@ -22,4 +22,8 @@ resources:
   - reflector/reflector.yaml
   - reloader/reloader.yaml
   - cnpg/operator.yaml
+  # Titan's ingress path, Flux-owned. Phase A installs a second Traefik that receives no
+  # traffic; the k3s-bundled one is still the live path. See the file's header for why this
+  # lives in 20-infra and why a not-Ready release here blocks every later stage.
+  - traefik/traefik.yaml
   - storage-retain.yaml
