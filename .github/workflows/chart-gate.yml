@@ -55,3 +55,6 @@ jobs:
       # granted - nowhere else, and not by widening offline-gate.
       - name: make chart-values-check
         run: make chart-values-check
+
+      - name: make traefik-exposure-check
+        run: make traefik-exposure-check
