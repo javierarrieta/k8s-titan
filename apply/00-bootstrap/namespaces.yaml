@@ -223,3 +223,25 @@ metadata:
   annotations:
     kubernetes.io/metadata.name: sure
     kubernetes.io/description: "Sure personal-finance tracker, authenticated by authentik, data in the shared CNPG cluster"
+---
+# Titan's Flux-managed Traefik, replacing the k3s-bundled one (issue #209). It is infrastructure
+# rather than an app, so it sits in the `20-infra` stage next to cert-manager, Reflector and the CNPG
+# operator, each of which has its own namespace declared here for the same reason.
+#
+# The pod-security answer is the same one `coder` and `monitoring` give: warn, not enforce. The
+# 41.1.1 chart's default containerSecurityContext (drop ALL, runAsNonRoot, readOnlyRootFilesystem,
+# no privilege escalation) already satisfies `restricted`, so this label carries a warning category
+# with no warnings behind it. That was checked against the rendered pod spec rather than assumed -
+# `open-webui` and `files` deliberately omit the label with a comment saying why, and an
+# undocumented absence is what those comments exist to prevent.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: traefik-system
+  labels:
+    name: traefik-system
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: latest
+  annotations:
+    kubernetes.io/metadata.name: traefik-system
+    kubernetes.io/description: "Flux-managed Traefik, the cluster's ingress path (issue #209)"

@@ -1,0 +1,169 @@
+# Titan's ingress path, owned by Flux. Issue #209; the reasoning is in
+# docs/superpowers/specs/2026-10-31-titan-ingress-ownership-decision.md and the runbook in
+# docs/superpowers/plans/2026-10-31-traefik-cutover-209.md. Read those before editing this file —
+# several values here look arbitrary and are not.
+#
+# This is PHASE A: it installs a second Traefik that receives no traffic. The old k3s-bundled one is
+# still the live path, still owns the `traefik` IngressClass, and still answers on 80/443. Nothing
+# here is user-visible, which is exactly why it is the first PR to land. Phase B (the externalIPs and
+# IngressClass handover) is a separate change with its own rollback, because the moment the address
+# moves is the moment this becomes load-bearing.
+#
+# WHY NOT kube-system. k3s's bundled HelmChart already owns a Helm release named `traefik` there,
+# and two owners for one release name is a mess no later commit cleans up. `traefik-system` also
+# matches the sibling box, which is the precedent this whole design rests on.
+#
+# WHY THIS PIN. Chart 41.1.1 is the floor, not a preference: the parity pin (upstream 40.1.0, to
+# match k3s's bundled 40.1.4+up40.1.0) cannot render at all, because 40.1.0 ships a
+# proxy-max-version guard that rejects Traefik 3.7.8 as a hard error. Rancher's repackaging is the
+# only reason that pairing works on the bundled install. The proxy itself stays bit-identical to
+# today (rancher/mirrored-library-traefik:3.7.8) because the cutover already changes five things —
+# controller ownership, exposure mechanism, externalTrafficPolicy, dashboard state, namespace — and
+# a sixth simultaneous change means a regression cannot be attributed to plumbing or to Traefik.
+# The 3.7.8 -> 3.7.16 bump is its own later PR, after this is proven.
+#
+# BLAST RADIUS, said out loud because it is severe. apply/00-bootstrap/stage-infra.yaml runs
+# `wait: true` with `timeout: 10m0s`, stage-certificates dependsOn infra, and stage-apps dependsOn
+# certificates. A Traefik HelmRelease that will not go Ready therefore blocks certificate renewals,
+# every app, the whole tesla stage, and the restic backups. cert-manager's own comment states this
+# cost; Traefik inherits it exactly.
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: HelmRepository
+metadata:
+  name: traefik
+  namespace: traefik-system
+spec:
+  interval: 1h
+  url: https://traefik.github.io/charts
+---
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: traefik
+  namespace: traefik-system
+spec:
+  # Named explicitly, not left to Flux's default. The IngressClass handover in C3 writes
+  # meta.helm.sh/release-name and release-namespace onto the live object, and those strings must
+  # match what the release actually is or the adoption silently points at a release that does not
+  # exist. Flux's default would produce `traefik`, but a handover that hard-codes an annotation must
+  # not depend on a default it never names.
+  releaseName: traefik
+  chart:
+    spec:
+      chart: traefik
+      version: "41.1.1"
+      sourceRef:
+        kind: HelmRepository
+        name: traefik
+  interval: 30m
+  driftDetection:
+    mode: enabled
+  install:
+    # `Create`, NOT cert-manager's `CreateReplace`. The chart ships its 25 CRDs in crds/, and
+    # CreateReplace would replace all of them as a side effect of any values upgrade — mid-cutover,
+    # on the objects every Middleware and IngressRouteTCP in this cluster depends on. CRD refresh is
+    # an explicit, separately-reviewed kubectl apply instead (plan step C6).
+    crds: Create
+    strategy:
+      name: RetryOnFailure
+      retryInterval: 5m
+  upgrade:
+    crds: Create
+    strategy:
+      name: RetryOnFailure
+      retryInterval: 5m
+  values:
+    image:
+      registry: docker.io
+      repository: rancher/mirrored-library-traefik
+      tag: "3.7.8"
+
+    # Phase A: the old chart still owns the IngressClass. Claiming it here fails the install with
+    # AlreadyExists, and uninstalling the old chart first leaves every ingressClassName: traefik
+    # Ingress unserved in the gap. C3 hands it over instead. `name: traefik` is set so that when
+    # phase B flips enabled to true the object it creates is the one the Ingresses already name.
+    ingressClass:
+      enabled: false
+      isDefaultClass: true
+      name: traefik
+
+    # STRICTER than today, not equivalent. The live kube-system/traefik Deployment carries
+    # --api.dashboard=true and --ping=true, so the dashboard is ENABLED and merely unreachable
+    # (:8080 is not in the Service and no IngressRoute exists). Do not describe this line as matching
+    # current behaviour; it does not. --ping=true is not a values key at all — the chart hardcodes
+    # it and the probes use it — so it stays either way.
+    api:
+      dashboard: false
+
+    ports:
+      websecure:
+        http:
+          tls:
+            # Already the chart default, set explicitly because today's Deployment really does carry
+            # --entryPoints.websecure.http.tls=true and this must not depend on a default surviving
+            # a chart bump. investing-agent and llm pin router.entrypoints: websecure; without TLS
+            # termination there the dashboard would answer on cleartext.
+            enabled: true
+
+    service:
+      # Deliberately NO helm.sh/resource-policy: keep. On a cloud LoadBalancer that annotation earns
+      # its place by preserving an IP the provider allocated. There is no allocated IP: the externalIP
+      # is the node's own statically-configured address, and it survives whatever happens to this
+      # object. What keep WOULD do is worse than useless — a kept Service carrying externalIPs
+      # outlives the release that made it, so a later uninstall leaves the public address DNAT-ing to
+      # endpoints that no longer exist. With externalTrafficPolicy: Local and zero local endpoints,
+      # kube-proxy has nowhere to send the packet: the host stops answering on 80/443 while
+      # `kubectl get svc` still shows the address and nothing owns it. Letting Helm delete the
+      # Service on uninstall is correct, and it is the default.
+      #
+      # Everything goes under spec. service.spec is a verbatim passthrough (templates/_service.tpl
+      # renders toYaml .service.spec plus the chart's own selector). The OLD top-level service.type
+      # is NOT read by 41.x — it is silently ignored and the chart default renders instead, with no
+      # error. Chart PR #1686 moved type, externalIPs and ipFamilyPolicy here.
+      spec:
+        # Phase A: ClusterIP with no externalIPs, so nothing reaches this Traefik from outside.
+        # Phase B adds externalIPs: [<TITAN_PUBLIC_IP>] — the node's own address, which is why no
+        # LoadBalancer controller and no MetalLB is needed at all.
+        type: ClusterIP
+        # Chosen, not inherited. Both titan today and the sibling box run Cluster, which SNATs, so
+        # Traefik has never seen a real client source IP here. On a single node Local is safe and
+        # restores it; that is half the reason this exposure mechanism was picked. The footgun is
+        # written down: the day a second node appears or this pod is unschedulable, Local drops all
+        # traffic instead of load-balancing.
+        externalTrafficPolicy: Local
+        ipFamilyPolicy: PreferDualStack
+
+    providers:
+      kubernetesIngress:
+        publishedService:
+          # Phase A: with no externalIPs, publishing would copy this Service's ClusterIP into every
+          # Ingress .status while the old Traefik is still the real path. Turn it on in C4 together
+          # with externalIPs, so the status only ever moves to an address that actually answers.
+          enabled: false
+
+    priorityClassName: system-cluster-critical
+    tolerations:
+      - key: "CriticalAddonsOnly"
+        operator: "Exists"
+      - key: "node-role.kubernetes.io/control-plane"
+        operator: "Exists"
+        effect: "NoSchedule"
+
+    accessLog:
+      # Top-level accessLog, NOT logs.accessLog — that block is 40.x and 41.x rejects it at render
+      # time under the chart's root-strict values.schema.json. Enabled because it is the only way to
+      # prove the client source IP actually survives, which is the point of externalTrafficPolicy.
+      enabled: true
+
+    # Deliberately NOT set, with the reason:
+    #   deployment.podAnnotations prometheus.io/*  — k3s sets these because Rancher bundles a
+    #     Prometheus. titan runs none; casa scrapes by target over the mesh. Inert config is noise,
+    #     not parity.
+    #   providers.kubernetesCRD.allowCrossNamespace / crossProviderNamespaces — no middleware
+    #     reference in this tree crosses a namespace boundary (plan step P2c proves it per-object).
+    #   ports.web.http.redirections.entryPoint — there is no HTTP->HTTPS redirect today and the chart
+    #     adds none by default. Adding one is a behaviour change nobody asked for.
+    #   tlsStore / defaultCertificate — every Ingress carries spec.tls with a Secret in its own
+    #     namespace, and today's install has no default certificate either. If one is ever wanted it
+    #     means adding traefik-system to the secretTemplate allow-list in
+    #     apply/40-certificates/titan-wildcard.yaml, never copying the Secret by hand.
