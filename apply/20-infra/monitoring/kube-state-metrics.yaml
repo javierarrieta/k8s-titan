@@ -98,6 +98,17 @@ spec:
         - apiGroups: ["kustomize.toolkit.fluxcd.io"]
           resources: ["kustomizations"]
           verbs: ["list", "watch"]
+        # Needed by the cnpg customResourceState block below and nothing else. Same scope
+        # discipline as the kustomizations grant: list/watch on the two kinds whose applied
+        # state is worth an alert, not the whole cnpg API surface. The subject is
+        # system:serviceaccount:monitoring:kube-state-metrics (verified live; the release is
+        # named `ksm` but fullnameOverride pins the SA name). What this PR cannot verify
+        # before merge is the grant itself -- the honest check is after Flux syncs, when
+        # `cnpg_database_role_info` either appears in casa or does not; silence here means
+        # the grant did not take, not that nothing is wrong.
+        - apiGroups: ["postgresql.cnpg.io"]
+          resources: ["databaseroles", "databases"]
+          verbs: ["list", "watch"]
     # Emits `gotk_resource_info`, one Info series per Kustomization, carrying the
     # Ready condition. This is how titan gets Flux alerting: titan runs no
     # Prometheus, k8s-casa scrapes this Service through the apiserver proxy
@@ -149,6 +160,82 @@ spec:
                     suspended: [spec, suspend]
                     revision: [status, lastAppliedRevision]
                     source_name: [spec, sourceRef, name]
+    # CNPG `DatabaseRole` and `Database`, the same trick one API group over, because
+    # `status.applied` is the only field that says the Postgres role or database was actually
+    # created, and nothing anywhere checked it. #154 was the mirror-image problem -- a stale
+    # `status.message` that meant nothing; the gap then, and the subject of #231, is that a
+    # role which genuinely fails to apply is invisible. Every offline gate in k8s-titan is
+    # tree-only by contract, so `applied` cannot be checked by `make check-ci`; this is the
+    # half that asks the live cluster.
+    #
+    # Cost, measured 2026-11-03: 7 DatabaseRole + 6 Database on titan = 13 Info series at
+    # casa's 60s scrape. The Flux block above carries 5. Nowhere near the scrape's 150000
+    # sampleLimit.
+    #
+    # `applied` IS TRI-STATE AND THE RULES MUST MATCH IT. Upstream sets true (SetAsReady),
+    # false (SetAsFailed) and NULL (SetAsUnknown) -- so a rule written `applied="false"`
+    # silently misses the never-evaluated case. Write `applied!="true"`, which matches
+    # false and absent-or-null alike, and say why in casa's rule.
+    #
+    # `pg_cluster`, NOT `cluster`. casa's scrape already stamps every series with
+    # `cluster="titan"`; emitting a label of that name from the object would collide with it,
+    # and a duplicate label on an ingested sample makes the sample invalid -- dropped, not
+    # renamed. A dropped alert series is indistinguishable from an absent one, so this is a
+    # silent-failure trap, and it is the same class as the `exported_namespace` note below.
+    #
+    # `status.message` is deliberately NOT exported. #154 exists because that field can be a
+    # historical artifact; a label copied from it would produce alerts that mean nothing.
+    # Alert on `applied`, then read `message` with kubectl for diagnosis.
+    #
+    # NOT COVERED, stated so it is not mistaken for coverage: `applied: true` means CNPG
+    # created the role. It does not mean the app can connect -- wrong database name, wrong
+    # search_path, a pg_hba surprise are all still invisible here. And `Cluster` health is not
+    # exported either; that is casa's postgres-titan-guards.yaml and the CNPG operator's own
+    # metrics, not this block.
+    #
+    # RBAC for this lives in rbac.extraRules above. If the grant is removed the failure mode
+    # is silence, not an error: KSM logs the forbidden watch and emits no series.
+    #
+    # These two entries are APPENDED to the `resources` list above, they are not a second
+    # `customResourceState:` key. A second key at this level would not add to the list -- YAML
+    # mapping keys are last-one-wins, so it would silently delete the Flux block and every
+    # Flux alert from titan while this file still read correctly. Verified after the merge,
+    # not before: the rendered values carry three resources under one list.
+            - groupVersionKind:
+                group: postgresql.cnpg.io
+                version: v1
+                kind: DatabaseRole
+              metricNamePrefix: cnpg
+              metrics:
+                - name: "database_role_info"
+                  help: "The applied state of a CloudNativePG DatabaseRole."
+                  each:
+                    type: Info
+                    info:
+                      labelsFromPath:
+                        name: [metadata, name]
+                  labelsFromPath:
+                    exported_namespace: [metadata, namespace]
+                    applied: [status, applied]
+                    pg_cluster: [spec, cluster]
+                    reclaim_policy: [spec, databaseRoleReclaimPolicy]
+            - groupVersionKind:
+                group: postgresql.cnpg.io
+                version: v1
+                kind: Database
+              metricNamePrefix: cnpg
+              metrics:
+                - name: "database_info"
+                  help: "The applied state of a CloudNativePG Database."
+                  each:
+                    type: Info
+                    info:
+                      labelsFromPath:
+                        name: [metadata, name]
+                  labelsFromPath:
+                    exported_namespace: [metadata, namespace]
+                    applied: [status, applied]
+                    pg_cluster: [spec, cluster]
     # 23 pods on titan as measured 2026-10-13. KSM's baseline RSS for a cluster
     # this size is well under the limit; the limit exists so a leak is contained
     # on a host whose root filesystem is 150 G and whose etcd is on it.
