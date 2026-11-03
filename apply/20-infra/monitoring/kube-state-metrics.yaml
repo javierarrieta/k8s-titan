@@ -250,7 +250,17 @@ spec:
                   labelsFromPath:
                     exported_namespace: [metadata, namespace]
                     applied: [status, applied]
-                    pg_cluster: [spec, cluster]
+                    # [spec, cluster, NAME], not [spec, cluster]. `spec.cluster` is a
+                    # LocalObjectReference -- measured live, both objects answer
+                    # {"name":"postgres"} -- and KSM stringifies a non-string leaf with
+                    # fmt.Sprintf("%v"), so the two-level path emitted
+                    # pg_cluster="map[name:postgres]". Seen in the metric itself minutes
+                    # after #235 landed. Not fatal -- cardinality is fine and no rule
+                    # matches on it -- but every casa alert would have read
+                    # "cluster map[name:postgres]", and a Go map's string form is not a
+                    # contract to depend on. The Flux block above already uses the
+                    # three-level form for source_name; that was the precedent to copy.
+                    pg_cluster: [spec, cluster, name]
                     reclaim_policy: [spec, databaseRoleReclaimPolicy]
             - groupVersionKind:
                 group: postgresql.cnpg.io
@@ -268,7 +278,8 @@ spec:
                   labelsFromPath:
                     exported_namespace: [metadata, namespace]
                     applied: [status, applied]
-                    pg_cluster: [spec, cluster]
+                    # three-level path; see the DatabaseRole note above
+                    pg_cluster: [spec, cluster, name]
     # 23 pods on titan as measured 2026-10-13. KSM's baseline RSS for a cluster
     # this size is well under the limit; the limit exists so a leak is contained
     # on a host whose root filesystem is 150 G and whose etcd is on it.
