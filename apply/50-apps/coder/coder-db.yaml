@@ -35,10 +35,10 @@ spec:
   cluster:
     name: postgres
   login: true
-  # `-1` is CNPG's documented default and Postgres' "no limit", so this is a no-op in the database.
-  # Same reason as postgres-exporter's copy: this role has reported a stale `status.message` since
-  # 2026-10-06 alongside `applied: true`, and with `observedGeneration` unmoved nothing has re-run
-  # the path that would clear it (#154). A spec change guarantees one.
-  connectionLimit: -1
+  # See the note on postgres-exporter's copy: `comment` is the only DatabaseRole field the CRD does
+  # not default, so it is the only one that changes the stored spec and bumps `generation` — the
+  # lever that makes the instance manager re-apply this role and clear the stale `status.message`
+  # it has carried since 2026-10-06 alongside `applied: true` (#154).
+  comment: managed by k8s-titan apply/50-apps/coder/coder-db.yaml
   passwordSecret:
     name: coder-db-credentials
