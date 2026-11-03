@@ -1,0 +1,152 @@
+# PV restore drill — `tools/backup-restore-drill.sh`
+
+Issue: [#101](https://github.com/javierarrieta/k8s-titan/issues/101). Spec:
+[`2026-10-22-titan-restic-pv-backups-design.md`](superpowers/specs/2026-10-22-titan-restic-pv-backups-design.md)
+§10, which is the list of what had never been proven. This file and the script are the
+attempt at the first item on that list: **no restic backup on titan had ever been
+restored.**
+
+The Postgres side is different and better covered — a scratch-cluster restore and a
+point-in-time recovery have both been drilled and are recorded in
+[`authentik-runbook.md`](authentik-runbook.md). Nothing here changes that. This is the
+file-copy half.
+
+## Why a drill and not a code review
+
+Every nightly backup job on titan reports success. None of that would change if the
+repository were unreadable, the repository password had been rotated in one place and not
+another, or the tags a restore needs were not the tags the backup wrote. `restic check`
+in `apply/70-backup/housekeeping.yaml` proves the repository's internal structure is
+sound; it does not prove a `restore` produces a usable tree, and it has itself never been
+exercised against a restore either.
+
+A backup that has only ever been observed succeeding is a hypothesis. The script makes it
+falsifiable.
+
+## Access — this is operator-run, and that is not a preference
+
+The script needs a context that can create Jobs and PVCs. The read-only `k8s-reader`
+identity cannot, measured 2026-11-03 rather than assumed:
+
+```
+kubectl --context titan auth can-i create pod                   -> no
+                                       create persistentvolumeclaim -> no
+                                       create job                   -> no
+                                       get cronjob                  -> yes
+```
+
+So run it with an admin context:
+
+```sh
+tools/backup-restore-drill.sh probe   --context <admin-ctx>
+tools/backup-restore-drill.sh restore --context <admin-ctx>
+```
+
+`probe` is read-only against the cluster and creates nothing that survives: it runs one
+Job that lists the snapshots for the target tag and prints the latest snapshot id. Do it
+first — it answers "is the repository readable with these credentials at all" before
+anything allocates storage.
+
+Default target is `mealie/mealie-data`, the smallest opted-in volume (5Gi) with real user
+content. The four volumes in scope are `apps/investing-agent-pv-claim`,
+`mealie/mealie-data`, `open-webui/open-webui-data` and `sure/sure-storage`; ask for
+another with `--namespace` and `--pvc`.
+
+## What a green run actually establishes
+
+The restore Job prints one machine-readable line:
+
+```
+DRILL_RESULT target=mealie-data snapshot=2f3a1b9c files_expected=412 files_restored=412 \
+  bytes_expected=184320981 bytes_restored=184320981 paths_match=yes \
+  content_samples=5/5 match=yes
+```
+
+Three independent checks have to agree, and each one catches a different failure:
+
+| check | what it rules out |
+|---|---|
+| path list from `restic ls --json` == path list on disk | a restore that landed somewhere else, a truncated tree, a filtered subset |
+| total bytes from the snapshot == total bytes on disk | silently zero-length files, pack corruption that `ls` cannot see |
+| `sha256` of up to 5 files, computed from `restic cat` **and** from the restored file | the whole tree being structurally right and byte-wrong |
+
+And structurally, the Job **never mounts the source PVC** — only the scratch PVC. That is
+the design decision that makes the result mean something: a restore that could read the
+live volume would pass whether or not the repository worked.
+
+## The traps in it, all of them already paid for
+
+- **The path prefix.** `restic backup /volume` stores paths as `volume/...`, so
+  `restic restore --target /restore` lands at `/restore/volume/...`, **not**
+  `/restore/...`. A drill that looks directly under `/restore` reports "restored nothing"
+  while restic exits 0. The verification compares against the repository's own path list,
+  which carries the prefix, so the mismatch shows up as `paths_match=no` rather than a
+  silent zero.
+- **`local-path`, not `local-path-retain`, for the scratch PVC.** Retain leaves a
+  `Released` PV behind when the PVC is deleted. titan already carries five of those from
+  earlier provisioning churn (#114). A drill that adds litter is a drill people stop
+  running.
+- **No `backup.titan.arrieta.eu/class` annotation on the scratch PVC.** That annotation is
+  the opt-in the discovery CronJob selects on. Annotate a scratch volume and a drill
+  artifact becomes production backup data, and `make backup-coverage` would count it.
+- **The restic image digest is pinned to the same value as `runner.yaml`.** A drill that
+  quietly used a newer restic than production is a drill of a different code path. The
+  spec records that techdelivery's restore image once let `restic snapshots --last 1`
+  misparse in 0.19.x, which made every tag-based restore claim no snapshot existed — the
+  digest is the guard against reliving that.
+- **busybox `ash`, not bash.** The in-pod scripts run under the restic image's `/bin/sh`.
+  No bashisms, no `jq` — the snapshot id is pulled out with `tr`/`sed`, the same way
+  `runner.sh` avoids `jq` for the same reason.
+- **Reuse of `backup-job` ServiceAccount and `backup-preflight` ConfigMap.** Both are
+  already mirrored into the participating namespaces, so the drill inherits exactly the
+  rights the nightly path has, and `rbac.yaml` stays the single place that governs them.
+  A drill with its own fat ServiceAccount would test a permission set production does not
+  have.
+
+## What a green run does NOT prove — read this before writing "backups verified" anywhere
+
+- **Not application consistency.** A file copy of a live database can restore corrupt;
+  that is why `databases/postgres-1` is excluded from restic entirely and why CNPG owns
+  that path. Mealie's SQLite and open-webui's state are the same class of risk in
+  miniature: this drill restores a *cold* snapshot into a scratch volume, which is the
+  safe case. It does not prove that restoring while the app is writing is safe, because it
+  isn't.
+- **Not that the app starts against the restored volume.** The drill stops at bytes. The
+  next rung — mount the restored PVC at a scratch instance of the workload and see it
+  come up — is a bigger, noisier drill and is not what this script does.
+- **Not the other three volumes.** One volume proves the mechanism (repository,
+  credentials, tags, restic version, restore path). It does not prove that
+  `open-webui-data`'s snapshot is intact. Run it per volume if you want per-volume
+  claims; the script takes `--namespace`/`--pvc` for exactly that.
+- **Not that a failure would be noticed.** Nothing alerts on a failed backup job — that is
+  the other half of #101, and the same shape of gap is #231 for CNPG objects. A drill you
+  ran once and an alert that would have caught the problem are different things.
+- **Not that the restore is fast enough to be useful.** No RTO has been measured here.
+  The 10Gi volumes over the mesh to casa's MinIO are the numbers that would matter and
+  they are not recorded anywhere yet.
+
+## If it fails
+
+| symptom | first thing to look at |
+|---|---|
+| `ABORT: preflight failed` | the mesh — `preflight.sh` probes the S3 endpoint only. `ping 192.168.133.x`, then casa's MinIO. |
+| `no snapshot found for tag <pvc>` | the tag is the PVC name, set in `runner.sh`. A renamed PVC has old snapshots under the old tag and none under the new one. |
+| `paths_match=no` with plausible counts | check the `volume/` prefix assumption before believing anything else |
+| `content_samples=k/n` | the repository is readable and the tree is complete but bytes differ — stop and treat the repository as suspect, do not re-run |
+| Job stuck Pending | the scratch PVC cannot bind — `kubectl describe pvc <pvc>-drill`, usually capacity on titan's local path |
+
+`cleanup` removes the scratch PVC and any drill Jobs in the namespace:
+
+```sh
+tools/backup-restore-drill.sh cleanup --context <admin-ctx> --namespace mealie --pvc mealie-data
+```
+
+`restore --keep` leaves both in place for inspection. Do not leave them: the scratch PVC
+holds a full copy of production data under a name that says it is safe to delete.
+
+## Recording a run
+
+Same rule as the Postgres drills — a drill is a dated artifact, not a claim. Record the
+`DRILL_RESULT` line, the snapshot id, the volume, and the date here (or in #101), and say
+what was **not** covered. Until that line exists, this file documents a capability, not a
+proven one.
