@@ -57,12 +57,14 @@ Namespaces are declared centrally rather than inside the charts that need them:
 `cert-manager`, `certificates`, `cnpg-system`, `coder`, `coder-workspaces`, `databases`,
 `files`, `gatus`, `llm`, `mealie`, `monitoring`, `observability`, `open-webui`, `sure` and
 `traefik-system`. `k8s-reader` is the one exception — its own manifest under `20-infra`
-creates it, because the identity and the namespace are one thing. `traefik-system` is the
-reverse case: it is declared centrally **and** again in `apply/20-infra/traefik/traefik.yaml`,
-whose header explains it must be present in the stage that first uses it or that stage cannot
-be checked on its own. Both objects carry identical content; do not delete either one without
-checking which stage's inventory owns the live object, because `prune: true` deletes what
-leaves an inventory.
+creates it, because the identity and the namespace are one thing. Nothing else may declare a
+namespace twice. `traefik-system` used to be declared in `apply/20-infra/traefik/traefik.yaml` as
+well, and that was a live trap, not untidiness: two stages applying one object means each reconcile
+rewrites the live object's `kustomize.toolkit.fluxcd.io/name` label, and kustomize-controller
+deletes a stale object only when that label still names the stage doing the pruning — so deleting
+either copy had a coin-flip chance of cascading the namespace and the ingress path with it. #221
+removed the duplicate behind a temporary `prune: false` on `stage-infra`; the full reasoning is in
+`traefik.yaml`'s header.
 
 For cluster investigation, use the `k8s-reader` ServiceAccount rather than an admin
 kubeconfig — read-only, and it cannot read Secrets. Minting, verification and
