@@ -228,6 +228,15 @@ metadata:
 # like every namespace except k8s-reader — and it has to be, because it lands as its own change ahead
 # of the HelmRelease that uses it.
 #
+# This is now the ONLY declaration. apply/20-infra/traefik/traefik.yaml used to declare this namespace
+# a second time, and two Flux stages owning one Namespace is not cosmetic: each one rewrites the live
+# object's kustomize.toolkit.fluxcd.io/name label on every reconcile, and kustomize-controller deletes
+# a stale object only when that label still names the stage doing the pruning. Whoever later deleted
+# "the duplicate" would therefore have had a coin-flip chance of cascading the namespace — and with
+# it the Traefik HelmRelease, its Deployment and the cluster's whole ingress path. The removal was
+# staged behind `prune: false` on stage-infra.yaml for exactly that reason; see the comment there
+# before restoring it.
+#
 # Why it is split out: `make dry-run` applies each stage with `apply --dry-run=server`, and server-side
 # dry-run persists nothing. A Namespace is therefore invisible to the objects that follow it even
 # inside a single invocation, so any stage that introduces a new namespace AND namespaced objects
