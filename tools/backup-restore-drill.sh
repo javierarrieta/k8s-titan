@@ -90,8 +90,21 @@ SIZE=$("${K[@]}" get pvc "$PVC" -o jsonpath='{.spec.resources.requests.storage}'
 # /volume` stores paths as `volume/...`, so `restic restore --target /restore` lands at
 # /restore/volume/... and NOT at /restore/.... A drill that looks for files directly under
 # /restore reports "restored nothing" while restic exits 0.
+# WHICH SNAPSHOT IS THE NEWEST, and the flag that must never be used. `--last` is NOT a
+# count. At v0.19.1 it is `f.BoolVar(&opts.last, "last", false, ...)` and already marked
+# deprecated in favour of `--latest n`, so `--last 1` parses as the boolean plus a POSITIONAL
+# snapshot id of "1", which matches nothing -- and restic then says `Ignoring "filters":
+# explicit snapshot ids are given`, dropping the tag filter and returning empty. The second
+# live probe died exactly this way, on the very flag the backup spec warns about: techdelivery
+# once let `restic snapshots --last 1` misparse in 0.19.x and every tag-based restore claimed
+# no snapshot existed.
+#
+# So: no count flag at all. The short id comes off the human-readable table, whose column
+# layout is steadier than any JSON key and needs no version-conditional flag; restic sorts
+# snapshots ascending, so the last data row is the newest. The JSON path is the fallback.
+#
 # THE JSON KEYS, checked against restic's own source (cmd/restic/cmd_snapshots.go,
-# cmd_ls.go) rather than guessed -- the first guess printed an empty snapshot id.
+# cmd_ls.go at v0.19.1) rather than guessed -- the first guess printed an empty snapshot id.
 #   * `snapshots --json` emits one compact line via json.Encoder, and the id fields are
 #     "id" (full 64 hex) and "short_id". There is no "snapshot" key; that name belongs to
 #     older releases' ls output. "id" cannot collide with "short_id" because the literal
@@ -106,9 +119,9 @@ sh /preflight/preflight.sh || { echo "ABORT: preflight failed -- S3 endpoint unr
 restic version
 echo "== snapshots for tag $BACKUP_TAG =="
 restic snapshots --tag "$BACKUP_TAG" | tail -8
-SNAP=$(restic snapshots --tag "$BACKUP_TAG" --json --last 1 \
-        | tr "," "\n" | sed -n "s/.*\"id\":\"\([0-9a-f]\{64\}\)\".*/\1/p" | tail -1)
-echo "LATEST_SNAPSHOT $SNAP"
+SNAP=$(restic snapshots --tag "$BACKUP_TAG" | sed -n "s/^\([0-9a-f]\{8\}\)  .*/\1/p" | tail -1)
+[ -n "$SNAP" ] || SNAP=$(restic snapshots --tag "$BACKUP_TAG" --json | tr "," "\n" | sed -n "s/.*\"short_id\":\"\([0-9a-f]*\)\".*/\1/p" | tail -1)
+echo "LATEST_SNAPSHOT ${SNAP:-<none>}"
 if [ -n "$SNAP" ]; then
   # Dumping the first ls records is deliberate: if restic ever changes the JSON shape
   # again, the raw lines are in the log instead of a silent empty file list.
@@ -122,8 +135,8 @@ set -eu
 export TMPDIR=/tmp
 sh /preflight/preflight.sh || { echo "ABORT: preflight failed -- S3 endpoint unreachable" >&2; exit 1; }
 
-SNAP=$(restic snapshots --tag "$BACKUP_TAG" --json --last 1 \
-        | tr "," "\n" | sed -n "s/.*\"id\":\"\([0-9a-f]\{64\}\)\".*/\1/p" | tail -1)
+SNAP=$(restic snapshots --tag "$BACKUP_TAG" | sed -n "s/^\([0-9a-f]\{8\}\)  .*/\1/p" | tail -1)
+[ -n "$SNAP" ] || SNAP=$(restic snapshots --tag "$BACKUP_TAG" --json | tr "," "\n" | sed -n "s/.*\"short_id\":\"\([0-9a-f]*\)\".*/\1/p" | tail -1)
 [ -n "$SNAP" ] || { echo "ABORT: no snapshot found for tag $BACKUP_TAG" >&2; exit 1; }
 echo "restoring snapshot $SNAP of tag $BACKUP_TAG into /restore"
 

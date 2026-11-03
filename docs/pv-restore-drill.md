@@ -76,6 +76,20 @@ live volume would pass whether or not the repository worked.
 
 ## The traps in it, all of them already paid for
 
+- **`--last` is not a count, and using it silently empties the result.** The second live
+  probe printed `Flag --last has been deprecated, use --latest 1` followed by
+  `Ignoring "1": no matching ID found for prefix "1"` and `Ignoring "filters": explicit
+  snapshot ids are given`, then an empty `LATEST_SNAPSHOT`. At `v0.19.1` the flag is
+  `f.BoolVar(&opts.last, "last", false, ...)`, so `--last 1` is the boolean plus a positional
+  snapshot id of `1`; the positional wins and the tag filter is discarded. This is precisely
+  the flag the backup spec already warns about — techdelivery once let
+  `restic snapshots --last 1` misparse in 0.19.x and every tag-based restore claimed no
+  snapshot existed. The script now uses **no count flag**: the short id comes off the
+  human-readable table (last row = newest, restic sorts ascending), with the JSON
+  `"short_id"` as fallback. Both paths were tested against the real probe output before
+  shipping.
+- **The pinned restic is 0.19.1** (`restic 0.19.1 compiled with go1.26.4`, reported by the
+  probe). The JSON key claims above were checked against the `v0.19.1` tag, not `master`.
 - **The JSON key names, and `dump` not `cat`.** The first live probe printed an empty
   snapshot id, and reading restic's source instead of guessing again found three wrong
   assumptions at once:
@@ -155,6 +169,11 @@ live volume would pass whether or not the repository worked.
   discovery schedule.
 - And it found the three format bugs above, which is what the stage was for.
 
+A second probe on the fixed script (same day) reported `restic 0.19.1 compiled with go1.26.4`,
+confirmed the snapshot list again, and then failed on `--last 1` — the bug described in the
+traps section. **Two probes, two real bugs, zero cluster writes.** That is the argument for
+making the read-only stage separate from the restore stage.
+
 **Still unproven after this probe:** that a `restore` works. `probe` reads the repository and
 lists snapshots; it does not write a tree. That is the `restore` stage.
 
@@ -163,7 +182,7 @@ lists snapshots; it does not write a tree. That is the `restore` stage.
 | symptom | first thing to look at |
 |---|---|
 | `ABORT: preflight failed` | the mesh — `preflight.sh` probes the S3 endpoint only. `ping 192.168.133.x`, then casa's MinIO. |
-| `LATEST_SNAPSHOT` empty | the JSON key names changed again — `probe` now dumps the raw `ls --json` head, read that first |
+| `LATEST_SNAPSHOT <none>` | both extraction paths failed. `probe` dumps the raw `ls --json` head and the snapshot table — read those. If a count flag has crept back in, see the `--last` bullet above. |
 | `ABORT: no snapshot found for tag <pvc>` | the tag is the PVC name, set in `runner.sh`. A renamed PVC has old snapshots under the old tag and none under the new one. |
 | `paths_match=no` with plausible counts | check the `volume/` prefix assumption before believing anything else |
 | `content_samples=k/n` | the repository is readable and the tree is complete but bytes differ — stop and treat the repository as suspect, do not re-run |
@@ -178,6 +197,25 @@ tools/backup-restore-drill.sh cleanup --context <admin-ctx> --namespace mealie -
 
 `restore --keep` leaves both in place for inspection. Do not leave them: the scratch PVC
 holds a full copy of production data under a name that says it is safe to delete.
+
+## How the script itself was tested
+
+Two live probes found four bugs, so the verification logic was eventually run locally
+against a fake `restic` before the third attempt shipped — the extracted in-pod script,
+executed with a stub `restic` emulating 0.19.1's compact one-object-per-line `ls --json`.
+
+| case | result |
+|---|---|
+| clean restore of a tree containing `two words.txt` | `files_expected=3 files_restored=3 bytes_expected=3035 bytes_restored=3035 paths_match=yes content_samples=3/3 match=yes`, exit 0 |
+| one byte appended to one restored file | `bytes_restored=3036`, `content_samples=2/3`, `MISMATCH volume/data/one.txt repo=… disk=…`, `match=no`, **exit 1** |
+
+The second row is the one that matters: **a check that can only pass is worthless**, so the
+deliberate-corruption case is the proof the gate is live. The filename with a space is the
+case the old `for p in $(…)` loop would have silently mis-sampled.
+
+What this does **not** cover: real restic behaviour, real S3, real `local-path`
+provisioning, and the `restic restore` file layout itself — the fake `cp -a`s the tree. Only
+a live run covers those, which is what `restore --context titan` is for.
 
 ## Recording a run
 
