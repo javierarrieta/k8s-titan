@@ -76,6 +76,21 @@ live volume would pass whether or not the repository worked.
 
 ## The traps in it, all of them already paid for
 
+- **The JSON key names, and `dump` not `cat`.** The first live probe printed an empty
+  snapshot id, and reading restic's source instead of guessing again found three wrong
+  assumptions at once:
+  | assumed | actual (restic `cmd/restic/cmd_snapshots.go`, `cmd_ls.go`, `cmd_dump.go`) |
+  |---|---|
+  | `snapshots --json` has `"snapshot":"…"` | the keys are `"id"` (full 64 hex) and `"short_id"`; there is no `snapshot` key |
+  | `ls --json` marks entries with `"structure-type":"file"` | modern restic uses `"type":"file"` (the script accepts both) |
+  | file content comes from `restic cat <snap> <path>` | `restic cat` is for repository internals and rejects a file path; the command is **`restic dump <snapshotID> <file>`** |
+  Both JSON streams are compact, one object per line (`json.Encoder.Encode`), which is what
+  makes the `tr`/`sed` extraction legal under busybox at all. `probe` now dumps the first
+  three `ls --json` records into its own log, so if the shape changes again the evidence is
+  in the log rather than a silent empty file list.
+- **`for p in $(…)` would have sampled the wrong files.** A filename containing a space
+  word-splits, so the sample loop reads from a file with `while IFS= read -r` — the same
+  reason `runner.sh` redirects from a file instead of piping into a loop.
 - **The path prefix.** `restic backup /volume` stores paths as `volume/...`, so
   `restic restore --target /restore` lands at `/restore/volume/...`, **not**
   `/restore/...`. A drill that looks directly under `/restore` reports "restored nothing"
@@ -125,14 +140,34 @@ live volume would pass whether or not the repository worked.
   The 10Gi volumes over the mesh to casa's MinIO are the numbers that would matter and
   they are not recorded anywhere yet.
 
+## What the first live probe proved (2026-11-03)
+
+`tools/backup-restore-drill.sh probe --context titan` against `mealie/mealie-data`:
+
+- `preflight: probing s3.l.arrieta.eu with 'restic cat config'` → **endpoint answered,
+  repository exists**. The credentials mirrored into `mealie` as `backup-minio-secrets`
+  open the repository. That alone was unproven before this.
+- **The tag is the PVC name and it matches.** 8 snapshots under tag `mealie-data`, latest
+  `0c8e1f99` at 2026-11-02 20:30 UTC, 12.285 MiB, sizes climbing ~1.1 MiB/day. So the
+  nightly writer and a tag-based reader agree on the tag — the failure mode where a renamed
+  PVC leaves snapshots under the old name did not happen here.
+- The nightly cadence is intact: one snapshot per day at 20:30 UTC, matching the `30 20 * * *`
+  discovery schedule.
+- And it found the three format bugs above, which is what the stage was for.
+
+**Still unproven after this probe:** that a `restore` works. `probe` reads the repository and
+lists snapshots; it does not write a tree. That is the `restore` stage.
+
 ## If it fails
 
 | symptom | first thing to look at |
 |---|---|
 | `ABORT: preflight failed` | the mesh — `preflight.sh` probes the S3 endpoint only. `ping 192.168.133.x`, then casa's MinIO. |
-| `no snapshot found for tag <pvc>` | the tag is the PVC name, set in `runner.sh`. A renamed PVC has old snapshots under the old tag and none under the new one. |
+| `LATEST_SNAPSHOT` empty | the JSON key names changed again — `probe` now dumps the raw `ls --json` head, read that first |
+| `ABORT: no snapshot found for tag <pvc>` | the tag is the PVC name, set in `runner.sh`. A renamed PVC has old snapshots under the old tag and none under the new one. |
 | `paths_match=no` with plausible counts | check the `volume/` prefix assumption before believing anything else |
 | `content_samples=k/n` | the repository is readable and the tree is complete but bytes differ — stop and treat the repository as suspect, do not re-run |
+| `WARNING: /restore/volume is absent` | the stored paths are not under `volume/` — the prefix assumption is wrong for this volume, do not trust the counts below it |
 | Job stuck Pending | the scratch PVC cannot bind — `kubectl describe pvc <pvc>-drill`, usually capacity on titan's local path |
 
 `cleanup` removes the scratch PVC and any drill Jobs in the namespace:

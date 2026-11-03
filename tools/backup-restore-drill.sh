@@ -90,14 +90,31 @@ SIZE=$("${K[@]}" get pvc "$PVC" -o jsonpath='{.spec.resources.requests.storage}'
 # /volume` stores paths as `volume/...`, so `restic restore --target /restore` lands at
 # /restore/volume/... and NOT at /restore/.... A drill that looks for files directly under
 # /restore reports "restored nothing" while restic exits 0.
+# THE JSON KEYS, checked against restic's own source (cmd/restic/cmd_snapshots.go,
+# cmd_ls.go) rather than guessed -- the first guess printed an empty snapshot id.
+#   * `snapshots --json` emits one compact line via json.Encoder, and the id fields are
+#     "id" (full 64 hex) and "short_id". There is no "snapshot" key; that name belongs to
+#     older releases' ls output. "id" cannot collide with "short_id" because the literal
+#     requires a quote immediately before `id`.
+#   * `ls --json` emits one compact object per line, with "type":"file" and "path" and
+#     "size". The older field name was "structure-type"; both are accepted below so the
+#     drill does not break on a restic version bump in either direction.
 RESTIC_PROBE='
 set -eu
 export TMPDIR=/tmp
 sh /preflight/preflight.sh || { echo "ABORT: preflight failed -- S3 endpoint unreachable" >&2; exit 1; }
+restic version
 echo "== snapshots for tag $BACKUP_TAG =="
 restic snapshots --tag "$BACKUP_TAG" | tail -8
-echo "LATEST_SNAPSHOT $(restic snapshots --tag "$BACKUP_TAG" --json \
-  | tr "," "\n" | sed -n "s/.*\"snapshot\":\"\([0-9a-f]*\)\".*/\1/p" | tail -1)"
+SNAP=$(restic snapshots --tag "$BACKUP_TAG" --json --last 1 \
+        | tr "," "\n" | sed -n "s/.*\"id\":\"\([0-9a-f]\{64\}\)\".*/\1/p" | tail -1)
+echo "LATEST_SNAPSHOT $SNAP"
+if [ -n "$SNAP" ]; then
+  # Dumping the first ls records is deliberate: if restic ever changes the JSON shape
+  # again, the raw lines are in the log instead of a silent empty file list.
+  echo "== first ls --json records (format evidence) =="
+  restic ls --json "$SNAP" | head -3
+fi
 '
 
 RESTIC_RESTORE='
@@ -105,8 +122,8 @@ set -eu
 export TMPDIR=/tmp
 sh /preflight/preflight.sh || { echo "ABORT: preflight failed -- S3 endpoint unreachable" >&2; exit 1; }
 
-SNAP=$(restic snapshots --tag "$BACKUP_TAG" --json \
-        | tr "," "\n" | sed -n "s/.*\"snapshot\":\"\([0-9a-f]*\)\".*/\1/p" | tail -1)
+SNAP=$(restic snapshots --tag "$BACKUP_TAG" --json --last 1 \
+        | tr "," "\n" | sed -n "s/.*\"id\":\"\([0-9a-f]\{64\}\)\".*/\1/p" | tail -1)
 [ -n "$SNAP" ] || { echo "ABORT: no snapshot found for tag $BACKUP_TAG" >&2; exit 1; }
 echo "restoring snapshot $SNAP of tag $BACKUP_TAG into /restore"
 
@@ -114,13 +131,17 @@ echo "restoring snapshot $SNAP of tag $BACKUP_TAG into /restore"
 # overwrite flag in a script invites a later edit that restores onto real data.
 restic restore "$SNAP" --target /restore
 echo "== restored tree =="; ls -la /restore
+[ -d /restore/volume ] || echo "WARNING: /restore/volume is absent -- restic did not store paths under volume/. Check the prefix assumption before believing any count below." >&2
 
 # Three independent checks, each comparing the repository against the restored volume.
 # None of them can read the live PVC, because it is not mounted in this pod.
-restic ls --json "$SNAP" | grep "\"structure-type\":\"file\"" \
+# Only regular files on both sides: symlinks, devices and fifos are excluded from the
+# expected list by the type filter and from the tree by `find -type f`, so the two counts
+# are the same population rather than two different ones that happen to agree.
+restic ls --json "$SNAP" | grep -E "\"(type|structure-type)\":\"file\"" \
   | sed -n "s/.*\"path\":\"\([^\"]*\)\".*/\1/p" | sort > /tmp/expected.txt
 EXPECTED_FILES=$(wc -l < /tmp/expected.txt | tr -d " ")
-EXPECTED_BYTES=$(restic ls --json "$SNAP" | grep "\"structure-type\":\"file\"" \
+EXPECTED_BYTES=$(restic ls --json "$SNAP" | grep -E "\"(type|structure-type)\":\"file\"" \
   | sed -n "s/.*\"size\":\([0-9]*\).*/\1/p" | awk "{s+=\$1} END {print s+0}")
 
 find /restore -type f | sed "s|^/restore/||" | sort > /tmp/actual.txt
@@ -136,14 +157,23 @@ if [ "$EXPECTED_FILES" = "$ACTUAL_FILES" ] && cmp -s /tmp/expected.txt /tmp/actu
 fi
 
 # Byte-level proof on a sample: the same file read out of the repository and off the
-# restored volume. `restic cat <snapshot> <path>` wants the path WITH the volume/ prefix.
+# restored volume. `restic dump <snapshotID> <file>` is the content command -- `restic
+# cat` is for repository internals (config, pack ID, blob ID) and rejects a file path.
+# The path wants the volume/ prefix, as stored.
+#
+# `while read` from a file, not `for p in $(...)`: word splitting on a filename containing
+# a space would sample the wrong paths and report a mismatch that is not real. Same reason
+# runner.sh redirects from a file instead of piping into the loop -- a pipeline would also
+# run the loop in a subshell and the counters would die with it.
+head -5 /tmp/expected.txt > /tmp/sample.txt
 SAMPLES=0; SAMPLES_OK=0
-for p in $(head -5 /tmp/expected.txt); do
-  A=$(restic cat "$SNAP" "$p" | sha256sum | cut -c1-64)
+while IFS= read -r p; do
+  [ -n "$p" ] || continue
+  A=$(restic dump "$SNAP" "$p" | sha256sum | cut -c1-64)
   B=$(sha256sum "/restore/$p" | cut -c1-64)
   SAMPLES=$((SAMPLES + 1))
   if [ "$A" = "$B" ]; then SAMPLES_OK=$((SAMPLES_OK + 1)); else echo "MISMATCH $p repo=$A disk=$B" >&2; fi
-done
+done < /tmp/sample.txt
 
 MATCH=no
 if [ "$PATHS_MATCH" = yes ] && [ "$EXPECTED_BYTES" = "$ACTUAL_BYTES" ] \
