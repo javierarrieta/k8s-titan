@@ -92,6 +92,15 @@ live volume would pass whether or not the repository worked.
   a comment *inside* them terminates the string and the outer script dies with
   `syntax error near unexpected token 'done'` — which reads like a shell-logic bug and is
   really a quoting bug three hundred characters earlier. Write around it.
+- **`drop ALL` + `DAC_OVERRIDE` cannot perform a restore — it can only read.** The nightly
+  backup jobs run root with `capabilities: drop [ALL], add [DAC_OVERRIDE]`, which is exactly
+  right for reading a heterogeneous-uid volume and exactly wrong for writing one back.
+  Restoring mealie's files to uid 911 needs `lchown`; root without `CAP_CHOWN` gets EPERM.
+  The live run wrote **all 12.285 MiB** and then exited fatal on 21 errors:
+  `ignoring error for /volume/.secret: lchown /restore/volume/.secret: operation not permitted`.
+  The restore container therefore adds `CHOWN` as well, and the backup container does not —
+  the asymmetry is the finding, not a detail. A real disaster would have discovered this at
+  the worst possible moment. That is the entire argument for drilling.
 - **`--last` is not a count, and using it silently empties the result.** The second live
   probe printed `Flag --last has been deprecated, use --latest 1` followed by
   `Ignoring "1": no matching ID found for prefix "1"` and `Ignoring "filters": explicit
@@ -188,6 +197,32 @@ making the read-only stage separate from the restore stage.
 **Still unproven after this probe:** that a `restore` works. `probe` reads the repository and
 lists snapshots; it does not write a tree. That is the `restore` stage.
 
+## The first live restore attempt (2026-11-03)
+
+`restore --context titan` against `mealie/mealie-data`. It failed, and the failure was the
+most useful thing in this file:
+
+```
+restoring snapshot 0c8e1f99 of [/volume] at 2026-11-02 20:30:05 … to /restore
+ignoring error for /volume/.secret: lchown /restore/volume/.secret: operation not permitted
+… 21 of these …
+Summary: Restored 10 / 22 files/dirs (12.285 MiB / 12.285 MiB) in 0:00
+Fatal: There were 21 errors
+```
+
+Read the summary line carefully, because it contains both the good news and the bad:
+
+- **12.285 MiB / 12.285 MiB — every byte restored.** The repository, the credentials, the
+  tag lookup, the snapshot id, the `--target` layout and the `volume/` prefix were all
+  correct. Everything the earlier probes fixed is now proven against the real thing.
+- **21 `lchown` EPERM errors**, all on ownership, none on content. Root without `CAP_CHOWN`.
+  See the capability bullet above.
+- The verification block never ran, because restic exited non-zero first. So the byte-level
+  `sha256` comparison is still unproven live — the restore got bytes onto disk, which is not
+  the same as the drill having checked them.
+
+The scratch PVC and Job were cleaned up on the failure path, as designed.
+
 ## If it fails
 
 | symptom | first thing to look at |
@@ -197,6 +232,7 @@ lists snapshots; it does not write a tree. That is the `restore` stage.
 | `ABORT: no snapshot found for tag <pvc>` | the tag is the PVC name, set in `runner.sh`. A renamed PVC has old snapshots under the old tag and none under the new one. |
 | `paths_match=no` with plausible counts | check the `volume/` prefix assumption before believing anything else |
 | `content_samples=k/n` | the repository is readable and the tree is complete but bytes differ — stop and treat the repository as suspect, do not re-run |
+| `lchown …: operation not permitted` | the restore container lacks `CAP_CHOWN`. Content is fine; ownership is not. See the capability bullet. |
 | `WARNING: /restore/volume is absent` | the stored paths are not under `volume/` — the prefix assumption is wrong for this volume, do not trust the counts below it |
 | Job stuck Pending | the scratch PVC cannot bind — `kubectl describe pvc <pvc>-drill`, usually capacity on titan's local path |
 

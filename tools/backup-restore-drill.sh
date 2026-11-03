@@ -215,9 +215,17 @@ echo "DRILL_RESULT target=$BACKUP_TAG snapshot=$SNAP files_expected=$EXPECTED_FI
 
 job_manifest() {
   # $1 = job name, $2 = probe|restore
-  local name="$1" kind="$2" script extra_mounts="" extra_volumes=""
+  local name="$1" kind="$2" script extra_mounts="" extra_volumes="" caps='"DAC_OVERRIDE"'
   if [ "$kind" = probe ]; then script="$RESTIC_PROBE"; else script="$RESTIC_RESTORE"; fi
   if [ "$kind" = restore ]; then
+    # CAP_CHOWN, and this is the finding a live run produced that no amount of reading the
+    # backup manifests would have: the nightly jobs run `drop ALL` + DAC_OVERRIDE, which is
+    # exactly right for READING a heterogeneous-uid volume and exactly wrong for WRITING one
+    # back. Restoring mealie's files to uid 911 needs lchown, and root without CAP_CHOWN gets
+    # EPERM -- restic wrote all 12.285 MiB and then exited fatal on 21 errors. A real
+    # disaster would discover this at the worst possible moment, which is the point of
+    # drilling.
+    caps='"DAC_OVERRIDE", "CHOWN"'
     # The scratch volume, and ONLY the scratch volume. The source PVC is deliberately not
     # mounted: a restore that could read the live data would prove nothing.
     extra_mounts='        - name: target
@@ -277,7 +285,7 @@ $(printf '%s\n' "$script" | sed 's/^/          /')
           seccompProfile: {type: RuntimeDefault}
           capabilities:
             drop: ["ALL"]
-            add: ["DAC_OVERRIDE"]
+            add: [$caps]
         resources:
           requests: {cpu: 100m, memory: 512Mi}
           limits: {cpu: 500m, memory: 1Gi}
