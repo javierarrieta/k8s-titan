@@ -90,8 +90,21 @@ SIZE=$("${K[@]}" get pvc "$PVC" -o jsonpath='{.spec.resources.requests.storage}'
 # /volume` stores paths as `volume/...`, so `restic restore --target /restore` lands at
 # /restore/volume/... and NOT at /restore/.... A drill that looks for files directly under
 # /restore reports "restored nothing" while restic exits 0.
+# WHICH SNAPSHOT IS THE NEWEST, and the flag that must never be used. `--last` is NOT a
+# count. At v0.19.1 it is `f.BoolVar(&opts.last, "last", false, ...)` and already marked
+# deprecated in favour of `--latest n`, so `--last 1` parses as the boolean plus a POSITIONAL
+# snapshot id of "1", which matches nothing -- and restic then says `Ignoring "filters":
+# explicit snapshot ids are given`, dropping the tag filter and returning empty. The second
+# live probe died exactly this way, on the very flag the backup spec warns about: techdelivery
+# once let `restic snapshots --last 1` misparse in 0.19.x and every tag-based restore claimed
+# no snapshot existed.
+#
+# So: no count flag at all. The short id comes off the human-readable table, whose column
+# layout is steadier than any JSON key and needs no version-conditional flag; restic sorts
+# snapshots ascending, so the last data row is the newest. The JSON path is the fallback.
+#
 # THE JSON KEYS, checked against restic's own source (cmd/restic/cmd_snapshots.go,
-# cmd_ls.go) rather than guessed -- the first guess printed an empty snapshot id.
+# cmd_ls.go at v0.19.1) rather than guessed -- the first guess printed an empty snapshot id.
 #   * `snapshots --json` emits one compact line via json.Encoder, and the id fields are
 #     "id" (full 64 hex) and "short_id". There is no "snapshot" key; that name belongs to
 #     older releases' ls output. "id" cannot collide with "short_id" because the literal
@@ -106,9 +119,9 @@ sh /preflight/preflight.sh || { echo "ABORT: preflight failed -- S3 endpoint unr
 restic version
 echo "== snapshots for tag $BACKUP_TAG =="
 restic snapshots --tag "$BACKUP_TAG" | tail -8
-SNAP=$(restic snapshots --tag "$BACKUP_TAG" --json --last 1 \
-        | tr "," "\n" | sed -n "s/.*\"id\":\"\([0-9a-f]\{64\}\)\".*/\1/p" | tail -1)
-echo "LATEST_SNAPSHOT $SNAP"
+SNAP=$(restic snapshots --tag "$BACKUP_TAG" | sed -n "s/^\([0-9a-f]\{8\}\)  .*/\1/p" | tail -1)
+[ -n "$SNAP" ] || SNAP=$(restic snapshots --tag "$BACKUP_TAG" --json | tr "," "\n" | sed -n "s/.*\"short_id\":\"\([0-9a-f]*\)\".*/\1/p" | tail -1)
+echo "LATEST_SNAPSHOT ${SNAP:-<none>}"
 if [ -n "$SNAP" ]; then
   # Dumping the first ls records is deliberate: if restic ever changes the JSON shape
   # again, the raw lines are in the log instead of a silent empty file list.
@@ -117,13 +130,21 @@ if [ -n "$SNAP" ]; then
 fi
 '
 
+# THE PATH PREFIX, which the live evidence disproved. The assumption was that `restic backup
+# /volume` strips the leading slash and stores `volume/...`. It does not: restic 0.19.1's
+# `ls --json` reports `"path":"/volume/.secret"` and `"paths":["/volume"]`, slash intact.
+# Comparing those strings against `find /restore` output, which has no leading slash, would
+# report paths_match=no on a perfectly good restore. So both sides are normalised by
+# stripping a leading `/`, and `restic dump` is offered the stored form first and the
+# stripped form second, because which one restic wants is exactly the kind of thing that
+# changed once already.
 RESTIC_RESTORE='
 set -eu
 export TMPDIR=/tmp
 sh /preflight/preflight.sh || { echo "ABORT: preflight failed -- S3 endpoint unreachable" >&2; exit 1; }
 
-SNAP=$(restic snapshots --tag "$BACKUP_TAG" --json --last 1 \
-        | tr "," "\n" | sed -n "s/.*\"id\":\"\([0-9a-f]\{64\}\)\".*/\1/p" | tail -1)
+SNAP=$(restic snapshots --tag "$BACKUP_TAG" | sed -n "s/^\([0-9a-f]\{8\}\)  .*/\1/p" | tail -1)
+[ -n "$SNAP" ] || SNAP=$(restic snapshots --tag "$BACKUP_TAG" --json | tr "," "\n" | sed -n "s/.*\"short_id\":\"\([0-9a-f]*\)\".*/\1/p" | tail -1)
 [ -n "$SNAP" ] || { echo "ABORT: no snapshot found for tag $BACKUP_TAG" >&2; exit 1; }
 echo "restoring snapshot $SNAP of tag $BACKUP_TAG into /restore"
 
@@ -138,8 +159,11 @@ echo "== restored tree =="; ls -la /restore
 # Only regular files on both sides: symlinks, devices and fifos are excluded from the
 # expected list by the type filter and from the tree by `find -type f`, so the two counts
 # are the same population rather than two different ones that happen to agree.
+# Sorted in stored form first; every stored path here begins with `/`, so stripping that
+# prefix afterwards preserves the order and the two files stay line-aligned.
 restic ls --json "$SNAP" | grep -E "\"(type|structure-type)\":\"file\"" \
-  | sed -n "s/.*\"path\":\"\([^\"]*\)\".*/\1/p" | sort > /tmp/expected.txt
+  | sed -n "s/.*\"path\":\"\([^\"]*\)\".*/\1/p" | sort > /tmp/expected_raw.txt
+sed "s|^/||" /tmp/expected_raw.txt > /tmp/expected.txt
 EXPECTED_FILES=$(wc -l < /tmp/expected.txt | tr -d " ")
 EXPECTED_BYTES=$(restic ls --json "$SNAP" | grep -E "\"(type|structure-type)\":\"file\"" \
   | sed -n "s/.*\"size\":\([0-9]*\).*/\1/p" | awk "{s+=\$1} END {print s+0}")
@@ -165,14 +189,20 @@ fi
 # a space would sample the wrong paths and report a mismatch that is not real. Same reason
 # runner.sh redirects from a file instead of piping into the loop -- a pipeline would also
 # run the loop in a subshell and the counters would die with it.
-head -5 /tmp/expected.txt > /tmp/sample.txt
+head -5 /tmp/expected_raw.txt > /tmp/sample.txt
 SAMPLES=0; SAMPLES_OK=0
-while IFS= read -r p; do
-  [ -n "$p" ] || continue
-  A=$(restic dump "$SNAP" "$p" | sha256sum | cut -c1-64)
-  B=$(sha256sum "/restore/$p" | cut -c1-64)
+while IFS= read -r raw; do
+  [ -n "$raw" ] || continue
+  norm=$(printf '%s' "$raw" | sed "s|^/||")
+  # Stored form first, stripped form second; a failed dump must not be scored as a hash of
+  # empty input, which is why the exit status of the dump call itself decides.
+  if ! restic dump "$SNAP" "$raw" > /tmp/sample.bin 2>/dev/null; then
+    restic dump "$SNAP" "/$norm" > /tmp/sample.bin 2>/dev/null || { echo "CANNOT_DUMP $raw" >&2; continue; }
+  fi
+  A=$(sha256sum < /tmp/sample.bin | cut -c1-64)
+  B=$(sha256sum "/restore/$norm" | cut -c1-64)
   SAMPLES=$((SAMPLES + 1))
-  if [ "$A" = "$B" ]; then SAMPLES_OK=$((SAMPLES_OK + 1)); else echo "MISMATCH $p repo=$A disk=$B" >&2; fi
+  if [ "$A" = "$B" ]; then SAMPLES_OK=$((SAMPLES_OK + 1)); else echo "MISMATCH $raw repo=$A disk=$B" >&2; fi
 done < /tmp/sample.txt
 
 MATCH=no
@@ -185,9 +215,35 @@ echo "DRILL_RESULT target=$BACKUP_TAG snapshot=$SNAP files_expected=$EXPECTED_FI
 
 job_manifest() {
   # $1 = job name, $2 = probe|restore
-  local name="$1" kind="$2" script extra_mounts="" extra_volumes=""
+  local name="$1" kind="$2" script extra_mounts="" extra_volumes="" caps='"DAC_OVERRIDE"'
   if [ "$kind" = probe ]; then script="$RESTIC_PROBE"; else script="$RESTIC_RESTORE"; fi
   if [ "$kind" = restore ]; then
+    # CAP_CHOWN, and this is the finding a live run produced that no amount of reading the
+    # backup manifests would have: the nightly jobs run `drop ALL` + DAC_OVERRIDE, which is
+    # exactly right for READING a heterogeneous-uid volume and exactly wrong for WRITING one
+    # back. Restoring mealie's files to uid 911 needs lchown, and root without CAP_CHOWN gets
+    # EPERM -- restic wrote all 12.285 MiB and then exited fatal on 21 errors. A real
+    # disaster would discover this at the worst possible moment, which is the point of
+    # drilling.
+    #
+    # CHOWN alone was not enough. The next live run failed on `failed to restore timestamp of
+    # "…": operation not permitted` -- utimensat to an arbitrary time requires ownership of the
+    # file or CAP_FOWNER, and restic had just chowned those files to uid 911, so root without
+    # FOWNER was refused on its own output. Two errors, two round trips, and the lesson is the
+    # general one rather than the specific one: A RESTORE NEEDS MORE PRIVILEGE THAN A BACKUP,
+    # and the set is discovered from the kernel's refusals, not from the backup manifests.
+    #
+    # So the restore container gets the standard restore-as-root set, each member justified
+    # rather than cargo-culted:
+    #   CHOWN   lchown to the stored uid/gid
+    #   FOWNER  utimensat and chmod on files whose owner is not us -- i.e. everything
+    #   FSETID  clear setgid/setuid bits that chmod would otherwise drop
+    #   SETUID  restic switches fsuid while writing so files land owned correctly
+    #   SETGID  the same for fsgid
+    #   DAC_OVERRIDE  read past mode bits, as on the backup side
+    # All six are in the Pod Security `baseline` allowed-capability list, which is why the
+    # backup jobs' DAC_OVERRIDE was accepted in these namespaces at all.
+    caps='"DAC_OVERRIDE", "CHOWN", "FOWNER", "FSETID", "SETUID", "SETGID"'
     # The scratch volume, and ONLY the scratch volume. The source PVC is deliberately not
     # mounted: a restore that could read the live data would prove nothing.
     extra_mounts='        - name: target
@@ -247,7 +303,7 @@ $(printf '%s\n' "$script" | sed 's/^/          /')
           seccompProfile: {type: RuntimeDefault}
           capabilities:
             drop: ["ALL"]
-            add: ["DAC_OVERRIDE"]
+            add: [$caps]
         resources:
           requests: {cpu: 100m, memory: 512Mi}
           limits: {cpu: 500m, memory: 1Gi}

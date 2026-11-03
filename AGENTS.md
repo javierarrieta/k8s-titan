@@ -94,8 +94,20 @@ recoverable**; and both Grafana volumes, because every provider sets `allowUiUpd
 datasources and the admin credentials are in git, and a wiped PVC rebuilds itself — what it loses
 is anything built by hand in the UI. Neither path is monitored yet: casa owns the Prometheus that would alert on a stale
 snapshot and no such alert exists for titan, so a week of failed backups currently looks exactly
-like a week of successful ones. The restic side has also never been restored — the spec's §10 is
-that list.
+like a week of successful ones. **One restic volume has been restored and verified** —
+`mealie/mealie-data`, 2026-11-03, `DRILL_RESULT … match=yes`, recorded in
+[`pv-restore-drill.md`](pv-restore-drill.md). The other three opted-in volumes
+(`apps/investing-agent-pv-claim`, `open-webui/open-webui-data`, `sure/sure-storage`) have
+**not** been restored, so "the restic backups are drilled" is still false; what is proven is
+the mechanism — repository, mirrored credentials, tag lookup, `--target` layout, byte-for-byte
+content. Two things that drill found belong here, because both would otherwise be discovered
+during a real restore: **a restore needs more privilege than a backup** (the nightly jobs'
+`drop ALL` + `DAC_OVERRIDE` reads a heterogeneous-uid volume fine and cannot write one back —
+`lchown` needs `CHOWN`, and `utimensat` on a file whose owner is not you needs `FOWNER`), and
+**restic stores paths with the leading slash** (`"path":"/volume/.secret"`), so a restore that
+assumes `volume/...` reports a false mismatch. The spec's §10 is still the list of what is not
+proven; the drill script is `tools/backup-restore-drill.sh` and it needs an admin context,
+because `k8s-reader` cannot create Jobs.
 
 That covers TeslaMate's driving history and TeslaMate's settings,
 which are rows in that same cluster and are not in git. The runbook at
