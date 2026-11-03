@@ -13,8 +13,10 @@ spec:
   path: ./apply/30-databases
   # Safe from the first reconcile, and the reason is worth keeping: prune deletes what
   # inventory.Diff(old, new) reports as stale, and a brand-new unit has an empty old inventory, so
-  # nothing can be stale. The shared `apps` unit is the opposite case — it is the same object with
-  # a 43-entry inventory — and it keeps prune: false until Task 5b.
+  # nothing can be stale. The shared `apps` unit was the opposite case — one object with a 43-entry
+  # inventory — and it ran with prune: false until the split had been proven safe. That is history
+  # now, not a pending condition: Task 5b restored prune on it in PR #85, and the inventory
+  # arithmetic that justified the flip is recorded in stage-apps.yaml.
   #
   # Belt and braces: the Cluster itself carries kustomize.toolkit.fluxcd.io/prune: disabled, which
   # survives this file being deleted entirely. That annotation lives in postgres.yaml and must move
