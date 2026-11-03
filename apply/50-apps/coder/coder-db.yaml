@@ -35,5 +35,10 @@ spec:
   cluster:
     name: postgres
   login: true
+  # `-1` is CNPG's documented default and Postgres' "no limit", so this is a no-op in the database.
+  # Same reason as postgres-exporter's copy: this role has reported a stale `status.message` since
+  # 2026-10-06 alongside `applied: true`, and with `observedGeneration` unmoved nothing has re-run
+  # the path that would clear it (#154). A spec change guarantees one.
+  connectionLimit: -1
   passwordSecret:
     name: coder-db-credentials
