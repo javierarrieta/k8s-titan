@@ -233,9 +233,9 @@ metadata:
 # object's kustomize.toolkit.fluxcd.io/name label on every reconcile, and kustomize-controller deletes
 # a stale object only when that label still names the stage doing the pruning. Whoever later deleted
 # "the duplicate" would therefore have had a coin-flip chance of cascading the namespace — and with
-# it the Traefik HelmRelease, its Deployment and the cluster's whole ingress path. The removal was
-# staged behind `prune: false` on stage-infra.yaml for exactly that reason; see the comment there
-# before restoring it.
+# it the Traefik HelmRelease, its Deployment and the cluster's whole ingress path. The duplicate was
+# removed in #221, staged behind a temporary `prune: false` on stage-infra.yaml for exactly that
+# reason; #222 restored it once `infra`'s inventory had let the object go.
 #
 # Why it is split out: `make dry-run` applies each stage with `apply --dry-run=server`, and server-side
 # dry-run persists nothing. A Namespace is therefore invisible to the objects that follow it even

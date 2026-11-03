@@ -8,24 +8,13 @@ spec:
     - name: secrets
   interval: 10m0s
   path: ./apply/20-infra
-  # TEMPORARILY false. It goes back to true in the next change to this file, and only once the check
-  # below passes.
-  #
-  # Removing the duplicate Namespace/traefik-system from 20-infra takes that object out of this
-  # stage's inventory, and kustomize-controller deletes a stale object only when the live object's
-  # kustomize.toolkit.fluxcd.io/name label still names the Kustomization doing the pruning
-  # (ssa.ResourceManager.Delete: a label mismatch is a SkippedAction, not a delete). Both stages were
-  # rewriting that label every 10m, so which one held the delete right at merge time was a coin flip,
-  # and losing that flip means pruning cascades traefik-system: the HelmRelease, its Deployment, and
-  # everything Reflector puts in there. With prune off, status.Inventory advances past the object
-  # without any delete being attempted -- the inventory is assigned before prune() runs, and prune()
-  # returns on the first statement when spec.prune is false. That is the one ordering that is safe
-  # whatever the label happens to say.
-  #
-  # Safe to restore when this prints False:
-  #   kubectl -n flux-system get kustomization infra -o jsonpath='{.status.inventory.entries[*].id}' \
-  #     | tr ' ' '\n' | grep -c '^_traefik-system__Namespace$'
-  prune: false
+  # Back to true after #221/#222. The duplicate Namespace/traefik-system was removed from this stage
+  # behind a temporary `prune: false`, because two stages owning one object leaves the prune right
+  # with whichever stage applied last, and losing that coin flip cascades the ingress namespace.
+  # Verified before restoring: `infra`'s inventory no longer listed _traefik-system__Namespace, and
+  # the HelmRelease and its pod were untouched. Do not re-declare that Namespace here -- it is
+  # declared once, in namespaces.yaml, and traefik.yaml's header says why.
+  prune: true
   sourceRef:
     kind: GitRepository
     name: flux-system

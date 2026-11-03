@@ -34,8 +34,9 @@
 # label, and kustomize-controller deletes a stale object only when that label still names the stage
 # doing the pruning. So deleting either copy carried a coin-flip chance of cascading this namespace -
 # the release below, its Deployment, everything Reflector mirrors into it - because the stage that
-# lost the object from its inventory held the delete right. The removal is therefore staged behind
-# `prune: false` in apply/00-bootstrap/stage-infra.yaml; read that comment before restoring it.
+# lost the object from its inventory held the delete right. The removal was staged behind a temporary
+# `prune: false` on stage-infra (#221), restored in #222 once that stage's inventory had let the
+# object go.
 #
 # The two original justifications for declaring it here have both expired. A HelmRelease and its
 # HelmRepository must live in the namespace the release installs into - true, but that asks for the
