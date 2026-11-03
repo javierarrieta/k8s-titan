@@ -57,6 +57,39 @@ spec:
       retryInterval: 5m
   values:
     fullnameOverride: kube-state-metrics
+    # Restart KSM when the customResourceState ConfigMap changes, because nothing else
+    # will and the failure is silent.
+    #
+    # #235 merged and the ConfigMap updated -- verified live, it holds three resources now
+    # (Kustomization, DatabaseRole, Database) -- and the pod did not move: still the
+    # 2026-10-13 object. Two independent facts add up to that:
+    #
+    #   * KSM reads --custom-resource-state-config-file exactly once at startup
+    #     (pkg/app/server.go:201, a plain `os.ReadFile`; there is no watcher anywhere in
+    #     the binary). Editing the ConfigMap is inert until the process restarts.
+    #   * The chart renders no checksum/config annotation for this ConfigMap -- it arrives
+    #     through extraVolumes, which the chart has no checksum hook for -- and the live
+    #     pod template carries no annotations at all (measured). Helm's three-way patch
+    #     sees an unchanged Deployment, so there is no rollout.
+    #
+    # Left alone, the exporter half of #231 ships a metric that never appears, and casa's
+    # TitanCnpgAppliedStateMissing fires and stays fired pointing at RBAC, which is fine.
+    #
+    # Reloader is already the mechanism here for exactly this problem -- coder.yaml and
+    # authentik.yaml name their ConfigMaps/Secrets explicitly for the same reason
+    # coder.yaml records for rejecting `auto: "true"`. Read from the live
+    # reloader-reloader Deployment: `--namespaces` includes `monitoring` and
+    # `--reload-strategy=annotations` is set, so this annotation is acted on.
+    #
+    # Naming the one ConfigMap rather than `reloader.stakater.com/auto: "true"` is
+    # deliberate: auto would discover every ConfigMap this pod can see and restart KSM for
+    # unrelated edits too.
+    #
+    # This line is also what makes #235 take effect at all. The annotation changes the pod
+    # template, so the next Helm upgrade rolls the pod and it reads the three-resource
+    # config on the way up.
+    podAnnotations:
+      configmap.reloader.stakater.com/reload: kube-state-metrics-customresourcestate-config
     # One node. Autosharding on a single-node cluster shards work that does not
     # exist and adds a StatefulSet to reason about.
     replicas: 1
