@@ -3,6 +3,17 @@
 # reflector allow-list that AGENTS.md treats as the controlled mechanism, and every coder renewal
 # would reissue the whole cluster wildcard.
 #
+# C4 IS CONTESTED, NOT SETTLED: issue #218 argues for folding this leaf into titan-wildcard, and it
+# is right that the cost has outlived the reason. What this file pays now is a second ACME order every
+# ~60 days and a second DNS-01 write at `_acme-challenge.coder.titan` -- the exact write that creates
+# a `coder.titan` node and so shadows `*.titan`, which is what
+# ../public-dns-tf/records_public.tf:15-31 exists to survive -- in exchange for a name the cluster
+# wildcard already signs. Read #218 before treating the paragraph above as settled. It carries the
+# counter-argument rather than a verdict: renewal blast radius (a shared clock means a coder renewal
+# reissues the wildcard every one of the sixteen titan-tls consumers depends on), and the
+# key-distribution cost of adding `coder` to the allow-list that auto-pushes the cluster wildcard's
+# private key into a namespace that did not previously hold it.
+#
 # IT IS NO LONGER A WILDCARD, AND THE NAME STILL SAYS ONE. `metadata.name` stayed `coder-wildcard`
 # on purpose: renaming a Certificate is a new object, which triggers a fresh issuance and a fresh
 # reflection into `coder` for a cosmetic gain, and every consumer references the Secret by
