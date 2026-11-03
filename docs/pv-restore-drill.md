@@ -275,9 +275,57 @@ What this does **not** cover: real restic behaviour, real S3, real `local-path`
 provisioning, and the `restic restore` file layout itself — the fake `cp -a`s the tree. Only
 a live run covers those, which is what `restore --context titan` is for.
 
-## Recording a run
+## Recorded runs
 
 Same rule as the Postgres drills — a drill is a dated artifact, not a claim. Record the
-`DRILL_RESULT` line, the snapshot id, the volume, and the date here (or in #101), and say
-what was **not** covered. Until that line exists, this file documents a capability, not a
-proven one.
+`DRILL_RESULT` line, the snapshot id, the volume and the date, and say what was **not**
+covered.
+
+### 2026-11-03 — `mealie/mealie-data`, snapshot `0c8e1f99` — **PASS**
+
+```
+Summary: Restored 22 files/dirs (12.285 MiB) in 0:00
+DRILL_RESULT target=mealie-data snapshot=0c8e1f99 files_expected=9 files_restored=9
+  bytes_expected=12881822 bytes_restored=12881822 paths_match=yes
+  content_samples=5/5 match=yes
+```
+
+Snapshot `0c8e1f99` is the 2026-11-02 20:30 UTC nightly backup. Restored into
+`mealie/mealie-data-drill` (`local-path`, 5Gi), verified, cleaned up. Elapsed: seconds.
+
+Three things worth pointing at in that line:
+
+- **`bytes_expected=12881822` is the snapshot's own `total_bytes_processed`**, reported
+  independently by `restic ls` on the other side of the restore. Two different restic
+  commands agreeing on the byte count is stronger than one command agreeing with itself.
+- **`content_samples=5/5`** means five files were read out of the repository with
+  `restic dump` and off the restored volume with `sha256sum`, and matched byte for byte.
+  This is the check the two failed runs never reached.
+- **`files_expected=9` against `Restored 22 files/dirs`** is not a contradiction: 22 counts
+  directories too, and the comparison is regular-files to regular-files on both sides.
+
+**What this run does not cover**, restated so nobody has to go looking: the other three
+opted-in volumes; application consistency (this is a cold snapshot into a scratch volume, not
+a restore under load); whether an app starts against a restored volume; whether a failed
+backup would be noticed, since nothing alerts on it; and any RTO — no timing has been
+measured for the 10Gi volumes.
+
+**What it cost to get here:** five bugs, all found by the drill rather than by production.
+`snapshots --json` key names, `ls --json` key names, `restic dump` rather than `restic cat`,
+`--last` being a boolean rather than a count, the leading-slash path assumption, and two
+missing capabilities. Every one of them would have been a failed restore during a real
+incident.
+
+### Future runs
+
+Run it per volume if per-volume claims are wanted:
+
+```sh
+for t in "apps investing-agent-pv-claim" "open-webui open-webui-data" "sure sure-storage"; do
+  set -- $t
+  tools/backup-restore-drill.sh restore --context <admin-ctx> --namespace "$1" --pvc "$2"
+done
+```
+
+Paste the `DRILL_RESULT` line back into this file with the date. A run that failed belongs
+here too — that is the version people need.
