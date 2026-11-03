@@ -130,6 +130,14 @@ if [ -n "$SNAP" ]; then
 fi
 '
 
+# THE PATH PREFIX, which the live evidence disproved. The assumption was that `restic backup
+# /volume` strips the leading slash and stores `volume/...`. It does not: restic 0.19.1's
+# `ls --json` reports `"path":"/volume/.secret"` and `"paths":["/volume"]`, slash intact.
+# Comparing those strings against `find /restore` output, which has no leading slash, would
+# report paths_match=no on a perfectly good restore. So both sides are normalised by
+# stripping a leading `/`, and `restic dump` is offered the stored form first and the
+# stripped form second, because which one restic wants is exactly the kind of thing that
+# changed once already.
 RESTIC_RESTORE='
 set -eu
 export TMPDIR=/tmp
@@ -151,8 +159,11 @@ echo "== restored tree =="; ls -la /restore
 # Only regular files on both sides: symlinks, devices and fifos are excluded from the
 # expected list by the type filter and from the tree by `find -type f`, so the two counts
 # are the same population rather than two different ones that happen to agree.
+# Sorted in stored form first; every stored path here begins with `/`, so stripping that
+# prefix afterwards preserves the order and the two files stay line-aligned.
 restic ls --json "$SNAP" | grep -E "\"(type|structure-type)\":\"file\"" \
-  | sed -n "s/.*\"path\":\"\([^\"]*\)\".*/\1/p" | sort > /tmp/expected.txt
+  | sed -n "s/.*\"path\":\"\([^\"]*\)\".*/\1/p" | sort > /tmp/expected_raw.txt
+sed "s|^/||" /tmp/expected_raw.txt > /tmp/expected.txt
 EXPECTED_FILES=$(wc -l < /tmp/expected.txt | tr -d " ")
 EXPECTED_BYTES=$(restic ls --json "$SNAP" | grep -E "\"(type|structure-type)\":\"file\"" \
   | sed -n "s/.*\"size\":\([0-9]*\).*/\1/p" | awk "{s+=\$1} END {print s+0}")
@@ -178,14 +189,20 @@ fi
 # a space would sample the wrong paths and report a mismatch that is not real. Same reason
 # runner.sh redirects from a file instead of piping into the loop -- a pipeline would also
 # run the loop in a subshell and the counters would die with it.
-head -5 /tmp/expected.txt > /tmp/sample.txt
+head -5 /tmp/expected_raw.txt > /tmp/sample.txt
 SAMPLES=0; SAMPLES_OK=0
-while IFS= read -r p; do
-  [ -n "$p" ] || continue
-  A=$(restic dump "$SNAP" "$p" | sha256sum | cut -c1-64)
-  B=$(sha256sum "/restore/$p" | cut -c1-64)
+while IFS= read -r raw; do
+  [ -n "$raw" ] || continue
+  norm=$(printf '%s' "$raw" | sed "s|^/||")
+  # Stored form first, stripped form second; a failed dump must not be scored as a hash of
+  # empty input, which is why the exit status of the dump call itself decides.
+  if ! restic dump "$SNAP" "$raw" > /tmp/sample.bin 2>/dev/null; then
+    restic dump "$SNAP" "/$norm" > /tmp/sample.bin 2>/dev/null || { echo "CANNOT_DUMP $raw" >&2; continue; }
+  fi
+  A=$(sha256sum < /tmp/sample.bin | cut -c1-64)
+  B=$(sha256sum "/restore/$norm" | cut -c1-64)
   SAMPLES=$((SAMPLES + 1))
-  if [ "$A" = "$B" ]; then SAMPLES_OK=$((SAMPLES_OK + 1)); else echo "MISMATCH $p repo=$A disk=$B" >&2; fi
+  if [ "$A" = "$B" ]; then SAMPLES_OK=$((SAMPLES_OK + 1)); else echo "MISMATCH $raw repo=$A disk=$B" >&2; fi
 done < /tmp/sample.txt
 
 MATCH=no

@@ -76,6 +76,22 @@ live volume would pass whether or not the repository worked.
 
 ## The traps in it, all of them already paid for
 
+- **The path prefix — and the assumption about it was wrong.** The natural guess is that
+  `restic backup /volume` strips the leading slash and stores `volume/...`. The live
+  `ls --json` evidence says otherwise: `"paths":["/volume"]` and
+  `"path":"/volume/.secret"`, **slash intact**. Comparing those against `find /restore`
+  output, which has no leading slash, would report `paths_match=no` on a perfectly good
+  restore — a false failure, the worst kind, because it teaches you to distrust the drill.
+  So both sides are normalised by stripping a leading `/`, and `restic dump` is offered the
+  stored form first and the stripped form second, since which one restic wants is exactly the
+  sort of thing that has already changed once. `restic restore --target /restore` still
+  produces `/restore/volume/...`, which the `/restore/volume` existence guard checks.
+  Worth stating plainly because the wrong version of this claim is the one a future reader is
+  most likely to re-guess — including the author of this script.
+- **The in-pod scripts are single-quoted bash strings in the outer script.** An apostrophe in
+  a comment *inside* them terminates the string and the outer script dies with
+  `syntax error near unexpected token 'done'` — which reads like a shell-logic bug and is
+  really a quoting bug three hundred characters earlier. Write around it.
 - **`--last` is not a count, and using it silently empties the result.** The second live
   probe printed `Flag --last has been deprecated, use --latest 1` followed by
   `Ignoring "1": no matching ID found for prefix "1"` and `Ignoring "filters": explicit
@@ -105,12 +121,7 @@ live volume would pass whether or not the repository worked.
 - **`for p in $(…)` would have sampled the wrong files.** A filename containing a space
   word-splits, so the sample loop reads from a file with `while IFS= read -r` — the same
   reason `runner.sh` redirects from a file instead of piping into a loop.
-- **The path prefix.** `restic backup /volume` stores paths as `volume/...`, so
-  `restic restore --target /restore` lands at `/restore/volume/...`, **not**
-  `/restore/...`. A drill that looks directly under `/restore` reports "restored nothing"
-  while restic exits 0. The verification compares against the repository's own path list,
-  which carries the prefix, so the mismatch shows up as `paths_match=no` rather than a
-  silent zero.
+- **`local-path`, not `local-path-retain`, for the scratch PVC.**
 - **`local-path`, not `local-path-retain`, for the scratch PVC.** Retain leaves a
   `Released` PV behind when the PVC is deleted. titan already carries five of those from
   earlier provisioning churn (#114). A drill that adds litter is a drill people stop
@@ -200,14 +211,16 @@ holds a full copy of production data under a name that says it is safe to delete
 
 ## How the script itself was tested
 
-Two live probes found four bugs, so the verification logic was eventually run locally
-against a fake `restic` before the third attempt shipped — the extracted in-pod script,
-executed with a stub `restic` emulating 0.19.1's compact one-object-per-line `ls --json`.
+Two live probes found five bugs, so the verification logic was eventually run locally
+against a fake `restic` before the next attempt shipped — the extracted in-pod script,
+executed with a stub `restic` emulating 0.19.1's compact one-object-per-line `ls --json`,
+**including the leading-slash paths the live evidence showed.** Running the old body against
+that stub is what reproduced `paths_match=no` before any cluster was touched.
 
 | case | result |
 |---|---|
-| clean restore of a tree containing `two words.txt` | `files_expected=3 files_restored=3 bytes_expected=3035 bytes_restored=3035 paths_match=yes content_samples=3/3 match=yes`, exit 0 |
-| one byte appended to one restored file | `bytes_restored=3036`, `content_samples=2/3`, `MISMATCH volume/data/one.txt repo=… disk=…`, `match=no`, **exit 1** |
+| clean restore of a tree containing `two words.txt`, stub paths `/volume/...` | `files_expected=3 files_restored=3 bytes_expected=3035 bytes_restored=3035 paths_match=yes content_samples=3/3 match=yes`, exit 0 |
+| one byte appended to one restored file | `bytes_restored=3036`, `content_samples=2/3`, `MISMATCH /volume/data/one.txt repo=… disk=…`, `match=no`, **exit 1** |
 
 The second row is the one that matters: **a check that can only pass is worthless**, so the
 deliberate-corruption case is the proof the gate is live. The filename with a space is the
