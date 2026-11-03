@@ -23,6 +23,64 @@ data:
           - type: telegram
             failure-threshold: 3
             send-on-resolved: true
+
+      # The two Home Assistant passthroughs (#112, added in fd0f419). They are the only titan hosts
+      # whose correctness depends on a file that is not in this tree: HA answers **HTTP 400 to every
+      # request** — app and browser alike — when it receives `X-Forwarded-For` from an address that
+      # is not in its own `http.trusted_proxies`, and that list lives in each box's
+      # `configuration.yaml`. Neither host is proxy-gated (both are named in `NOT_PROXY_GATED` in
+      # `tools/ingress-auth-check.py` because HA authenticates natively and companion apps do not
+      # follow `302`s), so there is no `Middleware` that would fail loudly instead. A `[STATUS] == 200`
+      # probe is the only thing in the stack that can see it.
+      #
+      # PROBED THROUGH THE PUBLIC URL, not the backend address, on purpose: the probe has to exercise
+      # DNS -> Traefik -> TLS -> HA, which is the whole path a user takes. Reaching the backend is not
+      # the same claim — `apply/50-apps/home-hass/home-hass.yaml` records an in-cluster 200 from
+      # 10.62.0.75 taken the day the hostname was promised, and the host still answered 400 to every
+      # real request through the proxy.
+      #
+      # HAIR-PIN IS PROVEN, not assumed (measured 2026-11-03 from a pod on this cluster): a request to
+      # `https://hass.titan.arrieta.eu/` from inside the cluster reaches the public address and comes
+      # back, so a failing probe here is the host's fault and not the probe's.
+      - name: hass-home-public
+        group: titan
+        url: https://hass.titan.arrieta.eu/
+        interval: 1m
+        client:
+          timeout: 10s
+        conditions:
+          - "[STATUS] == 200"
+          # The cert path is otherwise unmonitored end to end: a `Certificate` can be `Ready` while
+          # Reflector has no Secret in the consuming namespace, and `secretTemplate` allow-list
+          # omissions fail silently. 720h is 30 days — the wildcard renews at roughly two thirds of
+          # its lifetime, so this only fires when a renewal has actually failed more than once.
+          - "[CERTIFICATE_EXPIRATION] < 720h"
+        alerts:
+          - type: telegram
+            failure-threshold: 3
+            send-on-resolved: true
+
+      # The chiclana box, reached over the titan-managed mesh (192.168.133.3) rather than the OPNsense
+      # WireGuard peer. Same 400 failure mode, different trusted_proxies list, so it is a separate
+      # probe and not a duplicate: the two boxes can break independently, and did — measured
+      # 2026-11-03 this one answered 200 while the home box answered 400.
+      - name: chiclana-hass-public
+        group: titan
+        url: https://chiclana-hass.titan.arrieta.eu/
+        interval: 1m
+        client:
+          timeout: 10s
+        conditions:
+          - "[STATUS] == 200"
+          - "[CERTIFICATE_EXPIRATION] < 720h"
+        alerts:
+          - type: telegram
+            failure-threshold: 3
+            send-on-resolved: true
+
+      # NOT DONE BY THIS CHANGE, and deliberately so (#224 is scoped to the two hosts with an
+      # out-of-band dependency): the other 14 public hostnames are still unprobed, and nothing here
+      # alerts on a stale backup either. Monitoring landed; the rules did not.
 ---
 apiVersion: apps/v1
 kind: Deployment
