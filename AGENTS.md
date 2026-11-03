@@ -8,8 +8,10 @@ made and what was deliberately left out.
 
     apply/00-bootstrap/     namespaces + the stage Kustomizations + Flux itself
     apply/10-secrets/       SOPS-encrypted Secrets (decrypted by kustomize-controller)
-    apply/20-infra/         cert-manager + OVH DNS-01 webhook + Reflector + the
-                            CloudNativePG operator + the read-only agent identity
+    apply/20-infra/         cert-manager + OVH DNS-01 webhook + Reflector + Reloader + the
+                            CloudNativePG operator + the read-only agent identity + the
+                            Flux-managed Traefik + promtail and kube-state-metrics + the
+                            `local-path-retain` StorageClass
     apply/30-databases/     the shared Postgres `Cluster` and its daily `ScheduledBackup`,
                             in namespace `databases`
     apply/40-certificates/  the titan.arrieta.eu wildcard, in namespace `certificates`
@@ -51,10 +53,16 @@ somewhere: a manifest in a directory no `kustomization.yaml` names is a manifest
 and `make kustomize-listing` is what catches it.
 
 Namespaces are declared centrally rather than inside the charts that need them:
-`apply/00-bootstrap/namespaces.yaml` holds `apps`, `auth`, `cert-manager`,
-`certificates`, `cnpg-system` and `databases`. `k8s-reader` is the one exception — its
-own manifest under `20-infra` creates it, because the identity and the namespace are one
-thing.
+`apply/00-bootstrap/namespaces.yaml` holds all seventeen of them — `apps`, `auth`,
+`cert-manager`, `certificates`, `cnpg-system`, `coder`, `coder-workspaces`, `databases`,
+`files`, `gatus`, `llm`, `mealie`, `monitoring`, `observability`, `open-webui`, `sure` and
+`traefik-system`. `k8s-reader` is the one exception — its own manifest under `20-infra`
+creates it, because the identity and the namespace are one thing. `traefik-system` is the
+reverse case: it is declared centrally **and** again in `apply/20-infra/traefik/traefik.yaml`,
+whose header explains it must be present in the stage that first uses it or that stage cannot
+be checked on its own. Both objects carry identical content; do not delete either one without
+checking which stage's inventory owns the live object, because `prune: true` deletes what
+leaves an inventory.
 
 For cluster investigation, use the `k8s-reader` ServiceAccount rather than an admin
 kubeconfig — read-only, and it cannot read Secrets. Minting, verification and
@@ -151,13 +159,17 @@ the stream is rejected per-pod, silently, with promtail reporting healthy.
   prints the secret, which is the point.
 - This repo is public. No credentials, and no concrete public IPv4 — write
   `<OVH_PUBLIC_IP>`.
-- Ingress class is k3s' bundled `traefik`, and its configuration is **not** managed
-  here. `titan-tls` is produced in namespace `certificates` by the wildcard
-  `Certificate` and reflected into `apps` and `auth` by Reflector; reference it as
+- Ingress is the **Flux-managed** `traefik` `HelmRelease` in namespace `traefik-system`
+  (`apply/20-infra/traefik/traefik.yaml`), not k3s' bundled chart. The handover landed
+  2026-11-02 and `docs/traefik-cutover-runbook.md` is the runbook, so Traefik configuration is
+  a commit in this repo and no longer something set from `nixos-configurations`. The class
+  name is unchanged — `ingressClassName: traefik` — and so are the entry point names, `web`
+  and `websecure`. `titan-tls` is produced in namespace `certificates` by the wildcard
+  `Certificate` and reflected into consuming namespaces by Reflector; reference it as
   `secretName: titan-tls` from the namespace your Ingress lives in. Nothing else
   receives it — the allow-list is the `secretTemplate` annotations on
-  `apply/40-certificates/titan-wildcard.yaml`, so a new consuming namespace means
-  editing that file, never copying the Secret by hand. **The one deliberate exception is
+  `apply/40-certificates/titan-wildcard.yaml`, today `apps,auth,open-webui,observability,files,mealie,llm,sure`,
+  so a new consuming namespace means editing that file, never copying the Secret by hand. **The one deliberate exception is
   `streaming.titan.arrieta.eu`, which points at `tesla-streaming-tls` from
   `apply/40-certificates/tesla-streaming.yaml`. That is not duplication to collapse back into the
   wildcard: TeslaMate's Erlang stream client rejects wildcard SANs and crash-loops every time a car
