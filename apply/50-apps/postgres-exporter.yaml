@@ -13,13 +13,16 @@ spec:
   login: true
   inRoles:
     - pg_monitor
-  # `-1` is what CNPG documents as its own default and what Postgres means by "no limit", so this
-  # line changes nothing in the database. It is here because it is the cheapest way to force a
-  # re-apply: this role has carried a stale `status.message` since 2026-10-21 while `applied` stayed
-  # `true`, and `observedGeneration` has not moved since creation, so nothing has re-run the path
-  # that would clear it (#154). A spec change guarantees one. Kept deliberately as the documented
-  # recovery lever, not left as a one-off edit that vanishes.
-  connectionLimit: -1
+  # Two things are written into the Postgres role here, and the second is the reason this line is
+  # not decoration. `comment` is the only DatabaseRole field that is NOT defaulted by the CRD, so
+  # it is the only one that actually changes the stored spec — and a stored-spec change is what
+  # bumps `metadata.generation`, which is what makes the instance manager re-apply the role.
+  # This role has carried a stale `status.message` since 2026-10-21 alongside `applied: true`, and
+  # with `observedGeneration` unmoved since creation nothing has re-run the path that would clear
+  # it (#154). #228 tried `connectionLimit: -1` for this and it did nothing: the CRD declares
+  # `default: -1`, so the API server was already writing that field into every DatabaseRole and
+  # the stored spec never changed. Do not reach for a defaulted field as a reconcile lever again.
+  comment: managed by k8s-titan apply/50-apps/postgres-exporter.yaml
   passwordSecret:
     name: postgres-exporter-credentials
 ---
