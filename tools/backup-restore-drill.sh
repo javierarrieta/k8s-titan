@@ -225,7 +225,25 @@ job_manifest() {
     # EPERM -- restic wrote all 12.285 MiB and then exited fatal on 21 errors. A real
     # disaster would discover this at the worst possible moment, which is the point of
     # drilling.
-    caps='"DAC_OVERRIDE", "CHOWN"'
+    #
+    # CHOWN alone was not enough. The next live run failed on `failed to restore timestamp of
+    # "…": operation not permitted` -- utimensat to an arbitrary time requires ownership of the
+    # file or CAP_FOWNER, and restic had just chowned those files to uid 911, so root without
+    # FOWNER was refused on its own output. Two errors, two round trips, and the lesson is the
+    # general one rather than the specific one: A RESTORE NEEDS MORE PRIVILEGE THAN A BACKUP,
+    # and the set is discovered from the kernel's refusals, not from the backup manifests.
+    #
+    # So the restore container gets the standard restore-as-root set, each member justified
+    # rather than cargo-culted:
+    #   CHOWN   lchown to the stored uid/gid
+    #   FOWNER  utimensat and chmod on files whose owner is not us -- i.e. everything
+    #   FSETID  clear setgid/setuid bits that chmod would otherwise drop
+    #   SETUID  restic switches fsuid while writing so files land owned correctly
+    #   SETGID  the same for fsgid
+    #   DAC_OVERRIDE  read past mode bits, as on the backup side
+    # All six are in the Pod Security `baseline` allowed-capability list, which is why the
+    # backup jobs' DAC_OVERRIDE was accepted in these namespaces at all.
+    caps='"DAC_OVERRIDE", "CHOWN", "FOWNER", "FSETID", "SETUID", "SETGID"'
     # The scratch volume, and ONLY the scratch volume. The source PVC is deliberately not
     # mounted: a restore that could read the live data would prove nothing.
     extra_mounts='        - name: target
