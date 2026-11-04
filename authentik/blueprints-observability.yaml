@@ -83,8 +83,11 @@ entries:
       # Written out rather than inherited: the default is `any`, which is what is wanted, but a
       # security decision should not live in a default a future release is free to change.
       policy_engine_mode: any
-      # The proxy provider's application (`tesla`) stays as it is: it is what makes forward-auth
-      # work. Two applications, two providers, two jobs — collapsing them breaks one of the two.
+      # The proxy provider's application (`tesla`) is a separate object with a separate job: it is what
+      # makes forward-auth work, and it now carries its own bindings. Two applications, two providers,
+      # two jobs — collapsing them breaks one of the two. But note the edge is shared: `tesla` is
+      # forward_domain over the whole apex, so its bindings gate the path to this host too, before
+      # these ones are ever reached. See apply/50-apps/auth/tesla-outpost-blueprint.yaml.
 
   # --- who may reach Grafana at all ---------------------------------------------------------------
   # Two bindings and `policy_engine_mode: any`, so a member of EITHER group gets in. This replaces

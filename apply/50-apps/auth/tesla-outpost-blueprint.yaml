@@ -74,9 +74,24 @@ data:
     # WHAT IS DELIBERATELY ABSENT
     # internal_host is left unset: it is "Exclusive with" forward-auth mode per the field's own help
     # text (models.py:87-94), and setting it would silently change what the provider does.
-    # access_group is left unset, so any authentik-authenticated user reaches both apps. Tightening
-    # that is a separate change with its own review, not a side effect of this one.
     # intercept_header_auth is left at its default: nothing here authenticates by header.
+    #
+    # WHO MAY REACH THESE HOSTS IS DECIDED ON THE APPLICATION, NOT HERE — and an older note in this
+    # file said otherwise. It claimed `access_group` was left unset and that tightening it was a
+    # separate change. That field no longer exists: `grep -rn access_group authentik/providers/
+    # authentik/core/models.py` at the pinned 2026.8.5 returns nothing, and the base `Provider` model
+    # (core/models.py:630) carries only the three flows and property_mappings. The comment described
+    # an authentik that is not the one running here.
+    #
+    # The live mechanism is a policy binding on the Application below. A ProxyProvider IS an
+    # OAuth2Provider (providers/proxy/models.py:73), so the outpost's redirect to
+    # /application/o/authorize/ lands on AuthorizationFlowInitView (providers/oauth2/views/
+    # authorize.py:427), which is a PolicyAccessView: it resolves `self.application =
+    # self.provider.application` and runs PolicyEngine over THAT application's bindings
+    # (policies/views.py:133-139). With no bindings the engine's empty result is
+    # AppAccessWithoutBindings (core/apps.py:16), whose default is True and whose own description is
+    # "Applications with no policies bound can be accessed by any user". That, not an unset field, is
+    # why every authentik user could reach TeslaMate until now.
     version: 1
     metadata:
       name: titan-tesla
@@ -170,6 +185,7 @@ data:
       # One application, not two: the provider is forward_domain over titan.arrieta.eu and serves both
       # TeslaMate and Grafana, so this is the group of apps rather than TeslaMate's own page.
       - model: authentik_core.application
+        id: tesla-application
         identifiers:
           name: tesla
         state: present
@@ -182,6 +198,64 @@ data:
           # this entry exists to prevent, so it must not be able to fail silently.
           provider: !KeyOf titan-tesla-provider
           meta_launch_url: https://tesla.titan.arrieta.eu/
+          # Written out rather than inherited, for the same reason blueprints-observability.yaml does:
+          # `any` is the default, and a security decision should not live in a default a future release
+          # is free to change.
+          policy_engine_mode: any
+
+      # --- who may reach the outpost at all -------------------------------------------------------
+      # This is the gate that closes TeslaMate to "any authentik-authenticated user", and it is the
+      # only place it CAN be closed. See the header: the provider has no access field any more, so the
+      # binding on this Application is the mechanism.
+      #
+      # WHY THE UNION OF THREE GROUPS AND NOT JUST titan-family. The provider is forward_domain over
+      # titan.arrieta.eu, so this one Application fronts tesla, tesla-boards AND grafana — the outpost
+      # has exactly one provider attached and resolves every host under the domain to it. A binding
+      # narrower than what each of those three hosts already allows at its own layer would therefore
+      # lock an admin out of Grafana while trying to close the car. So the edge admits the union of
+      # what grafana.titan (titan-family | titan-grafana-admins) and tesla-boards
+      # (titan-family | titan-tesla-grafana-admins) already admit, and each app still decides its own
+      # access and its own role afterwards. Net effect: nobody loses anything they had, and anyone in
+      # none of the three — which is what a new family account like an opencloudUser-only user is —
+      # loses TeslaMate, which is the point.
+      #
+      # THE FAILURE MODE IS A LOCKOUT THAT INCLUDES YOU. A binding naming a group that does not exist
+      # denies, and once ANY binding exists the no-bindings allow-all stops applying. Membership was
+      # checked before this landed. Re-check it if this list ever changes — and keep it on ONE line,
+      # because `ak shell -c` exec()s its argument, so a wrapped command is an IndentationError:
+      # kubectl --context <admin> -n auth exec deploy/authentik-worker -- ak shell -c 'from authentik.core.models import Group; [print(n, "MISSING" if not Group.objects.filter(name=n).exists() else sorted(Group.objects.get(name=n).users.values_list("username", flat=True))) for n in ["titan-family","titan-grafana-admins","titan-tesla-grafana-admins","authentik Admins"]]
+      # Measured 2026-11-04 on 2026.8.5: titan-family = cathy_torrecilla, chuset, javier; both admin
+      # groups = javier. So javier passes on all three and is not lockable by this change. akadmin is
+      # in NONE of them and therefore loses these four hosts — deliberate, but note it is the account
+      # someone might reach for as break-glass. authentik's own UI is not behind this outpost, and
+      # Grafana keeps GF_AUTH_BASIC_ENABLED=true, so neither is a dead end.
+      # Recovery if it goes wrong is not a revert — a revert needs to be applied, and the person who
+      # cannot reach authentik's UI is the person who would normally apply it. It is adding yourself
+      # back to titan-family in the authentik admin UI, which is still reachable because authentik's
+      # own host is not behind this outpost.
+      - model: authentik_policies.policybinding
+        identifiers:
+          target: !KeyOf tesla-application
+          order: 0
+        state: present
+        attrs:
+          group: !Find [authentik_core.group, [name, titan-family]]
+
+      - model: authentik_policies.policybinding
+        identifiers:
+          target: !KeyOf tesla-application
+          order: 1
+        state: present
+        attrs:
+          group: !Find [authentik_core.group, [name, titan-grafana-admins]]
+
+      - model: authentik_policies.policybinding
+        identifiers:
+          target: !KeyOf tesla-application
+          order: 2
+        state: present
+        attrs:
+          group: !Find [authentik_core.group, [name, titan-tesla-grafana-admins]]
 
       # The outpost authentik created for itself. The identifier must match MANAGED_OUTPOST_NAME
       # exactly, and `type` must be present in attrs: validate_providers dispatches on
