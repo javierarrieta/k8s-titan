@@ -191,6 +191,22 @@ data:
         attrs:
           is_superuser: false
 
+      # Coder at coder.titan.arrieta.eu. Deliberately NOT titan-family: coder provisions whole
+      # compute environments on this cluster, so the blast radius of an extra member is a machine,
+      # not a dashboard, and the family group is the wrong size for it. Narrower than every other
+      # gate in this file by design.
+      #
+      # SEED THIS BEFORE THE BINDING LANDS, OR IT LOCKS YOU OUT. The binding lives in
+      # authentik/blueprints-coder.yaml and denies when the group is empty (see the warning above).
+      # Membership is out of band on purpose - scripts/seed-authentik-group.sh, or the UI.
+      - model: authentik_core.group
+        id: titan_coder_users
+        identifiers:
+          name: titan-coder-users
+        state: present
+        attrs:
+          is_superuser: false
+
       # ------------------------------------------------------------------ rbac
       # Read-only, and that is the whole point of it. docs/authentik-runbook.md §5 records the
       # gap this closes: the read-only k8s-reader identity is Forbidden on pods/exec, so it
