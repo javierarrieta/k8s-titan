@@ -68,9 +68,9 @@ named with a citation in `tools/ingress-auth-check.py`'s `NOT_PROXY_GATED`.
 | `sure.titan…` | `sure` | yes | yes | chart-rendered Ingress, see the gate note |
 | `files.titan…` opencloud | `files` | no | **no — deliberate, see Backups** | open (OIDC proxy) |
 | `collabora.titan…` | `files` | no | no | open (no login of its own) |
-| `grafana.titan…` | `observability` | no | no (rebuilds from git) | **gated** |
+| `grafana.titan…` | `observability` | no | no (rebuilds from git) | open (OIDC in-app) |
 | `tesla.titan…` teslamate | `apps` | yes | — | **gated** |
-| `tesla-boards.titan…` | `apps` | no | no | **gated** |
+| `tesla-boards.titan…` | `apps` | no | no | open (OIDC in-app) |
 | `authorize.titan…`, `tesla.titan…/.well-known`, `streaming.titan…` | `apps` | no | no | open by protocol necessity |
 | `investing-agent.titan…` | `apps` | no | yes | **gated** |
 | `llm.titan…` | `llm` | no | — | bearer token (nginx forwardAuth) |

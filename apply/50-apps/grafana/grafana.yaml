@@ -18,10 +18,13 @@
 #      already run, and `make ingress-auth` enforces that the omission is deliberate. The Ingress
 #      pins router.entrypoints: websecure because Traefik here runs no HTTP->HTTPS redirect, so the
 #      pin is what keeps cleartext :80 from serving this host now that no middleware does.
-#      WHAT THIS COSTS: nothing in front of this host decides anything any more. It is not a widening —
-#      the outpost resolved this host to the `tesla` application, whose three group bindings are a
-#      superset of these two, so the admitted set is unchanged (runbook §10). But a mistake in these
-#      two bindings now has nothing upstream of it. They live in
+#      WHAT THIS COSTS: the set admitted to a DASHBOARD is unchanged — the outpost resolved this host to
+#      the `tesla` application, whose three group bindings are a superset of these two (runbook §10).
+#      That is not the same as "nothing widened": the outpost sat in front of every path, including the
+#      ones Grafana serves without a session, so `/api/health` now discloses the exact build to anyone
+#      and the local-admin form was reachable with `?disableAutoLogin=true`. GF_AUTH_DISABLE_LOGIN_FORM
+#      below is what closes the second of those; the first is Grafana's and has no lever short of a
+#      proxy. But a mistake in these two bindings now has nothing upstream of it. They live in
 #      authentik/blueprints-observability.yaml (rendered into the sops Secret
 #      apply/10-secrets/authentik-observability-blueprint.yaml), not in this manifest, and
 #      `make observability-oidc-check` fails if they are absent, changed, or not `any`-mode.
@@ -115,6 +118,17 @@ spec:
         # from authentik, not from whoever finds the form.
         - name: GF_USERS_ALLOW_SIGN_UP
           value: "false"
+        # Hides the username/password form. Set 2026-11-05, when the review of #246 measured that
+        # `/login?disableAutoLogin=true` answers 200 on a host with nothing in front of it: with
+        # GF_AUTH_BASIC_ENABLED true below, that made the local admin out of
+        # observability-grafana-admin an internet-facing password guess for the first time. It hides
+        # the form only — Grafana's own docs are explicit that it is there for setups where auth is
+        # entirely external, and the `POST /login` route does not consult it — so the escape hatch
+        # survives as `curl -c- -XPOST -d '{"user":"admin","password":"…"}' https://grafana.titan…/login`.
+        # That is the trade: the form goes, the API path stays, and `make grafana-oidc-check` fails if
+        # either half of that pairing is ever broken.
+        - name: GF_AUTH_DISABLE_LOGIN_FORM
+          value: "true"
         - name: GF_ANALYTICS_REPORTING_ENABLED
           value: "false"
         - name: GF_ANALYTICS_CHECK_FOR_UPDATES

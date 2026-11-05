@@ -219,20 +219,36 @@ data:
       # none of the three — which is what a new family account like an opencloudUser-only user is —
       # loses TeslaMate, which is the point.
       #
-      # ONE OF THE THREE REASONS LEFT THE OUTPOST ON 2026-11-05. grafana.titan no longer passes through
-      # here — its forwardAuth Middleware was removed because the outpost cookie only refreshes on a
-      # top-level navigation and it 302'd every XHR panel poll (docs/grafana-runbook.md §10). So the
-      # union is now justified by two hosts, not three: titan-family and titan-tesla-grafana-admins by
-      # tesla and tesla-boards, and NOTHING behind this outpost needs titan-grafana-admins any more —
-      # that group gates grafana.titan, which is decided by the `observability` application's own
-      # bindings now. It is left in place rather than dropped: this binding is an allow-list, so
-      # removing a group here only ever refuses people, the membership check below has to be re-run
-      # before any edit here, and a PR that both moves a gate and narrows another one is two changes
-      # pretending to be one. Narrowing it is a separate decision with its own membership proof.
+      # TWO OF THE THREE REASONS LEFT THE OUTPOST ON 2026-11-05. grafana.titan stopped passing through
+      # here, and then tesla-boards did, both because the outpost cookie only refreshes on a top-level
+      # navigation and so 302'd every XHR panel poll (docs/grafana-runbook.md §10, issue #243). Only
+      # tesla.titan is left, so the union above is now justified by ONE host, not three:
+      #
+      #   titan-family                  justified — it is what closes the car to a random authenticated
+      #                                 account, and teslamate's own login is Tesla's OAuth, so nothing
+      #                                 upstream of this binding decides anything about authentik
+      #                                 identity here.
+      #   titan-grafana-admins          NOT justified by anything behind this outpost any more. It gates
+      #                                 grafana.titan, decided by the `observability` application's own
+      #                                 bindings since 2026-11-05.
+      #   titan-tesla-grafana-admins    NOT justified by anything behind this outpost any more either —
+      #                                 it was tesla-boards' group, and tesla-boards now decides its own
+      #                                 admission through the `tesla-boards` application's bindings
+      #                                 (asserted by `make grafana-oidc-check`).
+      #
+      # Both are left in place rather than dropped. This binding is an allow-list, so removing a group
+      # here only ever refuses people; the membership check below has to be re-run before any edit here;
+      # and a PR that both moves a gate and narrows another one is two changes pretending to be one.
+      # Narrowing it is a separate decision with its own membership proof — the follow-on recorded at the
+      # bottom of issue #243, and the one-liner below is the proof it needs.
       #
       # THE FAILURE MODE IS A LOCKOUT THAT INCLUDES YOU. A binding naming a group that does not exist
-      # denies, and once ANY binding exists the no-bindings allow-all stops applying. Membership was
-      # checked before this landed. Re-check it if this list ever changes — and keep it on ONE line,
+      # denies, and once ANY binding exists the no-bindings allow-all stops applying. The reviewed set is
+      # also asserted by `make outpost-binding-check`, which fails if these three bindings drift, if
+      # `policy_engine_mode` stops being `any`, if a second proxy provider appears, if `cookie_domain`
+      # moves off the apex, or if `skip_path_regex` grows — and which proves the tree, never authentik's
+      # database. Membership was checked before this landed. Re-check it if this list ever changes — and
+      # keep it on ONE line,
       # because `ak shell -c` exec()s its argument, so a wrapped command is an IndentationError:
       # kubectl --context <admin> -n auth exec deploy/authentik-worker -- ak shell -c 'from authentik.core.models import Group; [print(n, "MISSING" if not Group.objects.filter(name=n).exists() else sorted(Group.objects.get(name=n).users.values_list("username", flat=True))) for n in ["titan-family","titan-grafana-admins","titan-tesla-grafana-admins","authentik Admins"]]
       # Measured 2026-11-04 on 2026.8.5: titan-family = cathy_torrecilla, chuset, javier; both admin

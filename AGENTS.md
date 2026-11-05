@@ -233,7 +233,8 @@ a skip. CI runs GitGuardian on every push and warns, rather than failing, when
 
 What runs automatically is `make check-ci` — leak-check, kustomize-check, kustomize-listing,
 secrets-placement, release-secrets, secret-refs, ingress-auth, blueprint-mount-check,
-backup-coverage, crd-check and namespace-check — the gates provable from the tree alone,
+outpost-binding-check, backup-coverage, crd-check and namespace-check — the gates provable from the
+tree alone,
 and the only control here that `--no-verify` cannot skip. `release-secrets` fails when a
 `HelmRelease` reaches for a Secret that is not in `apply/10-secrets` with a matching
 namespace, so a typo'd name surfaces on the laptop instead of as a red release three
@@ -258,10 +259,21 @@ reference that crosses a Flux stage (`50-apps`' investing-agent Ingress → `60-
 because neither stage depends on the other and a cold restore can leave that reference briefly
 unresolvable. Its honest limits: it proves a gate resolves, never that the policy behind it is the
 policy you meant — an authentik provider with `access_group` unset gates a host open to every
-authenticated account, and that is a row in authentik's database, not in this tree — and it does not
-read `router.entrypoints`, so the `websecure` pin is still guarded by prose alone. It was written
+authenticated account, and that is a row in authentik's database, not in this tree — and it reads
+`router.entrypoints` only for the hosts named in `PIN_REQUIRED`: the four whose allow-list justification
+is "the app authenticates in-app" and the three whose `forwardAuth` would otherwise also run on cleartext
+`:80` (both Grafanas, both Home Assistant passthroughs, llm, investing-agent, teslamate). The other apex
+hosts are still free to answer on `:80`, and `http://meals.titan.arrieta.eu/` does. It was written
 because PR #192 gated a public host with an annotation, and that same file said, twice, that no gate
-reads Traefik annotations. `blueprint-mount-check` is that gate for authentik's blueprints, which
+reads Traefik annotations. `outpost-binding-check` is that gate for the outpost's own admission set:
+since #242 and #246 left `tesla.titan.arrieta.eu` as the one host gated by group membership with no IdP
+integration of its own behind it, nothing proved the three bindings still exist — `blueprint-mount-check`
+only asks whether a binding names a group this tree declares. It fails when the `tesla` application's
+bindings drift from the reviewed set, when `policy_engine_mode` stops being `any`, when a second proxy
+provider appears, when `cookie_domain` moves off the apex, or when `skip_path_regex` grows — the last
+being the exact field `docs/teslamate-runbook.md` §9's rejected alternative turns on. Its honest limit is
+the repo's standing one: committed bindings are not applied bindings. `blueprint-mount-check` is that
+gate for authentik's blueprints, which
 nothing here could see before it: authentik applies blueprints itself, on its own schedule, and
 reports nothing back to Flux, so a blueprint can be committed, built green, applied by Flux, and
 never reach the worker — the shape `docs/authentik-runbook.md` §5 records twice, including a

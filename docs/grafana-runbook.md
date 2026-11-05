@@ -531,26 +531,71 @@ any more. That sounds like a widening and it is not one: the outpost resolved th
 application, not the `observability` one, because its single `forward_domain` provider matches every
 host under `titan.arrieta.eu` (`apply/50-apps/auth/tesla-outpost-blueprint.yaml` says so in its own
 words). The edge was therefore enforcing tesla's three groups, a superset of the two that gate this
-application, so the set of people who can reach a panel is unchanged. What is genuinely different is
-that a mistake in `authentik/blueprints-observability.yaml` now has nothing in front of it —
-`make observability-oidc-check` is the gate that holds that line (§4).
+application, so the set of people who can reach a panel is unchanged. **What did widen is the
+unauthenticated surface**, because the outpost sat in front of every path and Grafana serves two without
+a session. Measured on this host after the cutover: `/api/health` answers `200` to anyone with
+`{"database":"ok","version":"12.4.14","commit":"500a5450…"}` — the exact build, which is a useful thing
+for a stranger to have — and `/login?disableAutoLogin=true` answered `200` with the local-admin form up,
+since `GF_AUTH_BASIC_ENABLED` is true (see §4 for why it stays true). The second of those is closed:
+`GF_AUTH_DISABLE_LOGIN_FORM=true` is set on both Grafanas as of 2026-11-05, which hides the form and
+leaves the escape hatch usable over `POST /login` — Grafana's own docs are explicit that the setting
+only hides the UI form, and `make grafana-oidc-check` now fails if basic auth and the hidden form ever
+stop being set together. The first has no lever short of a proxy: `/api/health` is unauthenticated in
+Grafana and will keep answering. What is genuinely
+different is that a mistake in `authentik/blueprints-observability.yaml` now has nothing in front of it —
+`make observability-oidc-check` is the gate that holds that line (§4), and `make ingress-auth` now fails
+if the `websecure` pin that keeps all of this out of cleartext is dropped.
 
-**Not proven.** The fix is a commit and a gate run, not a measured hour of open dashboards. What would
-close it: leave a dashboard open past ~10 minutes, confirm the panels keep refreshing, and confirm in
-Traefik's access log that `/api/ds/query` answers 200 continuously with no 302 burst. Until someone
-does that, §10 is a well-evidenced diagnosis and a plausible fix, not a verified one.
+**Was not proven; now observed.** Written as unverified, then checked against the live cluster on
+2026-11-05, the day it merged. Traefik's access log for the Grafana router shows `/api/live/ws` answered
+`302` continuously from 12:52:25 to **15:21:31**, and `401` from Grafana itself at **15:39:06** — the
+outpost stopped being in front between those two. Keep the reasoning exact: an outpost that refuses
+answers `302` (to the IdP) or `404` (the shape `docs/teslamate-runbook.md` §9 documents), never `401`,
+so a `401` means the request reached Grafana with no proxy in front of it. What it does **not**
+distinguish is whether that session was absent or merely stale, so it is evidence about the cutover and
+no evidence at all about the panel symptom. After 15:21:31 there is **no 302 at all** on that router for
+the rest of the window, while `/api/user/auth-tokens/rotate` returns `200` on a ~10-minute cadence from
+14:07 through 15:55 — a sustained authenticated session spanning the cutover and half an hour past it.
+Cleartext also closed: `http://grafana.titan.arrieta.eu/api/health` now answers **404**, where the same
+URL answered through the outpost before the change.
+
+What that does and does not retire. It retires "the middleware is still in front" and "the websecure pin did
+not take". It does **not** retire the original symptom's own test — nobody has watched a single dashboard
+panel poll `/api/ds/query` for an hour past the cookie lifetime and logged the absence of a 302 burst. The
+`/api/ds/query` calls in that window were `200`, but they sit before the cutover, so they show a fresh
+cookie working, which was never the bug.
 
 **If it comes back,** the first thing to check is whether something re-added the middleware annotation
 (`kubectl -n observability get ingress grafana -o jsonpath='{.metadata.annotations}'; echo`), and the
-second is whether the same 302-on-XHR shape is now hitting another gated host. Three still sit behind
-`apps-teslamate-auth@kubernetescrd`, and every one of them polls:
+second is whether the same 302-on-XHR shape is now hitting another gated host. Two still sit behind
+`apps-teslamate-auth@kubernetescrd`:
 
-- `apply/60-tesla/grafana.yaml` — **tesla-boards is also a Grafana**, so it has this exact failure
-  today, on the same timer, and the same one-line fix.
-- `apply/60-tesla/teslamate.yaml` — the TeslaMate UI.
-- `apply/50-apps/investing-agent/investing-agent.yaml` — the console.
+- `apply/60-tesla/teslamate.yaml` — the TeslaMate UI. Its own login is **Tesla's OAuth, not authentik**,
+  so dropping the edge here swaps "a member of these groups" for "anyone with a Tesla account". **Decided
+  2026-11-05: the gate stays.** The failure is real and was measured — 26 of 36 `/live/websocket` attempts
+  answered 302 over 7 days, in three Phoenix-backoff bursts — and it is accepted as the price of keeping
+  group admission on a host with no IdP integration of its own. Remedy is a reload. Full evidence and the
+  two rejected alternatives: `docs/teslamate-runbook.md` §9.
+- `apply/50-apps/investing-agent/investing-agent.yaml` — hermes' dashboard. It carries its own form login
+  at `/login` with a signed session cookie, and its manifest documents "TWO LOGINS, DELIBERATELY".
+  **Decided 2026-11-05: the gate stays, for now.** The operator drives the agent over Discord — an
+  outbound WebSocket that never touches Traefik — so the console is idle (2 requests in 30 days) and
+  nothing is observed breaking. That is a timing decision, not a verdict: the dashboard polls
+  `/api/status` every 5 s and its Chat tab is a long-lived `/api/pty` WebSocket, so it is the *worst* of
+  these hosts the moment it gets used. Dropping authentik onto the bundled password is the one option
+  upstream itself disclaims for public-internet exposure. The fix, when it matters, is hermes' own
+  self-hosted OIDC provider pointed at authentik — then this becomes the Grafana shape, and it is
+  **tracked in #245**. Config and the two traps (`access_group` must be set in authentik; `public_url` is
+  load-bearing) are in the manifest.
 
-They are untouched here on purpose: one host, one diagnosis, one verified change. Fixing them is the
-same edit (drop the annotation, let the app's own OIDC decide) plus a `NOT_PROXY_GATED` row each —
-tracked in issue #243, which also records why teslamate and investing-agent are NOT the same edit: their
-in-app auth is Tesla's OAuth and a password form respectively, not authentik OIDC.
+`apply/60-tesla/grafana.yaml` — **tesla-boards, also a Grafana, had this exact failure on the same timer
+and got the same fix on 2026-11-05.** It is no longer behind the outpost: its own authentik OIDC and the
+two bindings on the `tesla-boards` application decide who gets in, and `make grafana-oidc-check` holds
+those bindings. So if the 302-on-XHR shape comes back for a *Grafana*, there are now no gated Grafanas
+left to look at — check for a re-added annotation on one of the two hosts above instead.
+
+Both hosts still behind the outpost have now been looked at and both keep it on purpose — teslamate
+because its only login is Tesla's OAuth, investing-agent because its only alternative is a password
+upstream says not to expose. Neither is the same mechanical edit as this one, and issue #243 records why.
+If either ever gets a real IdP integration, it becomes this edit; until then the outpost is the only thing
+standing between those two hosts and the internet.

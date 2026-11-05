@@ -35,11 +35,16 @@ WHAT IT CHECKS, for every built `Ingress` that serves a host under APEX:
   4. The resolved `Middleware` must declare `forwardAuth`. An annotation naming a
      `stripPrefix` satisfies "has a middleware" while gating nothing, which is the failure
      this gate exists to prevent, so it is not allowed to pass.
+  5. If it is named in PIN_REQUIRED below, it must pin `router.entrypoints: websecure`. For those
+     hosts the pin is half of the admission story: an unpinned Ingress produces a router per entrypoint,
+     so a forwardAuth there also runs on cleartext :80 and an in-app login there also serves sessions
+     in the clear. A dropped pin makes the reason above it a false statement. It is a failure, not a
+     paragraph.
 
 VACUITY. It refuses to report clean when it found nothing to check - no Ingress, no apex
-Ingress, no declared Middleware, or an allow-list entry that no longer matches anything. A
-gate that passes on an empty set is worse than no gate, and an allow-list entry left behind
-by a deleted Ingress is a hole nobody would re-justify.
+Ingress, no declared Middleware, an allow-list entry that no longer matches anything, or an empty
+PIN_REQUIRED. A gate that passes on an empty set is worse than no gate, and an allow-list entry left
+behind by a deleted Ingress is a hole nobody would re-justify.
 
 WHAT IT DOES NOT PROVE, in order of how much it matters:
 
@@ -48,11 +53,11 @@ WHAT IT DOES NOT PROVE, in order of how much it matters:
     authenticated account, and that is a row in authentik's database, not in this tree.
     `apply/50-apps/investing-agent/investing-agent.yaml` states the inherited policy because
     no gate here can.
-  * It does not read `router.entrypoints`. The `websecure` pin is the same class of
-    annotation-shaped decision and is still guarded by prose alone; enforcing it would need a
-    second allow-list of hosts that tolerate cleartext, and `http://meals.titan.arrieta.eu/`
-    answering 200 today says that list is not empty. Naming that gap rather than half-closing
-    it is deliberate.
+  * It reads `router.entrypoints` only for the hosts named in PIN_REQUIRED. Every other apex host in
+    the tree is still free to serve cleartext, and several do - `http://meals.titan.arrieta.eu/`
+    answers 200 today. Extending the rule past the hosts whose allow-list justification depends on
+    the pin would need a per-host cleartext decision for each of the others, and that is a decision
+    this gate must not make by accident.
   * It does not prove a gated host is gated on every path. An `IngressRoute` or a
     `skip_path_regex` on the outpost can open a path around the middleware, and neither is
     visible from an `Ingress` annotation.
@@ -76,6 +81,7 @@ import yaml
 
 APEX = "titan.arrieta.eu"
 MIDDLEWARE_ANNOTATION = "traefik.ingress.kubernetes.io/router.middlewares"
+PIN_ANNOTATION = "traefik.ingress.kubernetes.io/router.entrypoints"
 
 # Apex Ingresses deliberately carrying no proxy-side gate. Keyed by (namespace, Ingress name)
 # rather than by host, because `tesla.titan.arrieta.eu` is served by two Ingresses and only one
@@ -98,6 +104,15 @@ NOT_PROXY_GATED = {
                                   "navigation, so it 302'd every XHR panel poll and the boards went "
                                   "empty on a timer (apply/50-apps/grafana/grafana.yaml, "
                                   "docs/grafana-runbook.md \u00a710)",
+    ("apps", "tesla-grafana"): "authentik OIDC in-app; GF_AUTH_GENERIC_OAUTH_* with auto_login on the "
+                               "tesla-grafana Deployment, and the `tesla-boards` application is bound "
+                               "to titan-family / titan-tesla-grafana-admins so outsiders are refused "
+                               "at the IdP (asserted by make grafana-oidc-check). The forwardAuth "
+                               "Middleware that used to sit here was REMOVED 2026-11-05, not forgotten: "
+                               "it is the same Grafana with the same defect as observability/grafana "
+                               "above, so the outpost cookie aged out and 302'd every XHR panel poll "
+                               "(apply/60-tesla/grafana.yaml, docs/grafana-runbook.md \u00a710, "
+                               "issue #243)",
     ("files", "opencloud"): "oCIS proxy authenticates against authentik OIDC, PROXY_OIDC_* "
                             "(apply/50-apps/opencloud/opencloud.yaml)",
     ("files", "collabora"): "no user-facing login of its own; its only relationship is the WOPISrc "
@@ -128,6 +143,51 @@ NOT_PROXY_GATED = {
                                                  "T0a measured this host answering 200 unauthenticated "
                                                  "on the VPS, so a gate here would be a behaviour "
                                                  "change rather than parity (issue #112; "
+                                                 "apply/50-apps/chiclana-hass/chiclana-hass.yaml)",
+}
+
+# The `websecure` pin, asserted for the hosts whose admission story depends on it.
+#
+# WHY THIS IS A FAILURE AND NOT A NOTE. Traefik attaches a middleware to every router its Ingress
+# produces, and an unpinned Ingress produces one router per entrypoint. This cluster runs no
+# HTTP->HTTPS redirect (the ports.web.http.redirections.entryPoint note in
+# apply/20-infra/traefik/traefik.yaml) and port 80 is published, so an unpinned host answers in
+# cleartext. For the seven hosts below that is not untidiness. Four of them (both Grafanas, both Home
+# Assistant passthroughs) are allowed to have no proxy-side gate ONLY because the application behind
+# them authenticates on its own, and an application that authenticates over cleartext hands the session
+# - the Grafana session, the Home Assistant long-lived token - to anyone on the path. The other three
+# (llm, investing-agent, teslamate) do carry a forwardAuth, and an unpinned Ingress runs that gate on
+# :80 as well, so the outpost cookie, the hermes session, the TeslaMate session and the llm bearer token
+# travel in the clear beside the HTTPS router. Either way, delete the pin and the row above stops being a
+# true statement while this gate still prints clean, which is the exact defect this file exists to close.
+#
+# WHY ONLY SEVEN. The other apex hosts are unpinned today (coder, open-webui, opencloud, collabora,
+# mealie, and the two tesla protocol hosts whose paths have to answer for Tesla's own fetches) and each
+# needs its own cleartext decision, made on its own evidence. Demanding the pin everywhere would either
+# fail on all of them or get widened into a skip list, and either outcome teaches the next person to
+# distrust the gate.
+PIN_REQUIRED = {
+    ("observability", "grafana"): "its NOT_PROXY_GATED row says authentik OIDC in-app is the gate; "
+                                  "GF_AUTH_BASIC_ENABLED is also true, so an unpinned router serves "
+                                  "the local admin login form and /api/health in the clear "
+                                  "(apply/50-apps/grafana/grafana.yaml, docs/grafana-runbook.md \u00a710)",
+    ("apps", "tesla-grafana"): "same shape and same reasoning as observability/grafana above "
+                               "(apply/60-tesla/grafana.yaml, issue #243)",
+    ("llm", "llm"): "the bearer token is the only credential on this host and a cleartext router "
+                    "would carry it in the clear (apply/50-apps/llm/llm.yaml)",
+    ("apps", "investing-agent"): "forward-auth plus hermes' own session; unpinned, both travel over "
+                                 "cleartext :80 beside the gated HTTPS router "
+                                 "(apply/50-apps/investing-agent/investing-agent.yaml)",
+    ("apps", "teslamate"): "the forwardAuth is the only group gate this host has, and unpinned it ran "
+                           "on :80 too, so the outpost cookie and the TeslaMate session both travelled "
+                           "in the clear; pinned 2026-11-05 in the review of #246 "
+                           "(apply/60-tesla/teslamate.yaml, docs/teslamate-runbook.md \u00a79)",
+    ("apps", "home-assistant-home-ingress"): "Home Assistant authenticates natively, so its session "
+                                             "and any long-lived access token are the only gate and "
+                                             "must not be offered on :80 (issue #112; "
+                                             "apply/50-apps/home-hass/home-hass.yaml)",
+    ("apps", "home-assistant-chiclana-ingress"): "same decision and same reasoning as "
+                                                 "home-assistant-home-ingress (issue #112; "
                                                  "apply/50-apps/chiclana-hass/chiclana-hass.yaml)",
 }
 
@@ -189,11 +249,16 @@ def main():
     if not ingresses:
         print("FAIL: no Ingress in the build - ingress-auth cannot pass vacuously")
         return 1
+    if not PIN_REQUIRED:
+        print("FAIL: PIN_REQUIRED is empty - the websecure pin is load-bearing for named hosts and "
+              "this gate cannot pass vacuously by forgetting them")
+        return 1
 
     failures = []
     notes = []
     gated = 0
     allow_used = set()
+    pin_used = set()
     apex_count = 0
 
     for doc in ingresses:
@@ -204,6 +269,13 @@ def main():
             continue
         apex_count += 1
         where = f"Ingress {ns}/{name} ({host})"
+
+        pin = ((meta.get("annotations") or {}).get(PIN_ANNOTATION) or "").strip()
+        if (ns, name) in PIN_REQUIRED:
+            pin_used.add((ns, name))
+            if pin != "websecure":
+                failures.append(f"{where}: PIN_REQUIRED demands {PIN_ANNOTATION}=websecure and it is "
+                                f"{pin!r}. {PIN_REQUIRED[(ns, name)]}")
 
         raw = ((meta.get("annotations") or {}).get(MIDDLEWARE_ANNOTATION) or "").strip()
         refs = [part.strip() for part in raw.split(",") if part.strip()]
@@ -249,6 +321,9 @@ def main():
     for ns, name in sorted(stale):
         failures.append(f"NOT_PROXY_GATED names {ns}/{name}, which no longer matches any apex Ingress; "
                         "delete the entry or say why it came back")
+    for ns, name in sorted(set(PIN_REQUIRED) - pin_used):
+        failures.append(f"PIN_REQUIRED names {ns}/{name}, which no longer matches any apex Ingress; "
+                        "delete the entry or say why the host moved")
 
     if failures:
         print("FAIL: a public apex Ingress is not gated, or its gate does not resolve:")
@@ -258,7 +333,8 @@ def main():
 
     unused = len(NOT_PROXY_GATED) - len(allow_used)
     print(f"ingress-auth: {apex_count} apex Ingress object(s) scanned; {gated} gated by a resolvable "
-          f"forwardAuth middleware, {len(allow_used)} allow-listed as deliberately not proxy-gated"
+          f"forwardAuth middleware, {len(allow_used)} allow-listed as deliberately not proxy-gated, "
+          f"{len(pin_used)} pinned to websecure where the admission story depends on it"
           + (f", {unused} allow-list entry(ies) for non-apex Ingresses" if unused else ""))
     for note in notes:
         print(f"  {note}")

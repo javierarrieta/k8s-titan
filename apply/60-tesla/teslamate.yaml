@@ -213,8 +213,47 @@ metadata:
   # no middleware, so Tesla's public-key fetch never reaches forward-auth. That is the invariant the whole
   # tree is arranged to protect; if this annotation ever 404s the host, those two are the first things to
   # re-check, not the middleware.
+  #
+  # THIS GATE STAYS, AND THAT IS THE DECISION ON ISSUE #243 — do not copy #242's fix here.
+  #
+  # The two Grafanas were allowed to drop their outpost gate because authentik OIDC inside Grafana does
+  # admission on its own: the `observability` / `tesla-boards` application bindings refuse anyone outside
+  # their groups at the IdP before a token exists. TeslaMate has no such integration. Its own login is
+  # Tesla's OAuth (TESLA_AUTH_HOST=auth.tesla.com), which authenticates a person but says nothing about
+  # whether that person belongs to this household. So this Middleware is the ONLY thing enforcing group
+  # membership on this host, and removing it would replace "a member of titan-family /
+  # titan-grafana-admins / titan-tesla-grafana-admins" with "anyone who can produce a Tesla account".
+  # Rejected 2026-11-05 on the operator's decision; this host is car location history.
+  #
+  # WHAT THAT COSTS, MEASURED. The outpost cookie refreshes only on a top-level navigation, so a Phoenix
+  # LiveView socket that drops after the cookie ages cannot reconnect: the upgrade request gets a 302 and
+  # a websocket cannot follow a cross-origin redirect. Over 7 days of Traefik access log, `/live/websocket`
+  # on this host: 36 attempts, 10 upgraded (status 0, logged at close) and 26 answered 302, the 302s in
+  # three bursts on 2026-11-04 (10:06:53-10:07:09, 12:02:12-12:02:14, 16:28:25-16:28:26) with Phoenix's
+  # reconnect backoff visible in the gaps. The UI shows "Disconnected" and recovers on a reload, which IS
+  # a top-level navigation and does refresh the cookie. Accepted as the price of keeping the gate.
+  # Evidence and the two alternatives that were rejected: docs/teslamate-runbook.md §9.
+  #
+  # Tuning the outpost cookie lifetime is NOT a fix and was rejected in #242 for a reason that holds even
+  # harder here: an XHR or a websocket can never refresh that cookie however long it lives, so a longer
+  # lifetime only moves the timer while leaving the gate's admission set untouched.
+  #
+  # ONE THING #246 MADE VISIBLE, AND IT IS FIXED IN THIS BRANCH. This Ingress used to pin no entrypoint,
+  # so Traefik built a router per entrypoint and the forwardAuth above attached to BOTH — which meant the
+  # gate was sitting in front of cleartext :80 rather than keeping cleartext away. Measured before the
+  # pin: `http://tesla.titan.arrieta.eu/` answered 302 to auth.titan.arrieta.eu over an unencrypted
+  # connection, so the outpost cookie and the TeslaMate session both travelled in the clear on that
+  # router. The pin below removes that router, which is the same line grafana.titan, tesla-boards, llm,
+  # investing-agent and both Home Assistant hosts already carry. `make ingress-auth` now fails if it is
+  # dropped (PIN_REQUIRED), and the two protocol hosts on this domain are deliberately left unpinned:
+  # `/.well-known` has to answer for Tesla's key fetch and `streaming.` is a TLS-SNI intake, so neither
+  # has a cleartext session to protect.
+  #
+  # What the pin does NOT do: it does not make the gate stronger. Group admission is the outpost's, and
+  # the reason it stays is above.
   annotations:
     traefik.ingress.kubernetes.io/router.middlewares: apps-teslamate-auth@kubernetescrd
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
 spec:
   ingressClassName: traefik
   rules:

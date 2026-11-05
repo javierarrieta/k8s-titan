@@ -53,6 +53,13 @@ def load_text(path):
                               text=True, check=True).stdout
     except subprocess.CalledProcessError:
         pass
+    except FileNotFoundError:
+        # No sops binary at all, which is the normal state of a CI runner and of any machine where the
+        # age key was never installed. Falling through is not a silent downgrade: the check below still
+        # refuses a file that is actually encrypted, with the message that says what to set. Before
+        # this, a keyless gate that reached this helper died in CI with `FileNotFoundError: 'sops'`
+        # instead of reporting anything useful.
+        pass
     if os.path.exists(path):
         with open(path) as fh:
             text = fh.read()
