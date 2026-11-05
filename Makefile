@@ -719,6 +719,10 @@ grafana-oidc-check:
 # different variant — see spec §9 of the 2026-10-21 Grafana design for why a fork was declined. The
 # variant is not optional: an unrecognised --variant exits non-zero rather than quietly falling back
 # to tesla and reporting a clean run over the wrong Grafana.
+# Both variants also assert the application's group bindings, exactly and as a union (`any`): since
+# grafana.titan's forwardAuth Middleware was removed 2026-11-05 (docs/grafana-runbook.md §10) those
+# bindings are the only thing admitting anyone, and blueprint-mount-check cannot see them because it
+# never reads Secret content and these blueprints ship as Secrets.
 observability-oidc-check:
 	@python3 tools/grafana-oidc-check.py apply --variant=observability
 

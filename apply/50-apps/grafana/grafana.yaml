@@ -15,11 +15,16 @@
 #      GF_AUTH_GENERIC_OAUTH_* plus the two authentik group bindings on the `observability`
 #      application (titan-family, titan-grafana-admins), which refuse anyone outside them at the IdP
 #      before a token exists. That is the same posture coder, open-webui, mealie and opencloud
-#      already run, and `make ingress-auth` enforces that the omission is deliberate.
-#      WHAT THIS COSTS: the outpost no longer sees this host, so authentik's per-provider proxy
-#      policy no longer applies here and the group bindings are load-bearing in a way they were not.
-#      Verify those two bindings before trusting this file; they live in the sops Secret
-#      apply/10-secrets/authentik-observability-blueprint.yaml, not in this manifest.
+#      already run, and `make ingress-auth` enforces that the omission is deliberate. The Ingress
+#      pins router.entrypoints: websecure because Traefik here runs no HTTP->HTTPS redirect, so the
+#      pin is what keeps cleartext :80 from serving this host now that no middleware does.
+#      WHAT THIS COSTS: nothing in front of this host decides anything any more. It is not a widening —
+#      the outpost resolved this host to the `tesla` application, whose three group bindings are a
+#      superset of these two, so the admitted set is unchanged (runbook §10). But a mistake in these
+#      two bindings now has nothing upstream of it. They live in
+#      authentik/blueprints-observability.yaml (rendered into the sops Secret
+#      apply/10-secrets/authentik-observability-blueprint.yaml), not in this manifest, and
+#      `make observability-oidc-check` fails if they are absent, changed, or not `any`-mode.
 #
 #   3. THE SECRETS THIS envFrom'S ARRIVE IN TASK 3. Between the two commits the pod is Pending on a
 #      missing Secret. That is a half-finished tree, not a broken one, and it resolves within the
@@ -129,9 +134,8 @@ spec:
         - name: GF_AUTH_GENERIC_OAUTH_API_URL
           value: https://auth.titan.arrieta.eu/application/o/userinfo/
         # Without validate_id_token Grafana trusts an unverified id_token, which is a real weakening
-        # and the only thing that was ever in front of this host. It is not free: with it true and a
-        # wrong jwk_set_url,
-        # authentication fails outright.
+        # now that nothing else stands in front of this host. It is not free: with it true and a wrong
+        # jwk_set_url, authentication fails outright.
         - name: GF_AUTH_GENERIC_OAUTH_VALIDATE_ID_TOKEN
           value: "true"
         - name: GF_AUTH_GENERIC_OAUTH_JWK_SET_URL
@@ -296,11 +300,24 @@ spec:
 #
 # The absence is whitelisted in tools/ingress-auth-check.py `NOT_PROXY_GATED` with this reason, so
 # `make ingress-auth` fails if the annotation ever comes back or the entry is dropped.
+#
+# THE PIN BELOW IS THE OTHER HALF OF REMOVING THE MIDDLEWARE. A Traefik middleware attaches to every
+# router its Ingress produces, and an unpinned Ingress produces one per entrypoint — so the forwardAuth
+# was also what kept this host off cleartext :80. Traefik here runs no HTTP->HTTPS redirect
+# (apply/20-infra/traefik/traefik.yaml, the ports.web.http.redirections.entryPoint note, says so and
+# records it as deliberate), and port 80 is published: measured before this change,
+# http://grafana.titan.arrieta.eu/api/health answered. Without the pin, dropping the middleware would
+# have left Grafana's unauthenticated endpoints — /api/health at minimum — readable over cleartext.
+# This is the same reason llm and investing-agent pin. Cookies are not at risk either way
+# (GF_AUTH_COOKIE_SECURE is Grafana's default, true), so this is about not serving anything in the
+# clear, not about session theft.
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: grafana
   namespace: observability
+  annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
 spec:
   ingressClassName: traefik
   rules:

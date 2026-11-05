@@ -20,6 +20,13 @@ It also refuses to report clean when the pieces that make the role mapping work 
 `profile` scope is what puts a `groups` claim in the token, and without it every OIDC login silently
 lands as Viewer, which is a permissions bug that presents as working.
 
+And it refuses to report clean when the application admits the wrong people. Since the forwardAuth
+Middleware in front of grafana.titan was removed 2026-11-05 (docs/grafana-runbook.md §10), the
+application's group bindings are the only thing deciding who reaches this host, and no other gate
+sees them: `blueprint-mount-check` counts policybindings in plaintext ConfigMaps and never reads
+Secret content, and these blueprints ship as Secrets. So the assertion lives here, on the reviewed
+template, and the template-vs-rendered equality below is what carries it to the applied artifact.
+
 Like oidc-check this is reference-driven and refuses to report clean when a Secret will not decrypt.
 When Grafana's OIDC values do not exist yet it says so and counts zero, which is honest and empty
 rather than a pass over nothing — but only while the Deployment is also absent; once the workload is
@@ -55,6 +62,7 @@ VARIANTS = {
         "APP_NS": "apps",
         "DEPLOY": "tesla-grafana",
         "SLUG": "tesla-boards",
+        "GROUPS": ("titan-family", "titan-tesla-grafana-admins"),
         "SCRIPT": "scripts/setup-grafana-oidc.sh",
     },
     "observability": {
@@ -68,6 +76,7 @@ VARIANTS = {
         "APP_NS": "observability",
         "DEPLOY": "grafana",
         "SLUG": "observability",
+        "GROUPS": ("titan-family", "titan-grafana-admins"),
         "SCRIPT": "scripts/setup-observability-grafana.sh",
     },
 }
@@ -108,6 +117,21 @@ def provider_entry(bp):
         if e.get("model") == "authentik_providers_oauth2.oauth2provider":
             return e
     return None
+
+
+def find_value(tag, model, key):
+    """Value of a rebuilt `!Find [model, [key, value]]` tag, or None if this is not that shape.
+
+    `load_tolerating_tags` turns an authentik tag into a plain list - `["!Find", model, [key, val]]`
+    - because PyYAML's safe loader rejects the tag outright. Matching the rebuilt shape rather than
+    the raw text is what stops this passing when someone writes the same lookup with the arguments
+    swapped or the inner pair flattened.
+    """
+    if not (isinstance(tag, list) and len(tag) == 3 and tag[0] == "!Find"):
+        return None
+    if tag[1] != model or not isinstance(tag[2], list) or len(tag[2]) != 2 or tag[2][0] != key:
+        return None
+    return tag[2][1]
 
 
 def app_entry(bp):
@@ -184,6 +208,46 @@ def main():
     if found != set(PLACEHOLDERS):
         fail(f"{TEMPLATE} placeholders are {sorted(found)}, expected {sorted(PLACEHOLDERS)} - "
              f"setup-grafana-oidc.sh substitutes exactly these two and nothing else")
+
+    # --- A2. who this application admits ---------------------------------------------------------
+    # These bindings are the whole gate now (§4, and §10 of the Grafana runbook for why the edge gate
+    # that used to sit in front of this host is gone). Exact set equality, not "at least one": a
+    # dropped binding widens who gets in and an added one widens it just as surely, and both read as
+    # a perfectly healthy login page. policy_engine_mode is checked alongside them because it decides
+    # what the set MEANS - under `all` these same two rows demand membership of every group at once.
+    if ae is not None:
+        app_id = ae.get("id")
+        bindings = []
+        for e in tpl.get("entries") or []:
+            if e.get("model") != "authentik_policies.policybinding":
+                continue
+            target = (e.get("identifiers") or {}).get("target")
+            if target == f"!KeyOf {app_id}" or find_value(target, "authentik_core.application",
+                                                          "slug") == v["SLUG"]:
+                bindings.append(e)
+        checked += 1
+        groups = sorted({g for e in bindings
+                         for g in [find_value((e.get("attrs") or {}).get("group"),
+                                              "authentik_core.group", "name")] if g})
+        expected = sorted(v["GROUPS"])
+        if not bindings:
+            fail(f"{TEMPLATE} binds no policy to application {v['SLUG']!r}. With no binding "
+                 "authentik's engine allows every authenticated account, and now that the proxy-side "
+                 "gate is gone nothing upstream refuses them first - this host would be readable by "
+                 "any authentik user as Viewer, behind a green-looking login page.")
+        elif groups != expected:
+            lost = sorted(set(expected) - set(groups))
+            gained = sorted(set(groups) - set(expected))
+            fail(f"{TEMPLATE} binds application {v['SLUG']!r} to {groups}, expected exactly "
+                 f"{expected} - missing {lost}, extra {gained}. Either direction changes who can "
+                 "read this host. If the change was deliberate, update GROUPS in this script in the "
+                 "same commit so the decision gets reviewed twice.")
+        mode = (ae.get("attrs") or {}).get("policy_engine_mode")
+        checked += 1
+        if mode != "any":
+            fail(f"application {v['SLUG']!r} has policy_engine_mode {mode!r}, expected 'any'. These "
+                 "bindings are a union only under `any`; under `all` the same rows demand membership "
+                 "of every group at once and lock out everyone the set was written to admit.")
 
     # --- B. Grafana's copy, and the rendered artifact ------------------------------------------
     cid, cdata = secret_key(docs, APP_SECRET, APP_NS, "GF_AUTH_GENERIC_OAUTH_CLIENT_ID")
