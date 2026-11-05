@@ -260,10 +260,10 @@ because neither stage depends on the other and a cold restore can leave that ref
 unresolvable. Its honest limits: it proves a gate resolves, never that the policy behind it is the
 policy you meant — an authentik provider with `access_group` unset gates a host open to every
 authenticated account, and that is a row in authentik's database, not in this tree — and it reads
-`router.entrypoints` only for the hosts named in `PIN_REQUIRED`, the six whose allow-list justification
-is "the app authenticates in-app" and which therefore serve an authenticated session in cleartext the
-moment the pin goes; the other apex hosts are still free to answer on `:80`, and `http://meals.titan.arrieta.eu/`
-does. It was written
+`router.entrypoints` only for the hosts named in `PIN_REQUIRED`: the four whose allow-list justification
+is "the app authenticates in-app" and the three whose `forwardAuth` would otherwise also run on cleartext
+`:80` (both Grafanas, both Home Assistant passthroughs, llm, investing-agent, teslamate). The other apex
+hosts are still free to answer on `:80`, and `http://meals.titan.arrieta.eu/` does. It was written
 because PR #192 gated a public host with an annotation, and that same file said, twice, that no gate
 reads Traefik annotations. `outpost-binding-check` is that gate for the outpost's own admission set:
 since #242 and #246 left `tesla.titan.arrieta.eu` as the one host gated by group membership with no IdP

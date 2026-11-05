@@ -20,6 +20,11 @@ It also refuses to report clean when the pieces that make the role mapping work 
 `profile` scope is what puts a `groups` claim in the token, and without it every OIDC login silently
 lands as Viewer, which is a permissions bug that presents as working.
 
+And it refuses to report clean when the login surface on an ungated host is wrong: basic auth stays on
+as the escape hatch for when OIDC is the thing that is broken, so the password form has to stay hidden
+(`GF_AUTH_DISABLE_LOGIN_FORM`) or the local admin is an internet-facing guess. It asserts both halves,
+because hiding the form is only survivable while `POST /login` still honours basic auth.
+
 And it refuses to report clean when the application admits the wrong people. Since the forwardAuth
 Middleware in front of grafana.titan was removed 2026-11-05 (docs/grafana-runbook.md §10), the
 application's group bindings are the only thing deciding who reaches this host, and no other gate
@@ -345,6 +350,16 @@ def main():
             fail("GF_AUTH_BASIC_ENABLED is not 'true'. Keep it true through any OIDC rollout: if the "
                  "OIDC config is wrong and basic auth is off, the only way back in is editing the "
                  "admin Secret and restarting Grafana")
+        # The pairing, not either half. These hosts have nothing in front of them, so a reachable
+        # password form means the local admin is an internet-facing guess; and hiding the form while
+        # basic auth is on is fine only because POST /login ignores the setting. Both halves have to
+        # hold together or the escape hatch is gone, so one of them drifting is a failure and not a nit.
+        if env.get("GF_AUTH_DISABLE_LOGIN_FORM") != "true":
+            fail("GF_AUTH_DISABLE_LOGIN_FORM is not 'true' while GF_AUTH_BASIC_ENABLED is. On a host "
+                 "with no proxy-side gate that pairing is what stops /login?disableAutoLogin=true from "
+                 "handing a stranger a password field for the local admin account. Set on both Grafanas "
+                 "2026-11-05 in the review of #246; the escape hatch survives as POST /login, which does "
+                 "not consult this setting")
         root_url = env.get("GF_SERVER_ROOT_URL") or ""
         if HOST not in root_url:
             fail(f"GF_SERVER_ROOT_URL is {root_url!r} but the OIDC redirect_uri names {HOST} - "

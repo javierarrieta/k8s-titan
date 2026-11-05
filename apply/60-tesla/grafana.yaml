@@ -186,6 +186,18 @@ spec:
         # only account that can fix Grafana when the identity provider is the thing that is broken.
         - name: GF_AUTH_BASIC_ENABLED
           value: "true"
+        # …but the form that offers it is hidden. Set 2026-11-05, when the review of #246 measured that
+        # `/login?disableAutoLogin=true` answers 200 on a host with nothing in front of it: with basic
+        # auth true above, that made the local `admin` an internet-facing password guess for the first
+        # time. Grafana's docs are explicit that this only hides the UI form — it is the setting for
+        # setups where auth is entirely external — and the `POST /login` route does not consult it, so
+        # the escape hatch survives as
+        #   curl -c- -XPOST -d '{"user":"admin","password":"…"}' https://tesla-boards.titan.arrieta.eu/login
+        # The same pairing is set on grafana.titan, and `make grafana-oidc-check` fails if either half
+        # of it breaks on either Grafana: basic auth off with the form hidden is a lockout, and the
+        # form visible with nothing in front is what this line exists to remove.
+        - name: GF_AUTH_DISABLE_LOGIN_FORM
+          value: "true"
         # Grafana's own health endpoint; it answers as soon as the web server is up, which is what
         # readiness means here. The sqlite DB opening happens lazily and would only slow startup.
         livenessProbe:
@@ -263,14 +275,12 @@ metadata:
   # two. That is NOT the same as "nothing widened". The outpost sat in front of EVERY path, including
   # the two Grafana serves without a session:
   #
-  #   - `/login` is now reachable from the internet, and GF_AUTH_BASIC_ENABLED is true above, so the
-  #     local `admin` account out of tesla-grafana-admin is now a password an anonymous stranger can
-  #     try. AUTO_LOGIN hides the form behind a redirect, but `?disableAutoLogin=true` puts it back —
-  #     measured on the already-ungated grafana.titan, where `/login?disableAutoLogin=true` answers
-  #     200. The lever is GF_AUTH_DISABLE_LOGIN_FORM=true, which removes the form and leaves the
-  #     escape hatch usable over the API. Not set here: it changes live behaviour on the only way in
-  #     when authentik is the thing that is broken, and it is the same decision as its twin on
-  #     grafana.titan, which has run with the form up since #242.
+  #   - `/login` was reachable from the internet, and GF_AUTH_BASIC_ENABLED is true above, so the local
+  #     `admin` account out of tesla-grafana-admin became a password an anonymous stranger could try.
+  #     AUTO_LOGIN hides the form behind a redirect, but `?disableAutoLogin=true` put it back — measured
+  #     on the already-ungated grafana.titan, where it answers 200. Closed by
+  #     GF_AUTH_DISABLE_LOGIN_FORM=true above, which hides the form and leaves the escape hatch usable
+  #     over `POST /login`; set on both Grafanas on 2026-11-05 and asserted by `make grafana-oidc-check`.
   #   - `/api/health` needs no session in Grafana and now answers publicly with the exact build. On
   #     grafana.titan it returns {"database":"ok","version":"12.4.14","commit":"500a5450…"} — which
   #     tells anyone scanning the apex precisely which Grafana to aim at.

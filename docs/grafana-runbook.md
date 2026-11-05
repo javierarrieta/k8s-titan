@@ -535,10 +535,13 @@ application, so the set of people who can reach a panel is unchanged. **What did
 unauthenticated surface**, because the outpost sat in front of every path and Grafana serves two without
 a session. Measured on this host after the cutover: `/api/health` answers `200` to anyone with
 `{"database":"ok","version":"12.4.14","commit":"500a5450…"}` — the exact build, which is a useful thing
-for a stranger to have — and `/login?disableAutoLogin=true` answers `200` with the local-admin form up,
-since `GF_AUTH_BASIC_ENABLED` is true (see §4 for why it stays true). The lever, if that is not
-acceptable, is `GF_AUTH_DISABLE_LOGIN_FORM=true`: it removes the form and leaves the escape hatch usable
-over the API. It is unset on both Grafanas and it is one decision for both, not two. What is genuinely
+for a stranger to have — and `/login?disableAutoLogin=true` answered `200` with the local-admin form up,
+since `GF_AUTH_BASIC_ENABLED` is true (see §4 for why it stays true). The second of those is closed:
+`GF_AUTH_DISABLE_LOGIN_FORM=true` is set on both Grafanas as of 2026-11-05, which hides the form and
+leaves the escape hatch usable over `POST /login` — Grafana's own docs are explicit that the setting
+only hides the UI form, and `make grafana-oidc-check` now fails if basic auth and the hidden form ever
+stop being set together. The first has no lever short of a proxy: `/api/health` is unauthenticated in
+Grafana and will keep answering. What is genuinely
 different is that a mistake in `authentik/blueprints-observability.yaml` now has nothing in front of it —
 `make observability-oidc-check` is the gate that holds that line (§4), and `make ingress-auth` now fails
 if the `websecure` pin that keeps all of this out of cleartext is dropped.

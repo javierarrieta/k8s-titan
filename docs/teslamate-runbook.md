@@ -725,13 +725,13 @@ fails if that set changes, if `policy_engine_mode` stops being `any`, if a secon
 appears, if `cookie_domain` moves off the apex, or if `skip_path_regex` grows — the last of which is
 the very field the rejected alternative below turns on.
 
-**And one thing the kept gate does not do: keep cleartext away.** This Ingress pins no entrypoint, so
-the `forwardAuth` attaches to the `:80` router as well, and
-`http://tesla.titan.arrieta.eu/` answers `302` to authentik over an unencrypted connection — measured.
-The outpost cookie and the TeslaMate session both travel in the clear on that router. The fix is the
-one-line `router.entrypoints: websecure` pin the other public hosts carry; it is deliberately not in
-#246, which carried exactly one behaviour change and this would have been a second one on the car's
-intake host. Recorded in the Ingress header of `apply/60-tesla/teslamate.yaml`.
+**And the gate now keeps cleartext away too.** This Ingress used to pin no entrypoint, so the
+`forwardAuth` attached to the `:80` router as well and `http://tesla.titan.arrieta.eu/` answered `302` to
+authentik over an unencrypted connection — measured. The outpost cookie and the TeslaMate session both
+travelled in the clear on that router. Pinned to `websecure` on 2026-11-05 in the review of #246, the
+same line the other public hosts carry, and `make ingress-auth` now fails if the pin is dropped. The two
+protocol hosts on this domain stay unpinned on purpose: `/.well-known` has to answer for Tesla's key
+fetch and `streaming.` is a TLS-SNI intake, so neither has a cleartext session to protect.
 
 **So the remedy is the reload.** Click it, or press the browser's reload. It is a top-level navigation, so
 it refreshes the outpost cookie and the socket reconnects. If it comes back the moment you open a tab, that
@@ -771,7 +771,7 @@ this file depends on and the command that retires it.
 | `nginx-unprivileged`'s UID 101 can read the mounted key | `kubectl -n apps logs deploy/tesla-wellknown` and the curl in §8 step 4 |
 | `tesla-boards` is reachable only through its own OIDC now that nothing stands in front of it | `curl -sSIL https://tesla-boards.titan.arrieta.eu/` and read the **last** hop before authentik: it must be `auth.titan.arrieta.eu/application/o/authorize/` with `redirect_uri=…%2Flogin%2Fgeneric_oauth` (Grafana issuing it) and **not** `…%2Foutpost.goauthentik.io%2Fcallback` (an outpost still in front). Measured on the already-ungated `grafana.titan`, the chain is `/` → `302 /login` → `307 /login/generic_oauth?redirectTo=` → `302` to that authorize URL, so a single `curl -sSI` on `/` shows only `Location: /login` and proves nothing either way — follow the redirects or the check reads as a failure on a correct deploy. Then `curl -sS -o /dev/null -w '%{http_code}\n' http://tesla-boards.titan.arrieta.eu/` → 404, i.e. the cleartext router really is gone. Committed bindings are not applied bindings — `make grafana-oidc-check` proves the tree, not authentik's database (§9). |
 | the boards keep polling past the outpost cookie's lifetime — the entire reason the gate came off | leave one dashboard open past ~10 min and confirm `/api/ds/query` keeps answering `200` with no 302 burst on that router. This is the §9 mechanism arriving through Grafana's XHR path; `docs/grafana-runbook.md` §10 carries the same open test for `grafana.titan`, and neither host has been watched end to end. |
-| the local Grafana admin is not now an internet-facing password guess | `curl -sS -o /dev/null -w '%{http_code}\n' 'https://tesla-boards.titan.arrieta.eu/login?disableAutoLogin=true'` — `200` means the form is reachable with `GF_AUTH_BASIC_ENABLED=true`, which is what it will be; the open question is whether that is acceptable, and the lever is `GF_AUTH_DISABLE_LOGIN_FORM=true` on both Grafanas (§9). |
+| the local Grafana admin is not an internet-facing password guess | `GF_AUTH_DISABLE_LOGIN_FORM` is `true` on both Grafanas since 2026-11-05, so `/login` offers only the authentik button and `?disableAutoLogin=true` no longer surfaces a password field — `make grafana-oidc-check` asserts the pairing (basic auth on, form hidden) on both. What is **not** proven: that the API escape hatch still works when it is needed. Confirm once, deliberately, with `curl -c- -XPOST -d '{"user":"admin","password":"…"}' https://tesla-boards.titan.arrieta.eu/login` — Grafana's own docs say the setting hides the form and does not gate `POST /login`, and a break-glass path you have never used is not a break-glass path. |
 
 Retired by the migration of 2026-10-17: **the migrated database is intact**. §7 records the counts
 that proved it, and `private.tokens` holding exactly one row is part of that proof — TeslaMate will

@@ -36,10 +36,10 @@ WHAT IT CHECKS, for every built `Ingress` that serves a host under APEX:
      `stripPrefix` satisfies "has a middleware" while gating nothing, which is the failure
      this gate exists to prevent, so it is not allowed to pass.
   5. If it is named in PIN_REQUIRED below, it must pin `router.entrypoints: websecure`. For those
-     hosts the pin is the second half of the reason they are allowed to have no proxy-side gate - an
-     app that authenticates in-app over cleartext hands its session to anyone on the path - so a
-     dropped pin makes the NOT_PROXY_GATED row above a false statement. It is now a failure rather
-     than a paragraph.
+     hosts the pin is half of the admission story: an unpinned Ingress produces a router per entrypoint,
+     so a forwardAuth there also runs on cleartext :80 and an in-app login there also serves sessions
+     in the clear. A dropped pin makes the reason above it a false statement. It is a failure, not a
+     paragraph.
 
 VACUITY. It refuses to report clean when it found nothing to check - no Ingress, no apex
 Ingress, no declared Middleware, an allow-list entry that no longer matches anything, or an empty
@@ -152,19 +152,20 @@ NOT_PROXY_GATED = {
 # produces, and an unpinned Ingress produces one router per entrypoint. This cluster runs no
 # HTTP->HTTPS redirect (the ports.web.http.redirections.entryPoint note in
 # apply/20-infra/traefik/traefik.yaml) and port 80 is published, so an unpinned host answers in
-# cleartext. For the six hosts below that is not untidiness. Four of them (both Grafanas, both Home
+# cleartext. For the seven hosts below that is not untidiness. Four of them (both Grafanas, both Home
 # Assistant passthroughs) are allowed to have no proxy-side gate ONLY because the application behind
 # them authenticates on its own, and an application that authenticates over cleartext hands the session
-# - the Grafana session, the Home Assistant long-lived token - to anyone on the path. The other two
-# (llm, investing-agent) do carry a forwardAuth, and an unpinned Ingress runs that gate on :80 as well,
-# so the outpost cookie, the hermes session and the llm bearer token travel in the clear beside the
-# HTTPS router. Either way, delete the pin and the row above stops being a true statement while this
-# gate still prints clean, which is the exact defect this file exists to close.
+# - the Grafana session, the Home Assistant long-lived token - to anyone on the path. The other three
+# (llm, investing-agent, teslamate) do carry a forwardAuth, and an unpinned Ingress runs that gate on
+# :80 as well, so the outpost cookie, the hermes session, the TeslaMate session and the llm bearer token
+# travel in the clear beside the HTTPS router. Either way, delete the pin and the row above stops being a
+# true statement while this gate still prints clean, which is the exact defect this file exists to close.
 #
-# WHY ONLY SIX. The other apex hosts are unpinned today (coder, open-webui, opencloud, collabora,
-# mealie, tesla.titan and its two protocol hosts) and each needs its own cleartext decision, made on
-# its own evidence. Demanding the pin everywhere would either fail on all of them or get widened into
-# a skip list, and either outcome teaches the next person to distrust the gate.
+# WHY ONLY SEVEN. The other apex hosts are unpinned today (coder, open-webui, opencloud, collabora,
+# mealie, and the two tesla protocol hosts whose paths have to answer for Tesla's own fetches) and each
+# needs its own cleartext decision, made on its own evidence. Demanding the pin everywhere would either
+# fail on all of them or get widened into a skip list, and either outcome teaches the next person to
+# distrust the gate.
 PIN_REQUIRED = {
     ("observability", "grafana"): "its NOT_PROXY_GATED row says authentik OIDC in-app is the gate; "
                                   "GF_AUTH_BASIC_ENABLED is also true, so an unpinned router serves "
@@ -177,6 +178,10 @@ PIN_REQUIRED = {
     ("apps", "investing-agent"): "forward-auth plus hermes' own session; unpinned, both travel over "
                                  "cleartext :80 beside the gated HTTPS router "
                                  "(apply/50-apps/investing-agent/investing-agent.yaml)",
+    ("apps", "teslamate"): "the forwardAuth is the only group gate this host has, and unpinned it ran "
+                           "on :80 too, so the outpost cookie and the TeslaMate session both travelled "
+                           "in the clear; pinned 2026-11-05 in the review of #246 "
+                           "(apply/60-tesla/teslamate.yaml, docs/teslamate-runbook.md \u00a79)",
     ("apps", "home-assistant-home-ingress"): "Home Assistant authenticates natively, so its session "
                                              "and any long-lived access token are the only gate and "
                                              "must not be offered on :80 (issue #112; "

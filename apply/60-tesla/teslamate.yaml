@@ -238,20 +238,22 @@ metadata:
   # harder here: an XHR or a websocket can never refresh that cookie however long it lives, so a longer
   # lifetime only moves the timer while leaving the gate's admission set untouched.
   #
-  # ONE THING #246 MADE VISIBLE, AND IT IS NOT FIXED HERE. This Ingress pins no entrypoint, so Traefik
-  # builds a router per entrypoint and the forwardAuth above attaches to BOTH — which means the gate is
-  # in front of cleartext :80 rather than keeping cleartext away. Measured: `http://tesla.titan.arrieta.eu/`
-  # answers 302 to auth.titan.arrieta.eu over an unencrypted connection, so the outpost cookie and the
-  # TeslaMate session both travel in the clear on that router. The fix is one line —
-  # `router.entrypoints: websecure`, the pin grafana.titan, tesla-boards, llm, investing-agent and both
-  # Home Assistant hosts already carry — and it is deliberately not in this PR: it is a second live
-  # behaviour change on the car's intake host, and #246's whole argument for three commits in one PR was
-  # that only one of them changed anything. `make ingress-auth` does not demand it here either;
-  # PIN_REQUIRED covers the hosts whose *allow-list* justification depends on the pin, and this host has
-  # a gate rather than an allow-list. Adding it to that set is the same one-line decision, made on
-  # purpose with the operator's go-ahead rather than inherited from a review comment.
+  # ONE THING #246 MADE VISIBLE, AND IT IS FIXED IN THIS BRANCH. This Ingress used to pin no entrypoint,
+  # so Traefik built a router per entrypoint and the forwardAuth above attached to BOTH — which meant the
+  # gate was sitting in front of cleartext :80 rather than keeping cleartext away. Measured before the
+  # pin: `http://tesla.titan.arrieta.eu/` answered 302 to auth.titan.arrieta.eu over an unencrypted
+  # connection, so the outpost cookie and the TeslaMate session both travelled in the clear on that
+  # router. The pin below removes that router, which is the same line grafana.titan, tesla-boards, llm,
+  # investing-agent and both Home Assistant hosts already carry. `make ingress-auth` now fails if it is
+  # dropped (PIN_REQUIRED), and the two protocol hosts on this domain are deliberately left unpinned:
+  # `/.well-known` has to answer for Tesla's key fetch and `streaming.` is a TLS-SNI intake, so neither
+  # has a cleartext session to protect.
+  #
+  # What the pin does NOT do: it does not make the gate stronger. Group admission is the outpost's, and
+  # the reason it stays is above.
   annotations:
     traefik.ingress.kubernetes.io/router.middlewares: apps-teslamate-auth@kubernetescrd
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
 spec:
   ingressClassName: traefik
   rules:
