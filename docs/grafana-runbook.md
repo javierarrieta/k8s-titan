@@ -551,4 +551,6 @@ second is whether the same 302-on-XHR shape is now hitting another gated host. T
 - `apply/50-apps/investing-agent/investing-agent.yaml` — the console.
 
 They are untouched here on purpose: one host, one diagnosis, one verified change. Fixing them is the
-same edit (drop the annotation, let the app's own OIDC decide) plus a `NOT_PROXY_GATED` row each.
+same edit (drop the annotation, let the app's own OIDC decide) plus a `NOT_PROXY_GATED` row each —
+tracked in issue #243, which also records why teslamate and investing-agent are NOT the same edit: their
+in-app auth is Tesla's OAuth and a password form respectively, not authentik OIDC.
