@@ -733,6 +733,19 @@ same line the other public hosts carry, and `make ingress-auth` now fails if the
 protocol hosts on this domain stay unpinned on purpose: `/.well-known` has to answer for Tesla's key
 fetch and `streaming.` is a TLS-SNI intake, so neither has a cleartext session to protect.
 
+**Checked after the pin, on the same day.** The pin removes a router, so the thing to fear was the socket
+losing its route. Traefik's access log at 19:50:57 on 2026-11-05, from the operator's own browser:
+
+```
+GET /live/websocket?_csrf_token=…&baseUrl=https%3A%2F%2Ftesla.titan.arrieta.eu&…&vsn=2.0.0   status 0
+```
+
+`status 0` is Traefik's marker for a hijacked connection — the upgrade happened, the request was not
+answered at all. That is the healthy shape and it is emphatically not the `302` this path answered on 26
+of 36 attempts before the gate decision. The page around it served normally too: `/` `200`, `app.js`
+and `app.css` and the icon font `200`. What this does **not** prove is that a driving car streams
+through that socket — it proves the socket is reachable over the pinned router.
+
 **So the remedy is the reload.** Click it, or press the browser's reload. It is a top-level navigation, so
 it refreshes the outpost cookie and the socket reconnects. If it comes back the moment you open a tab, that
 is a different fault — check the outpost is alive (§9, the 404 that is not Traefik) rather than assuming
@@ -752,9 +765,10 @@ this one.
   `ingressroutes.yaml`, so `make crd-check` could not validate the object it would be trusting.
 
 **Not proven.** That a reload is the whole recovery — nobody has watched a disconnected LiveView come back
-on reload and confirmed it in the access log. And whether a stranger's Tesla account, once past Tesla's
-OAuth, can see anything of this car's: that was not established, which is exactly why the gate was kept
-rather than reasoned about.
+on reload and confirmed it in the access log. The 19:50:57 socket above is a *fresh* connect, which is the
+same shape a reload produces but was not observed as a recovery from a drop. And whether a stranger's
+Tesla account, once past Tesla's OAuth, can see anything of this car's: that was not established, which
+is exactly why the gate was kept rather than reasoned about.
 
 ## 10. Not yet proven, and what would prove it
 
