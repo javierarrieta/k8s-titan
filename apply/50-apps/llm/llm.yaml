@@ -286,9 +286,9 @@ spec:
 # tightened is an unauthenticated LLM endpoint that still looks healthy.
 #
 # Same-namespace is provable from the tree and is already what this cluster does:
-# apply/50-apps/grafana/grafana.yaml references `observability-grafana-auth@kubernetescrd` from an
-# Ingress in `observability`. Note that the forwardAuth ADDRESS below still crosses a namespace by
-# plain URL, and grafana proves that works here too (its address is authentik's service in `auth`).
+# apply/60-tesla/teslamate.yaml references `apps-teslamate-auth@kubernetescrd` from an
+# Ingress in `apps`. Note that the forwardAuth ADDRESS below still crosses a namespace by
+# plain URL, and teslamate proves that works here too (its address is authentik's service in `auth`).
 apiVersion: traefik.io/v1alpha1
 kind: Middleware
 metadata:
