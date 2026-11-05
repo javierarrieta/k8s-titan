@@ -305,16 +305,35 @@ was a second worker restart: `kubectl -n auth rollout restart deploy/authentik-w
   itself and costs only what someone built by hand in the UI. That is the argument for the
   exclusion, and it is still only an argument — nobody has wiped the volume to find out what else
   was in the sqlite file.
-- **The §10 fix has never been observed working.** The middleware removal is a commit and a green gate
-  run, not a measured hour of open dashboards. Until someone leaves a board open past ~10 minutes and
-  sees `/api/ds/query` answer 200 the whole time, the fix is a well-evidenced diagnosis and a
-  plausible repair, not a verified one (§10).
+- **The §10 fix has been observed working on the sibling host, not here.** tesla-boards got the same
+  middleware removal on 2026-11-05 and a real browser session there polled `/api/ds/query` 49 times over
+  13m52s with **every call a `200`** (§10). That is the symptom's own test, passed, on a Grafana running
+  this exact shape. What it does not retire is the hour-long watch, or this host's own post-cutover
+  session: the two instances share a mechanism and share nothing else, so the honest claim is "the repair
+  works", not "this instance was watched".
 - **Nothing proves the two group bindings on the live authentik.** `make observability-oidc-check`
   proves the reviewed blueprint carries them and that the rendered artifact equals it, and
   `blueprint-mount-check` proves the blueprint is mounted — but mounting is not applying, and
   §9 is the dated record of a mounted blueprint that silently never applied. The bindings are now the
   only thing admitting anyone (§4), so the applied state is worth checking with §7 step 4b, not just
   the committed one.
+- **Revocation has never been watched, on either Grafana.** Since #246 the edge is gone, so the two group
+  bindings and the `is_admin` claim mapping are the whole policy: pulling someone out of
+  `titan-grafana-admins` / `titan-tesla-grafana-admins` while leaving them in `titan-family` is supposed
+  to degrade them to Viewer, not lock them out. Nobody has done it and logged in afterwards to confirm.
+  A gate can prove the binding exists; only a login proves what it does.
+- **First-login provisioning is now an explicit setting rather than a default, and has not been re-tested
+  since.** `GF_USERS_ALLOW_SIGN_UP=false` is pinned in both manifests as of #246. The mechanism says that
+  flag only removes the self-signup form while `GF_AUTH_GENERIC_OAUTH_ALLOW_SIGN_UP=true` is what creates
+  the account on an OIDC login, so a new authentik user in one of the groups should still get a Viewer
+  account — but the pairing is now a decision instead of an image default, and the failure mode reads as
+  "user does not exist", which looks like an authentik problem and not a Grafana one. Prove it with a
+  throwaway account.
+- **The local-admin escape hatch has not been used since the login form was hidden.**
+  `GF_AUTH_DISABLE_LOGIN_FORM=true` hides the UI form and Grafana's own docs say `POST /login` does not
+  consult it, so the way back in when OIDC is the broken thing is an API call. That is a break-glass path
+  nobody has broken glass with; §10 has the curl. It needs the admin password, so it will not be proven by
+  an agent.
 - **`make release-secrets` does not scan this Deployment.** It reads `HelmRelease` values only, so a
   typo'd `secretRef` here surfaces as a `Pending` pod, not a red gate. open-webui has the same hole.
 - **Blueprint ingestion works, but only after a second restart.** Proven on first deploy (§9): the
@@ -540,7 +559,18 @@ since `GF_AUTH_BASIC_ENABLED` is true (see §4 for why it stays true). The secon
 `GF_AUTH_DISABLE_LOGIN_FORM=true` is set on both Grafanas as of 2026-11-05, which hides the form and
 leaves the escape hatch usable over `POST /login` — Grafana's own docs are explicit that the setting
 only hides the UI form, and `make grafana-oidc-check` now fails if basic auth and the hidden form ever
-stop being set together. The first has no lever short of a proxy: `/api/health` is unauthenticated in
+stop being set together. **The call to make once on purpose** — a break-glass path nobody has broken glass
+with is not a break-glass path, and this needs an admin context because `k8s-reader` cannot read Secrets:
+
+```sh
+set PW (kubectl get secret tesla-grafana-admin -n apps -o jsonpath='{.data.admin-password}' | base64 -d)
+curl -sS -o /dev/null -D- -X POST https://tesla-boards.titan.arrieta.eu/login \
+  -H 'Content-Type: application/json' -d "{\"user\":\"admin\",\"password\":\"$PW\"}"
+```
+
+Expect `200` and a `set-cookie: grafana_session=…`. A `401` there, with the form also hidden, would mean
+there is no way in at all. grafana.titan's own admin lives in
+`Secret/observability/observability-grafana-admin` (§1). The first has no lever short of a proxy: `/api/health` is unauthenticated in
 Grafana and will keep answering. What is genuinely
 different is that a mistake in `authentik/blueprints-observability.yaml` now has nothing in front of it —
 `make observability-oidc-check` is the gate that holds that line (§4), and `make ingress-auth` now fails
@@ -564,6 +594,24 @@ not take". It does **not** retire the original symptom's own test — nobody has
 panel poll `/api/ds/query` for an hour past the cookie lifetime and logged the absence of a 302 burst. The
 `/api/ds/query` calls in that window were `200`, but they sit before the cutover, so they show a fresh
 cookie working, which was never the bug.
+
+**The symptom's own test, run — tesla-boards, 2026-11-05, 19:49:14 to 20:03:39.** tesla-boards had this
+exact failure on the same timer and got the same fix the same day (#246), and the operator's own browser
+session was then read out of Traefik's access log — the only place that sees every panel poll:
+
+| | |
+|---|---|
+| requests on the `apps-tesla-grafana-…` router | 112 → **109 `200`**, 1 `304`, **2 `302`** |
+| both of those `302` | `19:49:14 GET /` and `GET /user/auth-tokens/rotate` — the pre-login bounce into OIDC, before any session existed |
+| `/api/*` calls | **98, every one `200`. No `302` on any API path** |
+| `/api/ds/query` | **49 calls, 19:49:47 → 20:03:39 = 13m52s unbroken** — past all three age-out gaps measured above (364 s, 588 s, 987 s) |
+| the line that is the fix | `19:58:54 POST /api/user/auth-tokens/rotate → 200`. Under the outpost this call was a `302` to authentik; in the evidence block above it reaches `200` only after a full page reload |
+
+Before the change the same window was the failure: sixteen `/api/ds/query` `302`s in a row, panels
+rendering "No data" on a healthy pod. After it, a dashboard polled for fourteen and a half minutes and
+nothing answered a `302`. **What it does not prove:** it is 13m52s, not an hour; it is one client on one
+dashboard on one of the two Grafanas; and it says nothing about group revocation or about a first login
+provisioning a new user — those are separate rows below and in §8.
 
 **If it comes back,** the first thing to check is whether something re-added the middleware annotation
 (`kubectl -n observability get ingress grafana -o jsonpath='{.metadata.annotations}'; echo`), and the
