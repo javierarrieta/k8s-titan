@@ -19,7 +19,7 @@ planned, for the reasons in `docs/titan-metrics-scrape.md`.
 | Prometheus | `https://prometheus.local.arrieta.eu` — casa's, over the mesh |
 | Loki | `https://loki.local.arrieta.eu` — casa's, the same host promtail pushes titan's pod logs to (`docs/titan-logs-loki.md`) |
 | Dashboards | seven, copied from `k8s-casa/apply/50-apps/casa/grafana-dashboards/`, provisioned from ConfigMaps |
-| Edge gate | authentik forward-auth via `Middleware/observability/grafana-auth` |
+| Edge gate | **none at the proxy** — authentik OIDC in-app, plus the two group bindings on the `observability` application (§4, §10) |
 | Identity | authentik OIDC, application slug `observability` |
 | Local admin | `Secret/observability/observability-grafana-admin`, kept as the escape hatch |
 
@@ -63,17 +63,36 @@ knowing which empties are on purpose.
 
 ## 4. Login
 
-Two layers, deliberately, and they answer different questions:
+**One gate, not two — since 2026-11-05.** There used to be a Traefik forwardAuth Middleware in front
+of Grafana's own OIDC. It was removed; §10 is the measured reason and it is worth reading before
+re-adding anything, because the failure it caused only shows up an hour into a session.
 
-1. **The edge gate** decides whether the host may be reached at all. It never tells Grafana who you
-   are. Unauthenticated browsers get a 302 to `auth.titan.arrieta.eu`.
-2. **OIDC** supplies identity and role: `contains(groups[*], 'titan-grafana-admins') && 'Admin' ||
-   'Viewer'`. `GrafanaAdmin` (server admin) is not granted to anyone.
+What gates the host now:
 
-A third layer sits in front of both, inside authentik: the application is bound to `titan-family` or
-`titan-grafana-admins` (`authentik/blueprints-observability.yaml`), so anyone in neither is refused at
-the IdP before a token exists and never reaches Grafana to be made a Viewer. That binding is what
-switched this app off "any authentik user may log in".
+1. **OIDC** supplies identity and role: `contains(groups[*], 'titan-grafana-admins') && 'Admin' ||
+   'Viewer'`. `GrafanaAdmin` (server admin) is not granted to anyone. With
+   `GF_AUTH_GENERIC_OAUTH_AUTO_LOGIN=true` an unauthenticated browser gets a silent 302 to
+   `auth.titan.arrieta.eu` rather than a Grafana login form — so from outside it still *looks* like
+   the old edge gate, and §7 step 3 still expects a 302. It is now Grafana issuing it, not Traefik.
+2. **The group bindings decide who is admitted**, and they answer before Grafana ever sees a token:
+   the application is bound to `titan-family` (order 0) or `titan-grafana-admins` (order 1), so
+   anyone in neither is refused at the IdP and never reaches Grafana to be made a Viewer. That
+   binding is what switched this app off "any authentik user may log in".
+
+**Those bindings are now load-bearing in a way they were not.** While the outpost was in front, an
+outsider was turned away before authentik's application policy was even consulted, so a missing
+binding was a second-order mistake. Now it is the only thing standing between the internet and every
+cluster this Prometheus holds. They live in the sops Secret
+`apply/10-secrets/authentik-observability-blueprint.yaml`, not in the Grafana manifest, so nothing in
+this repo's tree proves them — check with:
+
+```sh
+sops -d apply/10-secrets/authentik-observability-blueprint.yaml \
+  | grep -A6 "policybinding" | grep -E "target|group|order"
+```
+
+Two `policybinding` rows naming `titan-family` and `titan-grafana-admins` is the expected answer. If
+either is gone, this host is open to every authentik account as `Viewer`.
 
 The `profile` scope is load-bearing on **both** sides of the pair — the `groups` claim exists only
 because authentik's default profile-scope mapping emits it. Drop it on either side and every login
@@ -177,8 +196,9 @@ kubectl -n observability get pvc,deploy,pods -l app=grafana
 # 2. Grafana itself is healthy — inside the cluster, so this does not cross the edge gate
 kubectl -n observability exec deploy/grafana -- wget -qO- localhost:3000/api/health
 
-# 3. THE ONE THAT MATTERS MOST: expect 302 to auth.titan.arrieta.eu.
-#    A 200 here means the forward-auth annotation did not land and the homelab's metrics are public.
+# 3. Expect 302 to auth.titan.arrieta.eu. A 200 here means Grafana's OIDC is not engaging and the
+#    homelab's metrics are public. Since 2026-11-05 this 302 comes from GRAFANA, not from a Traefik
+#    forwardAuth Middleware (§4, §10) — it proves SSO is wired, it no longer proves a proxy gate.
 curl -sSI https://grafana.titan.arrieta.eu/ | head -5
 
 # 4. TLS is the wildcard, not Traefik's default cert (default cert = Reflector has not delivered)
@@ -411,3 +431,76 @@ The causal chain is documented rather than inferred, which matters because every
 editing dashboards in git depends on it. Note where the comment had to go: a YAML comment above `data:`
 is discarded at build time, produces identical stored bytes, and would have shown no restart for a
 reason that had nothing to do with Reloader.
+
+## 10. Panels go "No data" after a while — measured 2026-11-05, and the fix
+
+**Symptom.** A dashboard loads and shows live data. After some minutes the panels stop refreshing and
+read "No data". Reloading the whole page brings the data back for another while. Nothing on the pod
+looked wrong throughout: 0 restarts in 6d20h, and **zero `level=error` or `level=warn` lines in 72
+hours of logs.**
+
+**Root cause: the proxy-side gate, not Grafana.** Traefik's own access log is the only place that
+sees every panel poll, and it shows the failure outright:
+
+```
+13:18:45 POST /api/ds/query?ds_type=prometheus&requestId=SQR132  302  size=0
+13:18:45 POST /api/ds/query?ds_type=prometheus&requestId=SQR133  302  size=0
+   ... 16 x /api/ds/query 302, plus /api/annotations and the label-value calls
+13:18:48 GET  /d/amdgpu/amd-gpu-2b-system?...&refresh=30s        302
+13:18:49 GET  /user/auth-tokens/rotate?redirectTo=/d/amdgpu...   302
+13:18:49 GET  /d/amdgpu/amd-gpu-2b-system?...&refresh=30s        200   <- fixed
+```
+
+The discriminator that put this on Traefik and not on Grafana: **Grafana's log is empty from 13:18:45
+to 13:18:47.** Those sixteen query requests were answered by the `forwardAuth` Middleware and never
+reached the pod. The chain:
+
+1. The dashboard polls `/api/ds/query` every 30s (`refresh=30s` is right there in the URL).
+2. authentik refreshes its proxy cookie **only when a browser follows a top-level navigation through
+   the outpost**. A dashboard does not navigate — it polls by XHR, and an XHR cannot complete a
+   cross-origin redirect to mint a cookie.
+3. When the cookie aged out (measured gaps before a 302 burst: 588s, 364s, 987s), Traefik answered
+   **every** request with a 302 to `auth.titan.arrieta.eu`.
+4. The browser follows that redirect on an XHR, the panel receives HTML instead of JSON, and it
+   renders "No data" while the page itself still looks perfectly healthy.
+5. A full page reload *is* a top-level navigation, so authentik silently re-issues the cookie and the
+   data returns. **That is why a reload fixed it and why nothing server-side ever looked broken.**
+
+**Why casa's Grafana never had this.** It has no middleware at all — its Ingress annotations are `{}`.
+Its polls never pass through authentik, so they can never be 302'd. That comparison is what localised
+this in one step; the two instances differ on image, datasource path and edge gate, and only the gate
+produces a 302 on an XHR.
+
+**Two readings that were wrong, recorded because both looked like findings.**
+
+- *"`/api/live/ws` dies 6–92 ms after connecting — a websocket flap!"* Artifact. casa's **working**
+  Grafana logs the identical `status=-1 time_ms=6`. For a hijacked connection Grafana records the
+  hijack duration, not the connection lifetime.
+- *"No `/api/ds/query` in Grafana's log — the queries are being blocked!"* Also an artifact. casa logs
+  zero too; Grafana simply does not log that path at info. The place to look was Traefik.
+
+Also ruled out with evidence: the mesh datasource path (73 ms, `count(up)` → 107), pod health, and
+`token needs to be rotated` 401s — present on both instances, and casa has **more** of them (21 vs 1),
+so it is normal Grafana cookie rotation and not the fault.
+
+**The fix.** Remove the `forwardAuth` Middleware and its `router.middlewares` annotation, and let
+Grafana's own authentik OIDC be the gate — §4. Tuning the cookie lifetime was the other candidate and
+was rejected: an XHR can never refresh that cookie no matter how long it lives, so a longer lifetime
+only moves the timer. This is the shape coder, open-webui, mealie and opencloud already run, and
+`NOT_PROXY_GATED` in `tools/ingress-auth-check.py` now carries the reason so the omission cannot be
+silently reverted.
+
+**What it costs.** The outpost no longer sees this host, so authentik's per-provider proxy policy does
+not apply here and the two application group bindings are the only thing admitting anyone (§4). Verify
+them.
+
+**Not proven.** The fix is a commit and a gate run, not a measured hour of open dashboards. What would
+close it: leave a dashboard open past ~10 minutes, confirm the panels keep refreshing, and confirm in
+Traefik's access log that `/api/ds/query` answers 200 continuously with no 302 burst. Until someone
+does that, §10 is a well-evidenced diagnosis and a plausible fix, not a verified one.
+
+**If it comes back,** the first thing to check is whether something re-added the middleware annotation
+(`kubectl -n observability get ingress grafana -o jsonpath='{.metadata.annotations}'; echo`), and the
+second is whether the same 302-on-XHR shape is now hitting another gated host — the `forward_domain`
+provider covers every `*.titan.arrieta.eu`, so any app behind it that polls by XHR has this same
+failure waiting for it.

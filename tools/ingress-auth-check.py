@@ -90,6 +90,14 @@ NOT_PROXY_GATED = {
                                   "ENABLE_LOGIN_FORM=false and group-mapped roles",
     ("mealie", "mealie"): "Mealie is OIDC-only with ALLOW_PASSWORD_LOGIN=false "
                           "(apply/50-apps/mealie/mealie.yaml)",
+    ("observability", "grafana"): "authentik OIDC in-app; GF_AUTH_GENERIC_OAUTH_* with auto_login, and "
+                                  "the `observability` application is bound to titan-family / "
+                                  "titan-grafana-admins so outsiders are refused at the IdP. The "
+                                  "forwardAuth Middleware that used to sit here was REMOVED 2026-11-05, "
+                                  "not forgotten: the outpost cookie only refreshes on a top-level "
+                                  "navigation, so it 302'd every XHR panel poll and the boards went "
+                                  "empty on a timer (apply/50-apps/grafana/grafana.yaml, "
+                                  "docs/grafana-runbook.md \u00a710)",
     ("files", "opencloud"): "oCIS proxy authenticates against authentik OIDC, PROXY_OIDC_* "
                             "(apply/50-apps/opencloud/opencloud.yaml)",
     ("files", "collabora"): "no user-facing login of its own; its only relationship is the WOPISrc "

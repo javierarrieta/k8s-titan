@@ -411,7 +411,7 @@ metadata:
   # is resource exhaustion: every failed attempt costs this 1.5-CPU pod 16 MiB and real work, and
   # nothing caps it. That is an availability hit on one console, the same one every public host here
   # carries. Traefik 3.7.8 ships an OSS `rateLimit` middleware and the `Middleware` CRD is already in
-  # use here (observability-grafana-auth@kubernetescrd), so it is a two-line add — deliberately not
+  # use here (apps-teslamate-auth@kubernetescrd), so it is a two-line add — deliberately not
   # made, because the limiter is per source IP and counts every request including the console's own
   # static assets, so a limit tight enough to matter can lock the operator out of the page they need
   # to log in to, and that reads as an outage rather than a lockout. The scrypt parameters are below
