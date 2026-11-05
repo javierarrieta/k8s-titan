@@ -100,6 +100,7 @@ entries:
       sub_mode: hashed_user_id
 
   - model: authentik_core.application
+    id: coder-application
     identifiers:
       name: coder
     state: present
@@ -115,3 +116,30 @@ entries:
       # that id has an instance yet (v1/common.py:239-253) - the loud failure I want if the entry order
       # ever changes, rather than a silently null provider that validates and then does nothing.
       provider: !KeyOf coder-provider
+
+  # WHO MAY LOG IN. Before this entry existed the coder application carried no policy binding at
+  # all, and authentik's AppAccessWithoutBindings defaults to True (core/apps.py:16), so *every*
+  # account that could authenticate at auth.titan.arrieta.eu could reach coder and provision
+  # compute. "No bindings" is not "no restriction" in the docs' phrasing, it is "everyone".
+  #
+  # ONE GROUP, NOT THE UNION THE OTHER APPS USE. grafana/open-webui/tesla bind to titan-family plus
+  # their own admin group because those apps are shared family surfaces. coder is not: it hands out
+  # compute, so it gets its own membership list and titan-family is deliberately absent. Do not
+  # "align" this with the others.
+  #
+  # THE ORDER MATTERS MORE HERE THAN ANYWHERE ELSE IN THIS REPO. A binding naming a group that does
+  # not exist, or that is empty, DENIES - it does not allow. So titan-coder-users must exist and
+  # contain you before this entry is applied, or the first login after the merge locks every human
+  # out of coder including you. authentik's own UI is not behind this gate, so recovery is possible,
+  # but existing coder sessions hold their already-issued OIDC tokens, which is what makes the
+  # window annoying rather than fatal.
+  #
+  # !KeyOf, not !Find, for the same reason as `provider` above: the application is created by this
+  # blueprint, so a reordered file fails loudly instead of binding nothing.
+  - model: authentik_policies.policybinding
+    identifiers:
+      target: !KeyOf coder-application
+      order: 0
+    state: present
+    attrs:
+      group: !Find [authentik_core.group, [name, titan-coder-users]]
