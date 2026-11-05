@@ -535,20 +535,33 @@ application, so the set of people who can reach a panel is unchanged. What is ge
 that a mistake in `authentik/blueprints-observability.yaml` now has nothing in front of it —
 `make observability-oidc-check` is the gate that holds that line (§4).
 
-**Not proven.** The fix is a commit and a gate run, not a measured hour of open dashboards. What would
-close it: leave a dashboard open past ~10 minutes, confirm the panels keep refreshing, and confirm in
-Traefik's access log that `/api/ds/query` answers 200 continuously with no 302 burst. Until someone
-does that, §10 is a well-evidenced diagnosis and a plausible fix, not a verified one.
+**Was not proven; now observed.** Written as unverified, then checked against the live cluster on
+2026-11-05, the day it merged. Traefik's access log for the Grafana router shows `/api/live/ws` answered
+`302` continuously from 12:52:25 to **15:21:31**, and `401` from Grafana itself at **15:39:06** — the
+outpost stopped being in front between those two, and a `401` from Grafana is the shape of "no proxy, no
+session" rather than "proxy refused". After 15:21:31 there is **no 302 at all** on that router for the rest
+of the window, while `/api/user/auth-tokens/rotate` returns `200` on a ~10-minute cadence from 14:07
+through 15:55 — a sustained authenticated session spanning the cutover and half an hour past it. Cleartext
+also closed: `http://grafana.titan.arrieta.eu/api/health` now answers **404**, where the same URL answered
+through the outpost before the change.
+
+What that does and does not retire. It retires "the middleware is still in front" and "the websecure pin did
+not take". It does **not** retire the original symptom's own test — nobody has watched a single dashboard
+panel poll `/api/ds/query` for an hour past the cookie lifetime and logged the absence of a 302 burst. The
+`/api/ds/query` calls in that window were `200`, but they sit before the cutover, so they show a fresh
+cookie working, which was never the bug.
 
 **If it comes back,** the first thing to check is whether something re-added the middleware annotation
 (`kubectl -n observability get ingress grafana -o jsonpath='{.metadata.annotations}'; echo`), and the
 second is whether the same 302-on-XHR shape is now hitting another gated host. Two still sit behind
 `apps-teslamate-auth@kubernetescrd`:
 
-- `apply/60-tesla/teslamate.yaml` — the TeslaMate UI. It polls too, but its UI is Phoenix LiveView (a
-  websocket, not a 30s XHR), and its own login is **Tesla's OAuth, not authentik**, so dropping the edge
-  here swaps "a member of these groups" for "anyone with a Tesla account". That is a different admission
-  set and an operator decision, not a refactor.
+- `apply/60-tesla/teslamate.yaml` — the TeslaMate UI. Its own login is **Tesla's OAuth, not authentik**,
+  so dropping the edge here swaps "a member of these groups" for "anyone with a Tesla account". **Decided
+  2026-11-05: the gate stays.** The failure is real and was measured — 26 of 36 `/live/websocket` attempts
+  answered 302 over 7 days, in three Phoenix-backoff bursts — and it is accepted as the price of keeping
+  group admission on a host with no IdP integration of its own. Remedy is a reload. Full evidence and the
+  two rejected alternatives: `docs/teslamate-runbook.md` §9.
 - `apply/50-apps/investing-agent/investing-agent.yaml` — the console. It carries its own form login at
   `/login` with a signed session cookie, and its manifest documents "TWO LOGINS, DELIBERATELY". Dropping
   authentik leaves the password login as the only gate — the same call already made for Home Assistant in
@@ -560,5 +573,8 @@ two bindings on the `tesla-boards` application decide who gets in, and `make gra
 those bindings. So if the 302-on-XHR shape comes back for a *Grafana*, there are now no gated Grafanas
 left to look at — check for a re-added annotation on one of the two hosts above instead.
 
-The two remaining hosts are untouched on purpose: one host, one diagnosis, one verified change, and
-issue #243 records why neither is the same mechanical edit as this one.
+Of the two hosts still behind the outpost, one has now been decided and one has not: teslamate keeps the
+gate on purpose (above), and `investing-agent` remains an open operator decision — its own form login at
+`/login` would become the only gate, which is the same call already made for Home Assistant in issue #112
+and, like that one, not an agent's call to make. Issue #243 records why neither is the same mechanical edit
+as this one.

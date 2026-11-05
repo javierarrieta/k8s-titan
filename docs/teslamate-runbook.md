@@ -676,6 +676,69 @@ Four things that were true at the time of the rename and are worth knowing befor
   sqlite on the PVC (dashboard or panel links) or in the TeslaMate database — editing manifests will
   not move it.
 
+### The LiveView socket 302-loop — measured, and deliberately accepted
+
+Symptom: the TeslaMate UI stops updating and shows **Disconnected**, while the page itself is fine and a
+reload fixes it. Nothing is wrong with TeslaMate, and nothing is wrong with authentik. It is the same root
+cause that took `grafana.titan.arrieta.eu`'s panels down in `docs/grafana-runbook.md` §10, arriving here
+through a different mechanism.
+
+**Mechanism.** authentik refreshes its outpost cookie only on a **top-level navigation**. TeslaMate's UI is
+Phoenix LiveView, which holds a websocket and reconnects to `/live/websocket` when the socket drops. A
+websocket cannot follow a cross-origin redirect, so once the cookie has aged out every reconnect is
+answered with a 302 to `auth.titan.arrieta.eu`, Phoenix cannot consume it, and the UI sits disconnected
+until something performs a real navigation — which a reload does.
+
+**Measured, not inferred.** Traefik access log for router
+`websecure-apps-teslamate-tesla-titan-arrieta-eu`, 7 days, queried from Loki (kubectl's own buffer only
+reaches back ~3 h to container rotation):
+
+```bash
+NOW=$(date +%s)000000000; START=$(date -d '-7 days' +%s)000000000
+curl -sS --get "https://loki.local.arrieta.eu/loki/api/v1/query_range" \
+  --data-urlencode 'query={app_kubernetes_io_name="traefik"} |= "/live/websocket"' \
+  --data-urlencode "start=$START" --data-urlencode "end=$NOW" --data-urlencode 'limit=500'
+```
+
+36 attempts: **10 upgraded** (logged as status `0`, because Traefik writes the line when a hijacked
+connection closes — one lived 37 541 ms) and **26 answered 302**. The 302s are not spread evenly; they
+come in three bursts on 2026-11-04 — `10:06:53`–`10:07:09`, `12:02:12`–`12:02:14`, `16:28:25`–`16:28:26`
+— and the gaps inside the first burst are `1s,1s,1s,1s,2s,5s,5s`, which is Phoenix's own reconnect
+backoff. So the socket works on a fresh cookie and loops on an aged one.
+
+**The decision: the gate stays.** Issue #243 offered the same fix #242 applied to Grafana — drop the
+`forwardAuth` Middleware and let the app's own login be the gate — and it was **declined for this host**.
+Grafana could afford that because authentik OIDC inside Grafana does admission: the application's group
+bindings refuse outsiders at the IdP before a token exists. TeslaMate has no authentik integration. Its
+login is Tesla's OAuth (`TESLA_AUTH_HOST=https://auth.tesla.com`), which proves *a* person signed in and
+proves nothing about whether that person belongs to this household. The Middleware is therefore the only
+thing enforcing group membership here, and dropping it would swap "a member of titan-family /
+`titan-grafana-admins` / `titan-tesla-grafana-admins`" for "anyone who can produce a Tesla account". This
+host is car location history. Operator decision, 2026-11-05.
+
+**So the remedy is the reload.** Click it, or press the browser's reload. It is a top-level navigation, so
+it refreshes the outpost cookie and the socket reconnects. If it comes back the moment you open a tab, that
+is a different fault — check the outpost is alive (§9, the 404 that is not Traefik) rather than assuming
+this one.
+
+**Two alternatives were considered and rejected**, recorded so nobody re-derives them during an incident:
+
+- **`skip_path_regex` on the outpost provider for `^/live/websocket`.** Rejected on blast radius: the
+  provider is `forward_domain` over `titan.arrieta.eu` and serves every host under the apex, so a
+  `skip_paths` entry exempts that path on **all** of them — including `investing-agent`, which has no
+  LiveView and no business being exempt. The existing `^/\.well-known` value is narrow enough to be safe
+  precisely because that path means something on every host; `/live/websocket` does not.
+- **Split the websocket onto its own `IngressRoute` with no middleware.** Rejected on two counts. It makes
+  the socket reachable without authentik, which is only safe if TeslaMate's LiveView mount requires its
+  own Phoenix session — unverified, and this repo does not widen a gate on an assumption. And
+  `vendor/traefik-crds/` ships `middlewares.yaml` and `ingressroutetcps.yaml` but **not**
+  `ingressroutes.yaml`, so `make crd-check` could not validate the object it would be trusting.
+
+**Not proven.** That a reload is the whole recovery — nobody has watched a disconnected LiveView come back
+on reload and confirmed it in the access log. And whether a stranger's Tesla account, once past Tesla's
+OAuth, can see anything of this car's: that was not established, which is exactly why the gate was kept
+rather than reasoned about.
+
 ## 10. Not yet proven, and what would prove it
 
 Written at implementation time, before the car has ever talked to this. Each line is a claim the rest of
