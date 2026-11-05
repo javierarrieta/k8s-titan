@@ -542,15 +542,23 @@ does that, §10 is a well-evidenced diagnosis and a plausible fix, not a verifie
 
 **If it comes back,** the first thing to check is whether something re-added the middleware annotation
 (`kubectl -n observability get ingress grafana -o jsonpath='{.metadata.annotations}'; echo`), and the
-second is whether the same 302-on-XHR shape is now hitting another gated host. Three still sit behind
-`apps-teslamate-auth@kubernetescrd`, and every one of them polls:
+second is whether the same 302-on-XHR shape is now hitting another gated host. Two still sit behind
+`apps-teslamate-auth@kubernetescrd`:
 
-- `apply/60-tesla/grafana.yaml` — **tesla-boards is also a Grafana**, so it has this exact failure
-  today, on the same timer, and the same one-line fix.
-- `apply/60-tesla/teslamate.yaml` — the TeslaMate UI.
-- `apply/50-apps/investing-agent/investing-agent.yaml` — the console.
+- `apply/60-tesla/teslamate.yaml` — the TeslaMate UI. It polls too, but its UI is Phoenix LiveView (a
+  websocket, not a 30s XHR), and its own login is **Tesla's OAuth, not authentik**, so dropping the edge
+  here swaps "a member of these groups" for "anyone with a Tesla account". That is a different admission
+  set and an operator decision, not a refactor.
+- `apply/50-apps/investing-agent/investing-agent.yaml` — the console. It carries its own form login at
+  `/login` with a signed session cookie, and its manifest documents "TWO LOGINS, DELIBERATELY". Dropping
+  authentik leaves the password login as the only gate — the same call already made for Home Assistant in
+  issue #112, and again the operator's call.
 
-They are untouched here on purpose: one host, one diagnosis, one verified change. Fixing them is the
-same edit (drop the annotation, let the app's own OIDC decide) plus a `NOT_PROXY_GATED` row each —
-tracked in issue #243, which also records why teslamate and investing-agent are NOT the same edit: their
-in-app auth is Tesla's OAuth and a password form respectively, not authentik OIDC.
+`apply/60-tesla/grafana.yaml` — **tesla-boards, also a Grafana, had this exact failure on the same timer
+and got the same fix on 2026-11-05.** It is no longer behind the outpost: its own authentik OIDC and the
+two bindings on the `tesla-boards` application decide who gets in, and `make grafana-oidc-check` holds
+those bindings. So if the 302-on-XHR shape comes back for a *Grafana*, there are now no gated Grafanas
+left to look at — check for a re-added annotation on one of the two hosts above instead.
+
+The two remaining hosts are untouched on purpose: one host, one diagnosis, one verified change, and
+issue #243 records why neither is the same mechanical edit as this one.

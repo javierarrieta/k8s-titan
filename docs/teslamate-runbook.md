@@ -574,7 +574,7 @@ of them can be done by the agent.
 | two bridge pods, frames missing at random | someone set `replicas: 2` (§1) |
 | Grafana asks for a login and `admin`/`admin` works | `tesla-grafana-admin` is missing or not mounted (§2) |
 | a Tesla manifest builds and nothing changes | it is not listed in a `kustomization.yaml` — `make kustomize-listing` |
-| whole host 404s on every path, Traefik log clean | forward-auth is live and authentik is the one answering 404 — see below |
+| whole host 404s on every path, Traefik log clean | forward-auth is live and authentik is the one answering 404 — see below. Applies to `tesla.titan` only since 2026-11-05: `tesla-boards` carries no middleware, so it has no router for a dangling reference to disable |
 | Traefik logs `middleware "..." does not exist` | wrong provider suffix; `@kubernetescrd` is correct on traefik 3.x, `@kubernetes` is the Ingress provider |
 
 **The 404 that looks like Traefik but is not.** A forward-auth subrequest that authentik answers with 404 is
@@ -612,18 +612,32 @@ reason in §6.
 
 Four things that were true at the time of the rename and are worth knowing before you touch this host:
 
-- **Grafana was not behind authentik** until 2026-10-19. The `tesla-grafana` Ingress carried no
-  `router.middlewares` annotation while `teslamate` carried `apps-teslamate-auth@kubernetescrd`, so the
-  host was reachable by anyone who knew it, gated only by Grafana's own login — even though the outpost
-  spec listed it as gated. Verify with
-  `kubectl -n apps get ingress tesla-grafana -o jsonpath='{.metadata.annotations}'`; an empty result on
-  a cluster predating the fix means unauthenticated. Forward-auth only decides whether the host is
-  reachable at all; it never tells the upstream who you are, which is why Grafana used to ask for a
-  second, shared password on top of it. There is **no iframe
-  anywhere in TeslaMate 4.3** — its Dashboards menu links out with `target="_blank"` — so authentik's
-  `X-Frame-Options: DENY` and any SameSite question do not apply to this host. An earlier version of
-  this bullet claimed the opposite, inherited from a stale comment in the outpost blueprint rather than
-  checked against the app; see the Ingress comment in `apply/60-tesla/grafana.yaml`.
+- **This host has been proxy-gated, and is not any more.** Three states, in order, because the manifest
+  has now argued both directions and only the last one is live:
+  1. **Until 2026-10-19: no gate at all.** The `tesla-grafana` Ingress carried no `router.middlewares`
+     annotation while `teslamate` carried `apps-teslamate-auth@kubernetescrd`, so the host was reachable
+     by anyone who knew it, gated only by Grafana's own login — even though the outpost spec listed it
+     as gated.
+  2. **2026-10-19 to 2026-11-05: gated by the outpost.** Forward-auth decided whether the host could be
+     reached at all and never told the upstream who you are, which is why Grafana asked for a second
+     login on top of it.
+  3. **Since 2026-11-05: no proxy-side gate, deliberately.** The middleware was removed because the
+     outpost cookie refreshes only on a top-level navigation, so once it aged out Traefik 302'd every
+     XHR panel poll and the boards went "No data" on a timer. This is the same Grafana with the same
+     defect as `grafana.titan.arrieta.eu`; the evidence is `docs/grafana-runbook.md` §10 and the
+     reasoning is in the Ingress header of `apply/60-tesla/grafana.yaml`. What admits anyone now is
+     Grafana's own OIDC plus the two bindings on the `tesla-boards` application — see the next bullet.
+
+     So the verify command reads the opposite way from how it used to:
+     `kubectl -n apps get ingress tesla-grafana -o jsonpath='{.metadata.annotations}'` should show
+     `router.entrypoints: websecure` and **no** `router.middlewares`. A `router.middlewares` value
+     there is a regression, not a fix — it re-breaks the boards. An annotation set with neither is the
+     pre-2026-10-19 state and means the host is serving in the clear.
+
+     There is **no iframe anywhere in TeslaMate 4.3** — its Dashboards menu links out with
+     `target="_blank"` — so authentik's `X-Frame-Options: DENY` and any SameSite question do not apply
+     to this host, in any of the three states. An earlier version of this bullet claimed the opposite,
+     inherited from a stale comment in the outpost blueprint rather than checked against the app.
 - **The Grafana URL TeslaMate links to is a database row, not a manifest.** It is `grafana_url` in
   `GlobalSettings` (`teslamate/lib/teslamate/settings/global_settings.ex:13`, column added by the 2019
   migration `20191117143038_add_grafana_url.exs`), edited in the UI under **Settings → Dashboards**. A
@@ -652,8 +666,10 @@ Four things that were true at the time of the rename and are worth knowing befor
     Read them from `/.well-known/openid-configuration` rather than from prose — including this prose.
 
   `GF_AUTH_BASIC_ENABLED` stays `true` on purpose: it is the only way in when the OIDC config is the
-  thing that is broken. Rollback is one line — `GF_AUTH_GENERIC_OAUTH_ENABLED: "false"` — and it lands
-  on the local admin login, not on a public host, because forward-auth is still in front.
+  thing that is broken. Rollback is one line — `GF_AUTH_GENERIC_OAUTH_ENABLED: "false"` — and since
+  2026-11-05 it lands on the local admin login on a **public host with nothing in front of it**, because
+  the forward-auth middleware is gone. That is a real exposure now rather than a fallback behind a gate,
+  so treat it as an emergency measure with a revert time written down, not as a safe default.
 - **Stale absolute links live in stored state, not in git.** `grafana.v.arrieta.eu` appears nowhere in
   this repository and nowhere in TeslaMate 4.3.0's source, and TeslaMate has no `GRAFANA_URL` in the
   Deployment or in `teslamate-secrets`. Any link still pointing at an old hostname is in Grafana's
@@ -673,6 +689,7 @@ this file depends on and the command that retires it.
 | Tesla honours a scoped-down refresh, so a `vehicle_device_data` grant survives `refresh.ex`'s hardcoded `openid email offline_access` | sign in via §5a, then wait past the first token refresh (≤1 h) and confirm `GET /api/1/vehicles` is not 401 — this is the single most likely silent failure in the whole pipeline |
 | the polling budget holds | a week of driving, then the developer dashboard's usage page, filled into §3 |
 | `nginx-unprivileged`'s UID 101 can read the mounted key | `kubectl -n apps logs deploy/tesla-wellknown` and the curl in §8 step 4 |
+| `tesla-boards` is still reachable only by its two groups now that nothing stands in front of it | `curl -sSI https://tesla-boards.titan.arrieta.eu/` → 302 whose `Location` carries a `redirect_uri` naming `/login/generic_oauth` (Grafana issuing it) and **not** `/outpost.goauthentik.io/callback` (an outpost still in front); then `curl -sS -o /dev/null -w '%{http_code}\n' http://tesla-boards.titan.arrieta.eu/` → 404, i.e. the cleartext router really is gone. Committed bindings are not applied bindings — `make grafana-oidc-check` proves the tree, not authentik's database (§9). |
 
 Retired by the migration of 2026-10-17: **the migrated database is intact**. §7 records the counts
 that proved it, and `private.tokens` holding exactly one row is part of that proof — TeslaMate will

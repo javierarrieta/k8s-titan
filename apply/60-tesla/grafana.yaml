@@ -155,10 +155,13 @@ spec:
           value: contains(groups[*], 'titan-tesla-grafana-admins') && 'Admin' || 'Viewer'
         - name: GF_AUTH_GENERIC_OAUTH_ALLOW_SIGN_UP
           value: "true"
-        # Skips Grafana's own login page for an unauthenticated browser. Safe specifically because the
-        # edge gate means authentik already holds a session by the time Grafana is reached, so this is
-        # a silent redirect rather than a second prompt. If the forward-auth annotation is ever
-        # removed, revisit this: it would then be the thing deciding who gets in.
+        # KEPT true deliberately when the forwardAuth Middleware was removed 2026-11-05, and for a
+        # different reason than the one written here before. This is now what turns an expired Grafana
+        # session into a working page: a top-level navigation redirects silently through authentik and
+        # comes back authenticated, which is what a browser tab left open for an hour needs. It is not
+        # the thing deciding WHO gets in — the two group bindings on the `tesla-boards` application
+        # are, and they answer before Grafana ever sees a token. With this false, an open tab stops
+        # refreshing quietly and someone has to click a sign-in button to revive it.
         - name: GF_AUTH_GENERIC_OAUTH_AUTO_LOGIN
           value: "true"
         - name: GF_AUTH_GENERIC_OAUTH_USE_REFRESH_TOKEN
@@ -218,35 +221,50 @@ kind: Ingress
 metadata:
   name: tesla-grafana
   namespace: apps
-  # Forward-auth to the embedded authentik outpost — the same middleware the teslamate Ingress uses.
-  # This was missing when the host was grafana.titan.arrieta.eu: the outpost spec lists this host as
-  # gated and the manifest never said so, leaving Grafana reachable by anyone who learned the hostname
-  # with only Grafana's own login in front.
+  # NO PROXY-SIDE GATE HERE, AND THAT IS DELIBERATE — do not "restore" it.
   #
-  # Why this is safe to gate, and what would make it not:
-  #   - The proxy provider is forward_domain over titan.arrieta.eu, so no provider change is needed for
-  #     a new hostname and the existing session cookie already covers it.
-  #   - TeslaMate does NOT embed Grafana. Its Dashboards menu is a dropdown of ordinary links opened
-  #     with target="_blank" (teslamate-4.3.0 elixir/teslamate_web/templates/layout/root.html.heex:99),
-  #     and `grep -i iframe` over lib/ and assets/ returns nothing. An earlier version of this comment
-  #     claimed the dashboards were framed and reasoned about same-site cookies on that basis; that was
-  #     inherited from a stale note in apply/50-apps/auth/tesla-outpost-blueprint.yaml instead of
-  #     checked against the app, and it is deleted here rather than left as folklore. There is no frame,
-  #     so authentik's `X-Frame-Options: DENY` and any SameSite question are irrelevant to this host.
-  #   - The car's telemetry path is a different router entirely (IngressRouteTCP on HostSNI) and
-  #     /.well-known is a separate Ingress with no middleware, so neither can be locked out by this.
+  # This Ingress carried `traefik.ingress.kubernetes.io/router.middlewares:
+  # apps-teslamate-auth@kubernetescrd` until 2026-11-05, when it was removed for the same reason, and
+  # in the same shape, as grafana.titan.arrieta.eu in #242. authentik refreshes its outpost cookie only
+  # on a TOP-LEVEL NAVIGATION. A dashboard does not navigate — it polls /api/ds/query by XHR every 30s,
+  # and an XHR cannot complete a cross-origin redirect to mint a cookie. Once the cookie aged out,
+  # Traefik answered every poll with a 302 to auth.titan.arrieta.eu, the panel got HTML instead of
+  # JSON, and the board read "No data" while the page looked perfectly healthy. This host is the same
+  # Grafana on the same timer; the measured gaps (588s, 364s, 987s) and the two readings that turned
+  # out to be logging artifacts are recorded in docs/grafana-runbook.md §10. Tuning the outpost cookie
+  # lifetime was rejected there and still is: an XHR can never refresh that cookie however long it
+  # lives, so a longer lifetime only moves the timer.
   #
-  # Gating this host and logging into Grafana are still two separate things, and that is deliberate:
-  # forward-auth decides whether the host may be reached at all, and never tells the upstream who you
-  # are. Grafana gets the identity from OIDC (see GF_AUTH_GENERIC_OAUTH_* on the Deployment above),
-  # not from this annotation, so the edge gate survives Grafana config drift instead of replacing it.
-  # If this annotation is ever removed, revisit GF_AUTH_GENERIC_OAUTH_AUTO_LOGIN — that combination is
-  # what decides who may in.
+  # WHAT GATES THE HOST NOW: GF_AUTH_GENERIC_OAUTH_* on the Deployment above, plus the two group
+  # bindings on the `tesla-boards` authentik application (titan-family | titan-tesla-grafana-admins,
+  # policy_engine_mode: any), which refuse anyone outside them at the IdP before a token exists. That
+  # is the posture coder, open-webui, mealie, opencloud and grafana.titan already run. Those bindings
+  # are the whole gate, so `make grafana-oidc-check` fails if they are absent, changed, or not
+  # `any`-mode, and `make ingress-auth` fails both if this omission is silently reverted and if the
+  # allow-list entry is left behind after a revert.
   #
-  # Rollback is one line: delete this annotation and re-apply. Grafana's own login still gates it, so a
-  # revert returns to a working-but-public state rather than to something broken.
+  # WHAT THIS COSTS: nothing in front of this host decides anything any more. It is not a widening. The
+  # outpost has exactly one provider (forward_domain over titan.arrieta.eu) and resolved every host
+  # under the apex to the `tesla` application, whose three bindings are a superset of these two, so
+  # the set admitted HERE is unchanged. What changed is that a mistake in these two bindings now has
+  # nothing upstream of it. They live in authentik/blueprints-grafana.yaml, rendered into the sops
+  # Secret apply/10-secrets/authentik-grafana-blueprint.yaml — not in this manifest.
+  #
+  # The websecure pin became load-bearing when the middleware went. A Traefik middleware attaches to
+  # every router its Ingress produces and an unpinned Ingress produces one per entrypoint, so the old
+  # forwardAuth covered cleartext :80 as a side effect. Traefik here runs no HTTP->HTTPS redirect (the
+  # ports.web.http.redirections.entryPoint note in apply/20-infra/traefik/traefik.yaml) and port 80 is
+  # published, so without this pin the car's dashboards would be served in the clear. Same posture as
+  # grafana.titan, llm and investing-agent.
+  #
+  # apps-teslamate-auth itself is NOT deleted: tesla.titan.arrieta.eu and
+  # investing-agent.titan.arrieta.eu still reference it, and each is a separate decision (issue #243).
+  # The Middleware becomes deletable only when the last reference goes.
+  #
+  # Rollback is one annotation line, but it re-breaks the boards on the cookie timer instead of fixing
+  # anything — read docs/grafana-runbook.md §10 before reaching for it.
   annotations:
-    traefik.ingress.kubernetes.io/router.middlewares: apps-teslamate-auth@kubernetescrd
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
 spec:
   ingressClassName: traefik
   rules:

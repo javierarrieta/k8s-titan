@@ -98,6 +98,15 @@ NOT_PROXY_GATED = {
                                   "navigation, so it 302'd every XHR panel poll and the boards went "
                                   "empty on a timer (apply/50-apps/grafana/grafana.yaml, "
                                   "docs/grafana-runbook.md \u00a710)",
+    ("apps", "tesla-grafana"): "authentik OIDC in-app; GF_AUTH_GENERIC_OAUTH_* with auto_login on the "
+                               "tesla-grafana Deployment, and the `tesla-boards` application is bound "
+                               "to titan-family / titan-tesla-grafana-admins so outsiders are refused "
+                               "at the IdP (asserted by make grafana-oidc-check). The forwardAuth "
+                               "Middleware that used to sit here was REMOVED 2026-11-05, not forgotten: "
+                               "it is the same Grafana with the same defect as observability/grafana "
+                               "above, so the outpost cookie aged out and 302'd every XHR panel poll "
+                               "(apply/60-tesla/grafana.yaml, docs/grafana-runbook.md \u00a710, "
+                               "issue #243)",
     ("files", "opencloud"): "oCIS proxy authenticates against authentik OIDC, PROXY_OIDC_* "
                             "(apply/50-apps/opencloud/opencloud.yaml)",
     ("files", "collabora"): "no user-facing login of its own; its only relationship is the WOPISrc "
