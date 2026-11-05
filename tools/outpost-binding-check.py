@@ -61,7 +61,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from sopsload import load_text, load_tolerating_tags  # noqa: E402
+from sopsload import load_tolerating_tags  # noqa: E402
 
 import yaml  # noqa: E402
 
@@ -103,6 +103,27 @@ def keyof(value):
     return None
 
 
+def read_plaintext(path):
+    """Read the blueprint ConfigMap as plain text, and refuse if it is not plain text.
+
+    Deliberately NOT `sopsload.load_text`: that helper shells out to `sops` before it reads, and this
+    gate runs in `check-ci`, where CI has no `sops` binary at all - the first version of this file died
+    in CI with `FileNotFoundError: 'sops'` for exactly that reason, which is also why AGENTS.md keeps
+    `validate` out of `check-ci`. A keyless gate that needs a binary CI does not ship is not a keyless
+    gate. The blueprint this reads is a plaintext ConfigMap by design - `blueprint-mount-check` reads
+    the same bodies for the same reason - so if it ever becomes sops-encrypted, that is a decision to
+    move this assertion, not to silently decrypt here.
+    """
+    with open(path) as fh:
+        text = fh.read()
+    if "ENC[" in text and "sops:" in text:
+        raise SystemExit(
+            f"FAIL: {path} is sops-encrypted. This gate is in check-ci and must stay keyless, so it "
+            "reads plaintext blueprint bodies only. Either keep this ConfigMap plaintext, like the "
+            "other ConfigMap blueprints, or move the assertion into a gate that runs with the age key.")
+    return text
+
+
 def main():
     root = sys.argv[1] if len(sys.argv) > 1 else "."
     path = os.path.join(root, BLUEPRINT_PATH)
@@ -110,10 +131,7 @@ def main():
         print(f"FAIL: {BLUEPRINT_PATH} is missing - the outpost's admission set has no source of "
               "truth to check, and this gate cannot report clean over an absent blueprint")
         return 1
-    cm_text = load_text(path)
-    if cm_text is None:
-        print(f"FAIL: {BLUEPRINT_PATH} could not be read")
-        return 1
+    cm_text = read_plaintext(path)
     try:
         cm = yaml.safe_load(cm_text)
     except yaml.YAMLError as exc:
