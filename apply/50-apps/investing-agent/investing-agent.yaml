@@ -368,6 +368,52 @@ metadata:
   # not part of this change. And the self-reference is worth naming: if authentik is down this console is
   # unreachable, which is correct — the console is not how anyone fixes authentik.
   #
+  # ISSUE #243 ASKED WHETHER THIS HOST SHOULD FOLLOW #242 AND DROP THE OUTPOST. Not yet, and not by the
+  # route the issue proposed. Decided 2026-11-05; re-decide the day the web console gets used.
+  #
+  #   - **It is idle today, so there is nothing observed to fix.** The operator drives the agent over
+  #     Discord, which is an outbound Gateway WebSocket from the pod and never traverses Traefik. The
+  #     access log agrees: 2 requests in 30 days on this router, both `GET /` → 302.
+  #   - **But the bug is waiting, and this is the worst of the three hosts when it fires.** The dashboard
+  #     Status page polls `/api/status` every 5 seconds — the same poisoned-poll shape #242 fixed on
+  #     grafana.titan — and the Chat tab is not XHR at all: `/api/pty` is a long-lived WebSocket running
+  #     `hermes --tui` behind a PTY, with a 20 s keepalive and automatic reconnect. A WebSocket cannot
+  #     follow a cross-origin redirect, so once the outpost cookie ages, the reconnect lands on a 302 and
+  #     the terminal dies mid-conversation. Worse than a stale Grafana panel: you lose a live session.
+  #   - **Dropping the gate onto the password is the one option upstream disclaims.** The bundled
+  #     `basic` provider's own docs: "not suitable for exposing a dashboard directly to the public
+  #     internet" — one shared credential, no MFA, no per-user accounts. `/auth/password-login` is
+  #     rate-limited (10/min → 429), but it keys on the client IP and `dashboard.trusted_proxies` is not
+  #     set here, so every visitor shares Traefik's bucket: enough guessing locks the real operator out
+  #     of their own console, and the audit log records the proxy rather than the caller.
+  #
+  # THE RIGHT FIX IS HERMES' OWN OIDC, THEN DROP THE GATE — the Grafana shape, and upstream names
+  # Authentik first in its supported list. Tracked in #245, which carries the acceptance tests; the
+  # config is repeated here so the recipe survives the issue. The bundled `self_hosted` provider takes a
+  # public PKCE client (no secret) and discovers endpoints from `{issuer}/.well-known/openid-configuration`:
+  #
+  #     dashboard:
+  #       oauth:
+  #         provider: self-hosted
+  #         self_hosted:
+  #           issuer: https://auth.titan.arrieta.eu/application/o/hermes/
+  #           client_id: <public PKCE client id>
+  #       public_url: https://investing-agent.titan.arrieta.eu   # callback is <public_url>/auth/callback
+  #
+  # Two things to get right, both easy to get wrong. Hermes maps `groups` onto a session `org_id` but
+  # enforces nothing — its own docs say "every account that can sign in acts as you, the machine owner"
+  # and tell you to restrict the app in the provider — so the group gate has to live in authentik as an
+  # `access_group` on the provider, exactly as `grafana-oidc-check` proves for Grafana. Without that row
+  # the app is open to every authenticated account with the outpost gone and nothing complaining. And
+  # `public_url` is load-bearing behind a proxy: it fixes the callback and the Host/Origin rebinding guard.
+  #
+  # Until then the outpost stays, the web console stays awkward, and Discord keeps working because it never
+  # touches this host. See docs/teslamate-runbook.md §9 for the same WebSocket mechanism and its remedy.
+  #
+  # THE ONE THING THAT WOULD CHANGE THIS: if the web console becomes the primary way of driving the agent,
+  # do the OIDC work above rather than dropping the gate. A console that dies every ~hour of use is not a
+  # reason to remove the only group gate; it is a reason to give the app a gate of its own.
+  #
   # HOW TO TELL IT IS STILL WORKING, measured on the live cluster 2026-10-28 after this landed.
   # Before the line, `GET https://investing-agent.titan.arrieta.eu/` answered 302 to
   # `/login?next=%2F` — hermes' own form. After it, the 302 goes to

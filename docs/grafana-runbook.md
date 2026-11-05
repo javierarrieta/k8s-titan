@@ -562,10 +562,17 @@ second is whether the same 302-on-XHR shape is now hitting another gated host. T
   answered 302 over 7 days, in three Phoenix-backoff bursts — and it is accepted as the price of keeping
   group admission on a host with no IdP integration of its own. Remedy is a reload. Full evidence and the
   two rejected alternatives: `docs/teslamate-runbook.md` §9.
-- `apply/50-apps/investing-agent/investing-agent.yaml` — the console. It carries its own form login at
-  `/login` with a signed session cookie, and its manifest documents "TWO LOGINS, DELIBERATELY". Dropping
-  authentik leaves the password login as the only gate — the same call already made for Home Assistant in
-  issue #112, and again the operator's call.
+- `apply/50-apps/investing-agent/investing-agent.yaml` — hermes' dashboard. It carries its own form login
+  at `/login` with a signed session cookie, and its manifest documents "TWO LOGINS, DELIBERATELY".
+  **Decided 2026-11-05: the gate stays, for now.** The operator drives the agent over Discord — an
+  outbound WebSocket that never touches Traefik — so the console is idle (2 requests in 30 days) and
+  nothing is observed breaking. That is a timing decision, not a verdict: the dashboard polls
+  `/api/status` every 5 s and its Chat tab is a long-lived `/api/pty` WebSocket, so it is the *worst* of
+  these hosts the moment it gets used. Dropping authentik onto the bundled password is the one option
+  upstream itself disclaims for public-internet exposure. The fix, when it matters, is hermes' own
+  self-hosted OIDC provider pointed at authentik — then this becomes the Grafana shape, and it is
+  **tracked in #245**. Config and the two traps (`access_group` must be set in authentik; `public_url` is
+  load-bearing) are in the manifest.
 
 `apply/60-tesla/grafana.yaml` — **tesla-boards, also a Grafana, had this exact failure on the same timer
 and got the same fix on 2026-11-05.** It is no longer behind the outpost: its own authentik OIDC and the
@@ -573,8 +580,8 @@ two bindings on the `tesla-boards` application decide who gets in, and `make gra
 those bindings. So if the 302-on-XHR shape comes back for a *Grafana*, there are now no gated Grafanas
 left to look at — check for a re-added annotation on one of the two hosts above instead.
 
-Of the two hosts still behind the outpost, one has now been decided and one has not: teslamate keeps the
-gate on purpose (above), and `investing-agent` remains an open operator decision — its own form login at
-`/login` would become the only gate, which is the same call already made for Home Assistant in issue #112
-and, like that one, not an agent's call to make. Issue #243 records why neither is the same mechanical edit
-as this one.
+Both hosts still behind the outpost have now been looked at and both keep it on purpose — teslamate
+because its only login is Tesla's OAuth, investing-agent because its only alternative is a password
+upstream says not to expose. Neither is the same mechanical edit as this one, and issue #243 records why.
+If either ever gets a real IdP integration, it becomes this edit; until then the outpost is the only thing
+standing between those two hosts and the internet.
