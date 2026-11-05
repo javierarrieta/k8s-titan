@@ -237,6 +237,19 @@ metadata:
   # Tuning the outpost cookie lifetime is NOT a fix and was rejected in #242 for a reason that holds even
   # harder here: an XHR or a websocket can never refresh that cookie however long it lives, so a longer
   # lifetime only moves the timer while leaving the gate's admission set untouched.
+  #
+  # ONE THING #246 MADE VISIBLE, AND IT IS NOT FIXED HERE. This Ingress pins no entrypoint, so Traefik
+  # builds a router per entrypoint and the forwardAuth above attaches to BOTH — which means the gate is
+  # in front of cleartext :80 rather than keeping cleartext away. Measured: `http://tesla.titan.arrieta.eu/`
+  # answers 302 to auth.titan.arrieta.eu over an unencrypted connection, so the outpost cookie and the
+  # TeslaMate session both travel in the clear on that router. The fix is one line —
+  # `router.entrypoints: websecure`, the pin grafana.titan, tesla-boards, llm, investing-agent and both
+  # Home Assistant hosts already carry — and it is deliberately not in this PR: it is a second live
+  # behaviour change on the car's intake host, and #246's whole argument for three commits in one PR was
+  # that only one of them changed anything. `make ingress-auth` does not demand it here either;
+  # PIN_REQUIRED covers the hosts whose *allow-list* justification depends on the pin, and this host has
+  # a gate rather than an allow-list. Adding it to that set is the same one-line decision, made on
+  # purpose with the operator's go-ahead rather than inherited from a review comment.
   annotations:
     traefik.ingress.kubernetes.io/router.middlewares: apps-teslamate-auth@kubernetescrd
 spec:

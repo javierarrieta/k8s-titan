@@ -716,6 +716,23 @@ thing enforcing group membership here, and dropping it would swap "a member of t
 `titan-grafana-admins` / `titan-tesla-grafana-admins`" for "anyone who can produce a Tesla account". This
 host is car location history. Operator decision, 2026-11-05.
 
+**What the kept gate is now asserted by.** Once both Grafanas stopped passing through here, this became
+the only group gate in the tree that nothing proved: `make grafana-oidc-check` asserts the two Grafana
+applications' bindings, and nothing at all asserted the `tesla` application's — `blueprint-mount-check`
+only asks whether each binding names a group this tree declares. Drop one of these three bindings and
+the host admits a wider crowd behind a healthy-looking login page. `make outpost-binding-check` now
+fails if that set changes, if `policy_engine_mode` stops being `any`, if a second proxy provider
+appears, if `cookie_domain` moves off the apex, or if `skip_path_regex` grows — the last of which is
+the very field the rejected alternative below turns on.
+
+**And one thing the kept gate does not do: keep cleartext away.** This Ingress pins no entrypoint, so
+the `forwardAuth` attaches to the `:80` router as well, and
+`http://tesla.titan.arrieta.eu/` answers `302` to authentik over an unencrypted connection — measured.
+The outpost cookie and the TeslaMate session both travel in the clear on that router. The fix is the
+one-line `router.entrypoints: websecure` pin the other public hosts carry; it is deliberately not in
+#246, which carried exactly one behaviour change and this would have been a second one on the car's
+intake host. Recorded in the Ingress header of `apply/60-tesla/teslamate.yaml`.
+
 **So the remedy is the reload.** Click it, or press the browser's reload. It is a top-level navigation, so
 it refreshes the outpost cookie and the socket reconnects. If it comes back the moment you open a tab, that
 is a different fault — check the outpost is alive (§9, the 404 that is not Traefik) rather than assuming
@@ -752,7 +769,9 @@ this file depends on and the command that retires it.
 | Tesla honours a scoped-down refresh, so a `vehicle_device_data` grant survives `refresh.ex`'s hardcoded `openid email offline_access` | sign in via §5a, then wait past the first token refresh (≤1 h) and confirm `GET /api/1/vehicles` is not 401 — this is the single most likely silent failure in the whole pipeline |
 | the polling budget holds | a week of driving, then the developer dashboard's usage page, filled into §3 |
 | `nginx-unprivileged`'s UID 101 can read the mounted key | `kubectl -n apps logs deploy/tesla-wellknown` and the curl in §8 step 4 |
-| `tesla-boards` is still reachable only by its two groups now that nothing stands in front of it | `curl -sSI https://tesla-boards.titan.arrieta.eu/` → 302 whose `Location` carries a `redirect_uri` naming `/login/generic_oauth` (Grafana issuing it) and **not** `/outpost.goauthentik.io/callback` (an outpost still in front); then `curl -sS -o /dev/null -w '%{http_code}\n' http://tesla-boards.titan.arrieta.eu/` → 404, i.e. the cleartext router really is gone. Committed bindings are not applied bindings — `make grafana-oidc-check` proves the tree, not authentik's database (§9). |
+| `tesla-boards` is reachable only through its own OIDC now that nothing stands in front of it | `curl -sSIL https://tesla-boards.titan.arrieta.eu/` and read the **last** hop before authentik: it must be `auth.titan.arrieta.eu/application/o/authorize/` with `redirect_uri=…%2Flogin%2Fgeneric_oauth` (Grafana issuing it) and **not** `…%2Foutpost.goauthentik.io%2Fcallback` (an outpost still in front). Measured on the already-ungated `grafana.titan`, the chain is `/` → `302 /login` → `307 /login/generic_oauth?redirectTo=` → `302` to that authorize URL, so a single `curl -sSI` on `/` shows only `Location: /login` and proves nothing either way — follow the redirects or the check reads as a failure on a correct deploy. Then `curl -sS -o /dev/null -w '%{http_code}\n' http://tesla-boards.titan.arrieta.eu/` → 404, i.e. the cleartext router really is gone. Committed bindings are not applied bindings — `make grafana-oidc-check` proves the tree, not authentik's database (§9). |
+| the boards keep polling past the outpost cookie's lifetime — the entire reason the gate came off | leave one dashboard open past ~10 min and confirm `/api/ds/query` keeps answering `200` with no 302 burst on that router. This is the §9 mechanism arriving through Grafana's XHR path; `docs/grafana-runbook.md` §10 carries the same open test for `grafana.titan`, and neither host has been watched end to end. |
+| the local Grafana admin is not now an internet-facing password guess | `curl -sS -o /dev/null -w '%{http_code}\n' 'https://tesla-boards.titan.arrieta.eu/login?disableAutoLogin=true'` — `200` means the form is reachable with `GF_AUTH_BASIC_ENABLED=true`, which is what it will be; the open question is whether that is acceptable, and the lever is `GF_AUTH_DISABLE_LOGIN_FORM=true` on both Grafanas (§9). |
 
 Retired by the migration of 2026-10-17: **the migrated database is intact**. §7 records the counts
 that proved it, and `private.tokens` holding exactly one row is part of that proof — TeslaMate will

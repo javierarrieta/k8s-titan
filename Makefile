@@ -13,12 +13,12 @@ KUSTOMIZE_DIRS := $(shell find apply -name kustomization.yaml 2>/dev/null | sed 
 # not be able to slip between the encryption rule and the validation glob.
 SECRET_FIND := find apply/10-secrets \( -name '*.yaml' -o -name '*.yml' \) ! -name kustomization.yaml
 
-.PHONY: check check-ci kustomize-check kustomize-listing dry-run py-deps validate update-keys scan leak-check secrets-placement secrets-list secrets-present release-secrets secret-refs ingress-auth backup-coverage db-url-check oidc-check grafana-oidc-check observability-oidc-check open-webui-oidc-check mealie-check sure-check crd-check namespace-check tesla-forwarder-test chart-values-check traefik-exposure-check update-cnpg-crds update-crds blueprint-mount-check
+.PHONY: check check-ci kustomize-check kustomize-listing dry-run py-deps validate update-keys scan leak-check secrets-placement secrets-list secrets-present release-secrets secret-refs ingress-auth outpost-binding-check backup-coverage db-url-check oidc-check grafana-oidc-check observability-oidc-check open-webui-oidc-check mealie-check sure-check crd-check namespace-check tesla-forwarder-test chart-values-check traefik-exposure-check update-cnpg-crds update-crds blueprint-mount-check
 
 # leak-check runs FIRST: make has no -k, so it stops at the first failing prerequisite.
 # validate needs the age key, so an operator who forgot SOPS_AGE_KEY_FILE would never
 # reach a leak gate placed behind it.
-check: py-deps leak-check kustomize-check kustomize-listing validate secrets-placement release-secrets secret-refs ingress-auth blueprint-mount-check backup-coverage db-url-check oidc-check grafana-oidc-check observability-oidc-check open-webui-oidc-check mealie-check sure-check crd-check namespace-check chart-values-check traefik-exposure-check tesla-forwarder-test
+check: py-deps leak-check kustomize-check kustomize-listing validate secrets-placement release-secrets secret-refs ingress-auth blueprint-mount-check outpost-binding-check backup-coverage db-url-check oidc-check grafana-oidc-check observability-oidc-check open-webui-oidc-check mealie-check sure-check crd-check namespace-check chart-values-check traefik-exposure-check tesla-forwarder-test
 	@echo "check: all offline gates passed"
 
 # The subset provable from the tree alone - no age key, no cluster, no network.
@@ -42,7 +42,7 @@ check: py-deps leak-check kustomize-check kustomize-listing validate secrets-pla
 # network is unhappy is worse than one that is not here at all.
 check-ci:
 	@rc=0; \
-	for t in py-deps leak-check kustomize-check kustomize-listing secrets-placement release-secrets secret-refs ingress-auth blueprint-mount-check backup-coverage crd-check namespace-check tesla-forwarder-test; do \
+	for t in py-deps leak-check kustomize-check kustomize-listing secrets-placement release-secrets secret-refs ingress-auth blueprint-mount-check outpost-binding-check backup-coverage crd-check namespace-check tesla-forwarder-test; do \
 	  echo "--- $$t ---"; \
 	  $(MAKE) --no-print-directory $$t || rc=1; \
 	done; \
@@ -526,14 +526,17 @@ secret-refs:
 # further on.
 #
 # It fails when an apex Ingress carries no router.middlewares and is not allow-listed, when a
-# reference names no Middleware this tree builds or a namespace other than its Ingress's own, and
-# when the resolved Middleware is not a forwardAuth - an annotation naming a stripPrefix satisfies
-# "has a middleware" while gating nothing. It refuses to pass vacuously, and a stale allow-list
+# reference names no Middleware this tree builds or a namespace other than its Ingress's own, when
+# the resolved Middleware is not a forwardAuth - an annotation naming a stripPrefix satisfies
+# "has a middleware" while gating nothing, and when a host named in PIN_REQUIRED loses its
+# router.entrypoints: websecure pin - for those hosts the pin is the second half of why they are
+# allowed to have no proxy-side gate. It refuses to pass vacuously, and a stale allow-list or pin
 # entry fails rather than rotting.
 #
 # Keyless, so it runs in check-ci: it reads annotation strings off the built tree. Its honest
 # limits are in the tool's docstring - above all, it proves a gate resolves, never that the policy
-# behind it is the policy you meant, and it does not read router.entrypoints at all.
+# behind it is the policy you meant, and it reads router.entrypoints only for the hosts named in
+# PIN_REQUIRED, so the other apex hosts are still free to serve cleartext.
 ingress-auth:
 	@command -v python3 >/dev/null 2>&1 \
 	  || { echo "ingress-auth: python3 is missing - refusing to report clean"; exit 1; }; \
@@ -574,6 +577,31 @@ blueprint-mount-check:
 	  || { echo "blueprint-mount-check: PyYAML is missing (pip install pyyaml) - refusing to report clean"; exit 1; }; \
 	{ for d in $(KUSTOMIZE_DIRS); do kubectl kustomize "$$d" || exit 1; printf -- '---\n'; done; } \
 	  | python3 tools/blueprint-mount-check.py
+
+# outpost-binding-check: the outpost's own admission set, asserted rather than described.
+#
+# Since #242 and #246 took the forwardAuth Middleware off both Grafanas, one host is left gated by this
+# outpost for group membership: tesla.titan.arrieta.eu. Its own login is Tesla's OAuth, which proves a
+# person and not a household, so the `tesla` application's three bindings are the only group gate that
+# host has - and grafana-oidc-check asserts the binding set for the two Grafana applications while
+# nothing at all asserted this one. blueprint-mount-check proves each binding names a group this tree
+# declares (a typo denies); it never asks whether the set is the reviewed one. Drop a binding and the
+# car's location history admits a wider crowd behind a healthy-looking login page.
+#
+# It also pins the three provider values the surrounding prose leans on - one proxy provider,
+# forward_domain, cookie_domain over the apex, and skip_path_regex unchanged - because "the outpost is
+# in front of this host" and "exempting a path exempts it on every host" are both claims about those
+# values, and the last of them is the reason docs/teslamate-runbook.md §9 declined to exempt
+# /live/websocket.
+#
+# Keyless: it reads one plaintext blueprint ConfigMap in the tree, so it runs in check-ci too. Its
+# honest limits are in the tool's docstring - above all, committed bindings are not applied bindings.
+outpost-binding-check:
+	@command -v python3 >/dev/null 2>&1 \
+	  || { echo "outpost-binding-check: python3 is missing - refusing to report clean"; exit 1; }; \
+	python3 -c 'import yaml' >/dev/null 2>&1 \
+	  || { echo "outpost-binding-check: PyYAML is missing (pip install pyyaml) - refusing to report clean"; exit 1; }; \
+	python3 tools/outpost-binding-check.py .
 
 # backup-coverage: every PVC that opted in to backup is reachable by a runner, and the four
 # separate files that have to agree about it do agree.

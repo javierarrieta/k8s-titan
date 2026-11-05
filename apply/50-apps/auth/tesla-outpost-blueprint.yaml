@@ -243,8 +243,12 @@ data:
       # bottom of issue #243, and the one-liner below is the proof it needs.
       #
       # THE FAILURE MODE IS A LOCKOUT THAT INCLUDES YOU. A binding naming a group that does not exist
-      # denies, and once ANY binding exists the no-bindings allow-all stops applying. Membership was
-      # checked before this landed. Re-check it if this list ever changes — and keep it on ONE line,
+      # denies, and once ANY binding exists the no-bindings allow-all stops applying. The reviewed set is
+      # also asserted by `make outpost-binding-check`, which fails if these three bindings drift, if
+      # `policy_engine_mode` stops being `any`, if a second proxy provider appears, if `cookie_domain`
+      # moves off the apex, or if `skip_path_regex` grows — and which proves the tree, never authentik's
+      # database. Membership was checked before this landed. Re-check it if this list ever changes — and
+      # keep it on ONE line,
       # because `ak shell -c` exec()s its argument, so a wrapped command is an IndentationError:
       # kubectl --context <admin> -n auth exec deploy/authentik-worker -- ak shell -c 'from authentik.core.models import Group; [print(n, "MISSING" if not Group.objects.filter(name=n).exists() else sorted(Group.objects.get(name=n).users.values_list("username", flat=True))) for n in ["titan-family","titan-grafana-admins","titan-tesla-grafana-admins","authentik Admins"]]
       # Measured 2026-11-04 on 2026.8.5: titan-family = cathy_torrecilla, chuset, javier; both admin
