@@ -219,6 +219,17 @@ data:
       # none of the three — which is what a new family account like an opencloudUser-only user is —
       # loses TeslaMate, which is the point.
       #
+      # ONE OF THE THREE REASONS LEFT THE OUTPOST ON 2026-11-05. grafana.titan no longer passes through
+      # here — its forwardAuth Middleware was removed because the outpost cookie only refreshes on a
+      # top-level navigation and it 302'd every XHR panel poll (docs/grafana-runbook.md §10). So the
+      # union is now justified by two hosts, not three: titan-family and titan-tesla-grafana-admins by
+      # tesla and tesla-boards, and NOTHING behind this outpost needs titan-grafana-admins any more —
+      # that group gates grafana.titan, which is decided by the `observability` application's own
+      # bindings now. It is left in place rather than dropped: this binding is an allow-list, so
+      # removing a group here only ever refuses people, the membership check below has to be re-run
+      # before any edit here, and a PR that both moves a gate and narrows another one is two changes
+      # pretending to be one. Narrowing it is a separate decision with its own membership proof.
+      #
       # THE FAILURE MODE IS A LOCKOUT THAT INCLUDES YOU. A binding naming a group that does not exist
       # denies, and once ANY binding exists the no-bindings allow-all stops applying. Membership was
       # checked before this landed. Re-check it if this list ever changes — and keep it on ONE line,

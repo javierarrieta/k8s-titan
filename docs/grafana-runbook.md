@@ -78,13 +78,30 @@ What gates the host now:
    the application is bound to `titan-family` (order 0) or `titan-grafana-admins` (order 1), so
    anyone in neither is refused at the IdP and never reaches Grafana to be made a Viewer. That
    binding is what switched this app off "any authentik user may log in".
+3. **TLS only.** The Ingress pins `router.entrypoints: websecure`. Traefik here runs no HTTP→HTTPS
+   redirect (`apply/20-infra/traefik/traefik.yaml`, the `ports.web.http.redirections.entryPoint`
+   note), so an unpinned Ingress answers on cleartext `:80` — measured before this change, where
+   `http://grafana.titan.arrieta.eu/api/health` reached the outpost on port 80. The forwardAuth
+   Middleware covered that router as a side effect; the pin is what covers it now, for the same
+   reason `llm` and `investing-agent` pin.
 
-**Those bindings are now load-bearing in a way they were not.** While the outpost was in front, an
-outsider was turned away before authentik's application policy was even consulted, so a missing
-binding was a second-order mistake. Now it is the only thing standing between the internet and every
-cluster this Prometheus holds. They live in the sops Secret
-`apply/10-secrets/authentik-observability-blueprint.yaml`, not in the Grafana manifest, so nothing in
-this repo's tree proves them — check with:
+**The bindings are the only admission decision — but they were already the deciding layer.** The old
+edge gate never consulted *this* application. The outpost has exactly one provider, `forward_domain`
+over `titan.arrieta.eu`, and it resolves every host under the domain to the `tesla` application
+(`apply/50-apps/auth/tesla-outpost-blueprint.yaml`, "WHY THE UNION OF THREE GROUPS"). So what the
+Middleware enforced was tesla's three bindings — `titan-family`, `titan-grafana-admins`,
+`titan-tesla-grafana-admins` — which are a superset of this application's two. Removing the edge gate
+therefore changed nobody's access: anyone who now reaches Grafana's OIDC was already allowed past the
+edge, and anyone in neither of these two groups is refused at the IdP exactly as before. What changed
+is that nothing upstream of here catches a mistake any more.
+
+They live in `authentik/blueprints-observability.yaml`, rendered into the sops Secret
+`apply/10-secrets/authentik-observability-blueprint.yaml`, not in the Grafana manifest.
+`make observability-oidc-check` fails when the reviewed blueprint carries no `policybinding` for this
+application, when its group set is not exactly `titan-family` + `titan-grafana-admins`, or when
+`policy_engine_mode` is anything other than `any` — and that same gate already fails when the rendered
+artifact drifts from the template, which is what carries the proof to the applied copy. To read the
+applied rows directly rather than trust the gate:
 
 ```sh
 sops -d apply/10-secrets/authentik-observability-blueprint.yaml \
@@ -193,13 +210,21 @@ Run in order; each step distinguishes "not deployed" from "deployed and wrong".
 # 1. workload up, volume bound
 kubectl -n observability get pvc,deploy,pods -l app=grafana
 
-# 2. Grafana itself is healthy — inside the cluster, so this does not cross the edge gate
+# 2. Grafana itself is healthy — inside the cluster, so this bypasses the public edge entirely
 kubectl -n observability exec deploy/grafana -- wget -qO- localhost:3000/api/health
 
-# 3. Expect 302 to auth.titan.arrieta.eu. A 200 here means Grafana's OIDC is not engaging and the
-#    homelab's metrics are public. Since 2026-11-05 this 302 comes from GRAFANA, not from a Traefik
-#    forwardAuth Middleware (§4, §10) — it proves SSO is wired, it no longer proves a proxy gate.
+# 3. Expect 302 to auth.titan.arrieta.eu. A 200 here means Grafana's OIDC is not engaging: the page
+#    is still behind Grafana's own login (anonymous org and signup are both off), but SSO is not
+#    wired. Since 2026-11-05 this 302 comes from GRAFANA, not from a Traefik forwardAuth Middleware
+#    (§4, §10) — it proves SSO is wired, it no longer proves a proxy gate.
+#    WHO ISSUED THE 302 is readable off the Location: `redirect_uri=...%2Flogin%2Fgeneric_oauth` is
+#    Grafana (correct now); `redirect_uri=...%2Foutpost.goauthentik.io%2Fcallback` means an outpost
+#    is in front of this host again.
 curl -sSI https://grafana.titan.arrieta.eu/ | head -5
+
+# 3b. cleartext must NOT answer. The Ingress pins router.entrypoints: websecure, so port 80 has no
+#     router for this host: expect a 404 from Traefik, not a 302 and not a Grafana page.
+curl -sS -o /dev/null -w '%{http_code}\n' http://grafana.titan.arrieta.eu/
 
 # 4. TLS is the wildcard, not Traefik's default cert (default cert = Reflector has not delivered)
 echo | openssl s_client -connect grafana.titan.arrieta.eu:443 -servername grafana.titan.arrieta.eu \
@@ -280,10 +305,16 @@ was a second worker restart: `kubectl -n auth rollout restart deploy/authentik-w
   itself and costs only what someone built by hand in the UI. That is the argument for the
   exclusion, and it is still only an argument — nobody has wiped the volume to find out what else
   was in the sqlite file.
-- **Grafana's gating is coupled to a Tesla-owned blueprint.** The proxy provider that gates this host
-  is `forward_domain` over `titan.arrieta.eu` and lives in
-  `apply/50-apps/auth/tesla-outpost-blueprint.yaml`. Narrowing it later silently locks the homelab's
-  dashboards.
+- **The §10 fix has never been observed working.** The middleware removal is a commit and a green gate
+  run, not a measured hour of open dashboards. Until someone leaves a board open past ~10 minutes and
+  sees `/api/ds/query` answer 200 the whole time, the fix is a well-evidenced diagnosis and a
+  plausible repair, not a verified one (§10).
+- **Nothing proves the two group bindings on the live authentik.** `make observability-oidc-check`
+  proves the reviewed blueprint carries them and that the rendered artifact equals it, and
+  `blueprint-mount-check` proves the blueprint is mounted — but mounting is not applying, and
+  §9 is the dated record of a mounted blueprint that silently never applied. The bindings are now the
+  only thing admitting anyone (§4), so the applied state is worth checking with §7 step 4b, not just
+  the committed one.
 - **`make release-secrets` does not scan this Deployment.** It reads `HelmRelease` values only, so a
   typo'd `secretRef` here surfaces as a `Pending` pod, not a red gate. open-webui has the same hole.
 - **Blueprint ingestion works, but only after a second restart.** Proven on first deploy (§9): the
@@ -301,6 +332,11 @@ was a second worker restart: `kubectl -n auth rollout restart deploy/authentik-w
 
 Merged as `9e48f0c` at 14:59:06Z. Everything below was run from a workspace with the read-only
 `k8s-reader` identity; nothing here is a claim about a command that was not run.
+
+> **Read this through §10.** Several observations below are artifacts of the forwardAuth Middleware
+> that was removed on 2026-11-05 — the `set-cookie: authentik_proxy_…` header and the sentence "the
+> forward-auth annotation landed" describe a state that no longer exists on this host. They are kept
+> as the record of what was measured, not as a checklist.
 
 **Converged.** All seven `Kustomization`s `Ready=True` at `main@sha1:9e48f0c` by 15:03. The first
 reading of the chain was all-red — `secrets: dependency 'flux-system/flux-system' is not ready` — and
@@ -490,9 +526,14 @@ only moves the timer. This is the shape coder, open-webui, mealie and opencloud 
 `NOT_PROXY_GATED` in `tools/ingress-auth-check.py` now carries the reason so the omission cannot be
 silently reverted.
 
-**What it costs.** The outpost no longer sees this host, so authentik's per-provider proxy policy does
-not apply here and the two application group bindings are the only thing admitting anyone (§4). Verify
-them.
+**What it costs — and what it does not.** Nothing upstream of Grafana's own OIDC decides anything here
+any more. That sounds like a widening and it is not one: the outpost resolved this host to the **tesla**
+application, not the `observability` one, because its single `forward_domain` provider matches every
+host under `titan.arrieta.eu` (`apply/50-apps/auth/tesla-outpost-blueprint.yaml` says so in its own
+words). The edge was therefore enforcing tesla's three groups, a superset of the two that gate this
+application, so the set of people who can reach a panel is unchanged. What is genuinely different is
+that a mistake in `authentik/blueprints-observability.yaml` now has nothing in front of it —
+`make observability-oidc-check` is the gate that holds that line (§4).
 
 **Not proven.** The fix is a commit and a gate run, not a measured hour of open dashboards. What would
 close it: leave a dashboard open past ~10 minutes, confirm the panels keep refreshing, and confirm in
@@ -501,6 +542,13 @@ does that, §10 is a well-evidenced diagnosis and a plausible fix, not a verifie
 
 **If it comes back,** the first thing to check is whether something re-added the middleware annotation
 (`kubectl -n observability get ingress grafana -o jsonpath='{.metadata.annotations}'; echo`), and the
-second is whether the same 302-on-XHR shape is now hitting another gated host — the `forward_domain`
-provider covers every `*.titan.arrieta.eu`, so any app behind it that polls by XHR has this same
-failure waiting for it.
+second is whether the same 302-on-XHR shape is now hitting another gated host. Three still sit behind
+`apps-teslamate-auth@kubernetescrd`, and every one of them polls:
+
+- `apply/60-tesla/grafana.yaml` — **tesla-boards is also a Grafana**, so it has this exact failure
+  today, on the same timer, and the same one-line fix.
+- `apply/60-tesla/teslamate.yaml` — the TeslaMate UI.
+- `apply/50-apps/investing-agent/investing-agent.yaml` — the console.
+
+They are untouched here on purpose: one host, one diagnosis, one verified change. Fixing them is the
+same edit (drop the annotation, let the app's own OIDC decide) plus a `NOT_PROXY_GATED` row each.

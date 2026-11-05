@@ -186,7 +186,7 @@ appears with that change and is what stops the annotation from being prose only.
   verified to throttle a signed-in user hammering `/login`. Before the gate the dashboard's login was
   the only gate on a public hostname, so failed logins were unthrottled at the proxy. Traefik 3.7.8
   ships an OSS `rateLimit` middleware and
-  the `Middleware` CRD is already used by `observability-grafana-auth@kubernetescrd`, so it is a
+  the `Middleware` CRD is already used in this namespace by `apps-teslamate-auth@kubernetescrd`, so it is a
   two-line add — deliberately not added. The decision, and the residual it leaves, are in
   *Why no rate limiter — decided, not deferred* below.
 
