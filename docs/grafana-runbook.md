@@ -531,19 +531,30 @@ any more. That sounds like a widening and it is not one: the outpost resolved th
 application, not the `observability` one, because its single `forward_domain` provider matches every
 host under `titan.arrieta.eu` (`apply/50-apps/auth/tesla-outpost-blueprint.yaml` says so in its own
 words). The edge was therefore enforcing tesla's three groups, a superset of the two that gate this
-application, so the set of people who can reach a panel is unchanged. What is genuinely different is
-that a mistake in `authentik/blueprints-observability.yaml` now has nothing in front of it —
-`make observability-oidc-check` is the gate that holds that line (§4).
+application, so the set of people who can reach a panel is unchanged. **What did widen is the
+unauthenticated surface**, because the outpost sat in front of every path and Grafana serves two without
+a session. Measured on this host after the cutover: `/api/health` answers `200` to anyone with
+`{"database":"ok","version":"12.4.14","commit":"500a5450…"}` — the exact build, which is a useful thing
+for a stranger to have — and `/login?disableAutoLogin=true` answers `200` with the local-admin form up,
+since `GF_AUTH_BASIC_ENABLED` is true (see §4 for why it stays true). The lever, if that is not
+acceptable, is `GF_AUTH_DISABLE_LOGIN_FORM=true`: it removes the form and leaves the escape hatch usable
+over the API. It is unset on both Grafanas and it is one decision for both, not two. What is genuinely
+different is that a mistake in `authentik/blueprints-observability.yaml` now has nothing in front of it —
+`make observability-oidc-check` is the gate that holds that line (§4), and `make ingress-auth` now fails
+if the `websecure` pin that keeps all of this out of cleartext is dropped.
 
 **Was not proven; now observed.** Written as unverified, then checked against the live cluster on
 2026-11-05, the day it merged. Traefik's access log for the Grafana router shows `/api/live/ws` answered
 `302` continuously from 12:52:25 to **15:21:31**, and `401` from Grafana itself at **15:39:06** — the
-outpost stopped being in front between those two, and a `401` from Grafana is the shape of "no proxy, no
-session" rather than "proxy refused". After 15:21:31 there is **no 302 at all** on that router for the rest
-of the window, while `/api/user/auth-tokens/rotate` returns `200` on a ~10-minute cadence from 14:07
-through 15:55 — a sustained authenticated session spanning the cutover and half an hour past it. Cleartext
-also closed: `http://grafana.titan.arrieta.eu/api/health` now answers **404**, where the same URL answered
-through the outpost before the change.
+outpost stopped being in front between those two. Keep the reasoning exact: an outpost that refuses
+answers `302` (to the IdP) or `404` (the shape `docs/teslamate-runbook.md` §9 documents), never `401`,
+so a `401` means the request reached Grafana with no proxy in front of it. What it does **not**
+distinguish is whether that session was absent or merely stale, so it is evidence about the cutover and
+no evidence at all about the panel symptom. After 15:21:31 there is **no 302 at all** on that router for
+the rest of the window, while `/api/user/auth-tokens/rotate` returns `200` on a ~10-minute cadence from
+14:07 through 15:55 — a sustained authenticated session spanning the cutover and half an hour past it.
+Cleartext also closed: `http://grafana.titan.arrieta.eu/api/health` now answers **404**, where the same
+URL answered through the outpost before the change.
 
 What that does and does not retire. It retires "the middleware is still in front" and "the websecure pin did
 not take". It does **not** retire the original symptom's own test — nobody has watched a single dashboard

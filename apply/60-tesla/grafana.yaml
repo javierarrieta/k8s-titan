@@ -1,16 +1,18 @@
 # Grafana, the way TeslaMate ships it.
 #
 # The image is teslamate/grafana, not grafana/grafana: it carries the TeslaMate dashboards and
-# provisions them on every boot. Its Dockerfile (read at v4.3.0) is what the env below is written
-# against, and two things in it are load-bearing:
+# provisions them on every boot. Its Dockerfile (re-read at the pinned 4.4.0, whose base image is
+# grafana/grafana:13.2.4) is what the env below is written against, and two things in it are
+# load-bearing:
 #
 #   1. It sets DATABASE_SSL_MODE=disable and DATABASE_PORT=5432, and reads DATABASE_USER / _PASS /
 #      _NAME / _HOST for its datasource — the same four keys TeslaMate already has, so it can share
 #      teslamate-secrets rather than keeping a second copy of the password that would drift.
 #   2. It sets GF_SECURITY_ADMIN_USER=admin and GF_SECURITY_ADMIN_PASSWORD=admin in image ENV, with
-#      GF_AUTH_ANONYMOUS_ENABLED=false and GF_AUTH_BASIC_ENABLED=false. That is fine on localhost
-#      behind TeslaMate and unacceptable on a public hostname: admin/admin would be the only way in.
-#      Both are overridden from tesla-grafana-admin, which is why that Secret exists.
+#      GF_AUTH_ANONYMOUS_ENABLED=false, GF_USERS_ALLOW_SIGN_UP=false and GF_AUTH_BASIC_ENABLED=false.
+#      That is fine on localhost behind TeslaMate and unacceptable on a public hostname: admin/admin
+#      would be the only way in. The admin pair is overridden from tesla-grafana-admin, which is why
+#      that Secret exists, and the three auth flags are re-pinned below rather than inherited.
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -91,13 +93,24 @@ spec:
           value: "false"
         - name: TZ
           value: UTC
+        # Pinned explicitly because nothing stands in front of this host any more. The image already
+        # sets both false (teslamate/grafana 4.4.0, grafana/Dockerfile), and the sibling Grafana pins
+        # them for the same reason (apply/50-apps/grafana/grafana.yaml). Inherited-from-the-image is
+        # the wrong place for either to live on a public host: a base-image bump that flipped one
+        # would open anonymous read of the car's dashboards, or a self-service signup form, with no
+        # proxy in front to notice and no gate in this repo able to see it.
+        - name: GF_AUTH_ANONYMOUS_ENABLED
+          value: "false"
+        - name: GF_USERS_ALLOW_SIGN_UP
+          value: "false"
         # --- single sign-on: Grafana delegates identity to authentik over OIDC ------------------
-        # Why this sits beside the forward-auth annotation on the Ingress below instead of replacing
-        # it: they answer different questions. The proxy provider decides whether the host may be
-        # reached at all and never tells Grafana who you are, so before this change every visit asked
-        # for a second password — a shared admin account out of tesla-grafana-admin. OIDC supplies
-        # the identity and the role; the edge gate stays so a Grafana-side misconfiguration cannot
-        # make the host public again. authentik's half of the client pair is
+        # This is now the ONLY thing deciding who gets in, and it does both jobs at once: it supplies
+        # the identity and the role, and since the forward-auth annotation below was removed 2026-11-05
+        # it also decides admission. Before that the two answered different questions — the proxy
+        # provider decided whether the host could be reached at all and never told Grafana who you were,
+        # which is why every visit used to ask for a second password, a shared admin account out of
+        # tesla-grafana-admin. See the Ingress header for why the edge gate went and what that costs.
+        # authentik's half of the client pair is
         # apply/10-secrets/authentik-grafana-blueprint.yaml, and `make grafana-oidc-check` proves the
         # two copies, the mount, and the redirect host all agree.
         #
@@ -117,8 +130,9 @@ spec:
         - name: GF_AUTH_GENERIC_OAUTH_API_URL
           value: https://auth.titan.arrieta.eu/application/o/userinfo/
         # Signature validation. Without it Grafana trusts an unverified id_token, which is a real
-        # weakening rather than a formality even behind the edge gate. It is not free: with
-        # validate_id_token true and a wrong or missing jwk_set_url, authentication fails outright.
+        # weakening rather than a formality now that nothing stands in front of this host: the token is
+        # the whole proof of who is looking. It is not free — with validate_id_token true and a wrong or
+        # missing jwk_set_url, authentication fails outright.
         - name: GF_AUTH_GENERIC_OAUTH_VALIDATE_ID_TOKEN
           value: "true"
         - name: GF_AUTH_GENERIC_OAUTH_JWK_SET_URL
@@ -243,19 +257,36 @@ metadata:
   # `any`-mode, and `make ingress-auth` fails both if this omission is silently reverted and if the
   # allow-list entry is left behind after a revert.
   #
-  # WHAT THIS COSTS: nothing in front of this host decides anything any more. It is not a widening. The
-  # outpost has exactly one provider (forward_domain over titan.arrieta.eu) and resolved every host
-  # under the apex to the `tesla` application, whose three bindings are a superset of these two, so
-  # the set admitted HERE is unchanged. What changed is that a mistake in these two bindings now has
-  # nothing upstream of it. They live in authentik/blueprints-grafana.yaml, rendered into the sops
-  # Secret apply/10-secrets/authentik-grafana-blueprint.yaml — not in this manifest.
+  # WHAT THIS COSTS. The set admitted to a DASHBOARD is unchanged: the outpost has exactly one provider
+  # (forward_domain over titan.arrieta.eu), it resolved this host to the `tesla` application, and that
+  # application's three bindings are a superset of these two, so the intersection was already these
+  # two. That is NOT the same as "nothing widened". The outpost sat in front of EVERY path, including
+  # the two Grafana serves without a session:
+  #
+  #   - `/login` is now reachable from the internet, and GF_AUTH_BASIC_ENABLED is true above, so the
+  #     local `admin` account out of tesla-grafana-admin is now a password an anonymous stranger can
+  #     try. AUTO_LOGIN hides the form behind a redirect, but `?disableAutoLogin=true` puts it back —
+  #     measured on the already-ungated grafana.titan, where `/login?disableAutoLogin=true` answers
+  #     200. The lever is GF_AUTH_DISABLE_LOGIN_FORM=true, which removes the form and leaves the
+  #     escape hatch usable over the API. Not set here: it changes live behaviour on the only way in
+  #     when authentik is the thing that is broken, and it is the same decision as its twin on
+  #     grafana.titan, which has run with the form up since #242.
+  #   - `/api/health` needs no session in Grafana and now answers publicly with the exact build. On
+  #     grafana.titan it returns {"database":"ok","version":"12.4.14","commit":"500a5450…"} — which
+  #     tells anyone scanning the apex precisely which Grafana to aim at.
+  #
+  # What genuinely changed is that a mistake in these two bindings now has nothing upstream of it. They
+  # live in authentik/blueprints-grafana.yaml, rendered into the sops Secret
+  # apply/10-secrets/authentik-grafana-blueprint.yaml — not in this manifest.
   #
   # The websecure pin became load-bearing when the middleware went. A Traefik middleware attaches to
   # every router its Ingress produces and an unpinned Ingress produces one per entrypoint, so the old
   # forwardAuth covered cleartext :80 as a side effect. Traefik here runs no HTTP->HTTPS redirect (the
   # ports.web.http.redirections.entryPoint note in apply/20-infra/traefik/traefik.yaml) and port 80 is
   # published, so without this pin the car's dashboards would be served in the clear. Same posture as
-  # grafana.titan, llm and investing-agent.
+  # grafana.titan, llm and investing-agent. `make ingress-auth` now fails if this line is dropped —
+  # the allow-list row that lets this host have no proxy-side gate is only a true statement with it,
+  # and a gate whose justification is prose is a gate that gets deleted in a later refactor.
   #
   # apps-teslamate-auth itself is NOT deleted: tesla.titan.arrieta.eu and
   # investing-agent.titan.arrieta.eu still reference it, and each is a separate decision (issue #243).
