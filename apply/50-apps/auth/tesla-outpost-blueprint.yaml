@@ -221,8 +221,17 @@ data:
       #
       # TWO OF THE THREE REASONS LEFT THE OUTPOST ON 2026-11-05. grafana.titan stopped passing through
       # here, and then tesla-boards did, both because the outpost cookie only refreshes on a top-level
-      # navigation and so 302'd every XHR panel poll (docs/grafana-runbook.md §10, issue #243). Only
-      # tesla.titan is left, so the union above is now justified by ONE host, not three:
+      # navigation and so 302'd every XHR panel poll (docs/grafana-runbook.md §10, issue #243). What
+      # stands behind this binding now is tesla.titan plus four hosts that were already resolving here
+      # without ever being named in this file — vert.titan, bentopdf.titan, investing-agent.titan, and
+      # from 2026-11-06 uptime.titan (gatus, #253). "Only tesla.titan is left" was the sentence this
+      # paragraph carried, and it was already false for three of those four: one forward_domain provider
+      # resolves EVERY host under the apex to this Application, so any apex host that points a
+      # forwardAuth at the outpost is gated by these bindings whether or not this file mentions it.
+      # None of the four adds a GROUP to the union below — they add consumers of it. uptime.titan is the
+      # one whose admission is semantically wrong, because a status page should not inherit the car's
+      # group; that is #245's cost, tracked there rather than accepted quietly. So the union is still
+      # justified as a group question by ONE host:
       #
       #   titan-family                  justified — it is what closes the car to a random authenticated
       #                                 account, and teslamate's own login is Tesla's OAuth, so nothing
@@ -253,9 +262,9 @@ data:
       # kubectl --context <admin> -n auth exec deploy/authentik-worker -- ak shell -c 'from authentik.core.models import Group; [print(n, "MISSING" if not Group.objects.filter(name=n).exists() else sorted(Group.objects.get(name=n).users.values_list("username", flat=True))) for n in ["titan-family","titan-grafana-admins","titan-tesla-grafana-admins","authentik Admins"]]
       # Measured 2026-11-04 on 2026.8.5: titan-family = cathy_torrecilla, chuset, javier; both admin
       # groups = javier. So javier passes on all three and is not lockable by this change. akadmin is
-      # in NONE of them and therefore loses these four hosts — deliberate, but note it is the account
-      # someone might reach for as break-glass. authentik's own UI is not behind this outpost, and
-      # Grafana keeps GF_AUTH_BASIC_ENABLED=true, so neither is a dead end.
+      # in NONE of them and therefore loses every host behind this outpost — deliberate, but note it is
+      # the account someone might reach for as break-glass. authentik's own UI is not behind this
+      # outpost, and Grafana keeps GF_AUTH_BASIC_ENABLED=true, so neither is a dead end.
       # Recovery if it goes wrong is not a revert — a revert needs to be applied, and the person who
       # cannot reach authentik's UI is the person who would normally apply it. It is adding yourself
       # back to titan-family in the authentik admin UI, which is still reachable because authentik's

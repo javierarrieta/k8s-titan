@@ -34,7 +34,7 @@ Two sources, and neither one alone is enough:
 | `databasus.v.arrieta.eu` | **none — 200** | — | retired, #113 | — |
 | `tr.v.arrieta.eu` | **none — 200** | — | retired, #106 | — |
 | `kanghuru.v.arrieta.eu`, `kanghuru.es` | **none — public product** | — | parked, #111 — the domain is the blocker | #111 |
-| `uptime.v.arrieta.eu` | outpost | **none yet** | **it is gatus** — workload migrated, status page not | see "The four mystery hosts" |
+| `uptime.v.arrieta.eu` | outpost | `uptime.titan` | same shared outpost, reached through a hand copy of its Middleware | `apply/50-apps/gatus/gatus.yaml`; the copy is held to the canonical by rule 6 of `tools/ingress-auth-check.py` |
 | `llm-chat.v.arrieta.eu` | outpost | — | **dead config** — `llm-chiclana` Service does not exist | see below |
 | `agent0.v.arrieta.eu` | outpost | — | **dead config** — `agent-zero` Service does not exist | `../k8s-techdelivery unused/agent-zero.yaml`, not applied |
 | `q1.v.arrieta.eu` | outpost | — | **LAN address `192.168.0.62`, unreachable** — not a cluster workload | see below |
@@ -42,7 +42,7 @@ Two sources, and neither one alone is enough:
 Every row that has a titan host has a named mechanism, and every row that is deliberately open is
 enforced by a gate rather than by prose. **That half of #103's done-when is met.**
 
-## The four mystery hosts — resolved, and one of them is a real gap
+## The four mystery hosts — resolved, and one of them was a real gap
 
 `uptime`, `llm-chat`, `agent0` and `q1` were gated by authentik on the VPS and appeared **nowhere in
 either repo**. Re-probed 2026-11-06 all four still answered `302 -> /outpost.goauthentik.io/start`, and
@@ -72,7 +72,7 @@ That returns the entire proxy surface — nine apps, which also cross-checks the
 | Gatus | `http://gatus.apps.svc` | **`uptime.v`** | live on the VPS, migrated to titan — **but see below** |
 | investing-agent | `http://investing-agent.apps.svc` | `investment-agent.v` | migrated |
 | llm-chat | `http://llm-chiclana.apps.svc` | `llm-chat.v` | **dead** — no `llm-chiclana` Service on the VPS cluster |
-| Prometheus | `http://prometheus-k8s.monitoring.svc:9090` | `prometheus.v` | the VPS ran its own in-cluster Prometheus; nothing in titan's tree references it |
+| Prometheus | `http://prometheus-k8s.monitoring.svc:9090` | `prometheus.v` | retired with the box — decided in the table above: titan runs no Prometheus and casa is the alerting brain |
 | q1 | `http://192.168.0.62` | `q1.v` | **a raw LAN address, not a cluster workload** — see below |
 | tesla | `http://teslamate.apps.svc` | `tesla.v` | migrated |
 | vert | `http://vert.apps.svc` | `vert.v` | migrated (#110) |
@@ -100,8 +100,13 @@ route `192.168.0.62` answers nothing: 100% packet loss on ICMP, no neighbour ent
 and it is gone.** So the measurement and the testimony agree, and `q1` is dead config that retires with
 the box — the third authentik Application pointing at nothing, alongside `agent0` and `llm-chat`.
 
-Two of the four are dead config and get deleted with the box. One — gatus — needs a decision about its
-status page. One — `q1` — needs a name.
+So all four are answered. Three — `llm-chat`, `agent0` and `q1` — are authentik Applications pointing at
+nothing, and they retire with the box. The fourth, `uptime`, was the only one with a live workload
+behind it, and it is published at `uptime.titan.arrieta.eu`, gated.
+
+What is **not** proven is the two things #253 could not do from a read-only workspace: `make dry-run`
+against the live API server, and one browser load of the page to show the forwardAuth admits rather
+than loops. `make check-ci` passing says the tree is self-consistent, not that the host works.
 
 ## `bearer-auth-service`: reproduced, and the open question about it was based on a false premise
 
