@@ -1,0 +1,295 @@
+# vert.titan.arrieta.eu — VERT, the WebAssembly file converter, migrated from
+# ../k8s-techdelivery `apply/50-apps/apps/vert-sh.yaml`.
+#
+# WHAT THIS IS, because it decides everything below: VERT (github.com/VERT-sh/VERT) is a file
+# converter that runs the conversion in the visitor's browser through WebAssembly, exactly like
+# bentopdf next door. The container is nginx serving a static SvelteKit build — no database, no
+# volume, no credential, no upload endpoint, no server-side worker. That is why this passes the §3.1
+# admission test for the shared `apps` namespace and buys no new namespace, no Certificate and no DNS
+# record: `*.titan.arrieta.eu` is already a wildcard A at titan's own address
+# (../public-dns-tf records_public.tf:13) and `apps` is already on the Reflector allow-list.
+#
+# MIGRATED FROM `vert.v.arrieta.eu`, hostname adopted rather than re-pointed per D1b. The source file
+# contains no Ingress for the same reason bentopdf's did not: the host lives on authentik's own
+# outpost Ingress in the source cluster, which is foreign-owned and therefore invisible to git.
+#
+# TWO ENV VARS IN vert-sh-config DO NOTHING, and the honest move was to carry them rather than
+# "fix" them. Upstream VERT is configured by `PUB_*` **build args** — PUB_ENV, PUB_HOSTNAME,
+# PUB_VERTD_URL, PUB_PLAUSIBLE_URL, PUB_DISABLE_ALL_EXTERNAL_REQUESTS, PUB_DONATION_URL — compiled
+# into the bundle by SvelteKit's `$env/static` (Dockerfile ARGs; upstream issue #142 is explicit that
+# runtime env cannot override them). Neither `VERT_DOMAIN` nor `APP_ENV` is an upstream name at all.
+# The only key in this ConfigMap that reaches anything is `NGINX_PORT`, consumed by the envsubst
+# template below. They are kept verbatim because this file is a migration, not a cleanup, and because
+# the image pin here predates the upstream variable names I checked — deleting config on the strength
+# of a web search of *current* upstream is how a migration quietly changes behaviour.
+#
+# THE CONSEQUENCE WORTH KNOWING: this image cannot be reconfigured at runtime. Anything genuinely
+# PUB_* — pointing video conversion at your own vertd, disabling external requests, setting the
+# analytics host — requires building a custom image with those ARGs, not editing this file. Do not
+# add PUB_* keys here expecting them to take effect; they will land in the container environment and
+# be ignored by the pre-built bundle.
+#
+# IMAGE IS NOT DRIFTED, unlike bentopdf: live `apps/deploy/vert-sh` runs
+# `ghcr.io/vert-sh/vert:sha-f5ecdec` and git says the same (measured 2026-11-06). Copied as-is.
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vert-sh-config
+  namespace: apps
+  labels:
+    app: vert-sh
+data:
+  APP_ENV: "production"
+  VERT_DOMAIN: "vert.sh"
+  # Drives the nginx listener via the envsubst template below.
+  # Must stay > 1024: the container runs as non-root (uid 101) and cannot bind
+  # privileged ports without CAP_NET_BIND_SERVICE.
+  NGINX_PORT: "8080"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vert-sh-nginx-conf
+  namespace: apps
+  labels:
+    app: vert-sh
+data:
+  nginx.conf: |
+    worker_processes  auto;
+
+    error_log  /dev/stderr notice;
+    pid        /tmp/nginx.pid;
+
+    events {
+        worker_connections  1024;
+    }
+
+    http {
+        include       /etc/nginx/mime.types;
+        default_type  application/octet-stream;
+
+        log_format  main  '$remote_addr - $remote_user [$time_local] "$request" '
+                          '$status $body_bytes_sent "$http_referer" '
+                          '"$http_user_agent" "$http_x_forwarded_for"';
+
+        access_log  /dev/stdout  main;
+
+        sendfile        on;
+        keepalive_timeout  65;
+
+        include /etc/nginx/conf.d/*.conf;
+    }
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vert-sh-nginx-template
+  namespace: apps
+  labels:
+    app: vert-sh
+data:
+  default.conf.template: |
+    server {
+        listen ${NGINX_PORT};
+        server_name vert;
+
+        root /usr/share/nginx/html;
+        index index.html;
+
+        client_max_body_size 10M;
+
+        # Security headers
+        add_header X-Frame-Options "SAMEORIGIN" always;
+        add_header X-Content-Type-Options "nosniff" always;
+        add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+        add_header Permissions-Policy "geolocation=(), microphone=(), camera=()" always;
+
+        location / {
+            try_files $uri $uri/ /index.html;
+        }
+
+        error_page 404 /index.html;
+    }
+---
+# The three ConfigMaps are copied byte-for-byte from the source, not retyped. The two nginx ones are
+# load-bearing in ways that read as tidying if you have not read the comments: `user nginx;` is removed
+# because setuid needs root, the pid file is off /run because /run is root-owned, the logs are explicit
+# /dev/std* because the image's symlinks are not writable on a read-only rootfs, and the IPv6 listener
+# is dropped because a hardcoded [::] bind aborts nginx on an IPv4-only cluster. Reverting any of them
+# to the image default looks like cleanup and breaks the pod.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vert-sh
+  namespace: apps
+  labels:
+    app: vert-sh
+    app.kubernetes.io/name: vert-sh
+  annotations:
+    reloader.stakater.com/auto: "true"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vert-sh
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 25%
+      maxUnavailable: 25%
+  template:
+    metadata:
+      labels:
+        app: vert-sh
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 101   # "nginx" uid in the image (verified via /etc/passwd)
+        runAsGroup: 101
+        fsGroup: 101     # makes the emptyDirs group-writable for uid 101
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: vert-sh
+          image: ghcr.io/vert-sh/vert:sha-f5ecdec
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+              name: http
+          envFrom:
+            - configMapRef:
+                name: vert-sh-config
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          # /healthz is not a health endpoint — it is the SPA fallback answering 200 for an unknown
+          # path (try_files ... /index.html). It proves nginx is up and serving, nothing more. Kept
+          # as the source has it; a stricter probe would need a real asset path.
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 20
+            timeoutSeconds: 3
+            failureThreshold: 5
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "250m"
+              memory: "256Mi"
+          volumeMounts:
+            # Main nginx config (non-root-safe), mounted over the image default
+            - name: nginx-conf
+              mountPath: /etc/nginx/nginx.conf
+              subPath: nginx.conf
+              readOnly: true
+            # envsubst source templates
+            - name: nginx-template
+              mountPath: /etc/nginx/templates
+              readOnly: true
+            # envsubst OUTPUT dir: must be writable by uid 101, so an emptyDir
+            # (also shadows the image's baked-in listen-80 default.conf)
+            - name: nginx-confd
+              mountPath: /etc/nginx/conf.d
+            # nginx temp buffers (client_body/proxy/fastcgi/uwsgi/scgi)
+            - name: nginx-cache
+              mountPath: /var/cache/nginx
+            # pid file location
+            - name: nginx-tmp
+              mountPath: /tmp
+      volumes:
+        - name: nginx-conf
+          configMap:
+            name: vert-sh-nginx-conf
+            items:
+              - key: nginx.conf
+                path: nginx.conf
+        - name: nginx-template
+          configMap:
+            name: vert-sh-nginx-template
+        - name: nginx-confd
+          emptyDir: {}
+        - name: nginx-cache
+          emptyDir: {}
+        - name: nginx-tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vert-sh
+  namespace: apps
+  labels:
+    app: vert-sh
+spec:
+  type: ClusterIP
+  selector:
+    app: vert-sh
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+---
+# THE GATE, and the debt it knowingly takes on — identical reasoning to
+# apply/50-apps/bentopdf/bentopdf.yaml, so read that one for the full argument. Short version: the
+# proxy provider in apply/50-apps/auth/tesla-outpost-blueprint.yaml is `mode: forward_domain` with
+# `cookie_domain: titan.arrieta.eu` and matching is `host.ends_with()`, so any *.titan host is already
+# served by it. No blueprint, provider, Application or Secret needed.
+#
+# THE COST: admission is the `tesla` Application's policy (titan-family or titan-tesla-grafana-admins),
+# so a file converter is gated by the Tesla apps' group. Semantically wrong, tracked by #245, and
+# still the honest reading of "keep it gated the way it is gated today" — `vert.v.arrieta.eu` was one
+# of the nine authentik-gated hosts on the source cluster, so ungating it here would be a silent
+# loosening rather than a migration.
+#
+# THE `websecure` PIN has no gate watching it: `make ingress-auth` reads the middleware annotation and
+# deliberately not this one, and there is no global HTTP->HTTPS redirect on this cluster. An unpinned
+# router serves this host in cleartext, which for a gated host means the authentik session cookie
+# crosses the wire unencrypted. This comment is the only guard.
+#
+# THE CROSS-STAGE HAZARD is inherited along with the reference: the Middleware is built by `60-tesla`,
+# this Ingress by `50-apps`, and neither stage dependsOn the other, so a cold restore can leave the
+# host 404ing until tesla reconciles. Fail-closed and self-healing.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: vert-sh
+  namespace: apps
+  annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+    traefik.ingress.kubernetes.io/router.middlewares: apps-teslamate-auth@kubernetescrd
+spec:
+  ingressClassName: traefik
+  rules:
+  - host: vert.titan.arrieta.eu
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: vert-sh
+            port:
+              name: http
+  tls:
+  - hosts:
+    - vert.titan.arrieta.eu
+    # The cluster wildcard, reflected into `apps` by the allow-list on
+    # apply/40-certificates/titan-wildcard.yaml.
+    secretName: titan-tls

@@ -168,3 +168,9 @@ resources:
   # The image pin in that file is deliberately NOT the source repo's: the live VPS pod runs a tag git
   # does not know about. Read the file's header before "correcting" it.
   - bentopdf/bentopdf.yaml
+  # vert-sh, the WebAssembly file converter, migrated from ../k8s-techdelivery. Same shape as bentopdf
+  # directly above: nginx serving a static build that converts files in the visitor's browser, so no
+  # volume, no Secret and no database, which is why it passes the §3.1 admission test for the shared
+  # namespace and buys no stage. Read that file's header before touching this one — and note that two
+  # of the three keys in vert-sh-config are inert, for the reason stated there.
+  - vert-sh/vert-sh.yaml
