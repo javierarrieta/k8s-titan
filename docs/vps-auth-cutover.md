@@ -112,28 +112,95 @@ anchored — and its file records the measured truth table, including that a `Be
 garbage>` request passes on the VPS and does not pass here. **Retiring the VPS frontend loses nothing
 and closes a known defect.**
 
-## What is still blocked, and exactly what unblocks it
+## The authentik retirement gate — checked 2026-11-06, and it needed checking
 
-R2 — retiring the VPS authentik, its outpost and `bearer-auth-service` — is gated on one claim: the
+R2 — retiring the VPS authentik, its outpost and `bearer-auth-service` — was gated on one claim: the
 operator's statement that the VPS authentik *"was never wired to groups or apps correctly — only the
-operator had an account."* That claim is load-bearing, because retiring an identity provider takes
-every account on it with it. It has not been checked.
+operator had an account."* Load-bearing, because retiring an identity provider takes every account on
+it with it. **It has now been run**, by the operator, against the VPS authentik database. It cannot be
+run from a workspace: the `vps` kube context here is the read-only `k8s-reader` identity — no
+`pods/exec`, no `services/proxy`.
 
-**It cannot be checked from a workspace.** It needs SQL against the VPS authentik database, and the
-`vps` kube context here is the read-only `k8s-reader` identity — no `pods/exec`, no `services/proxy`.
-The check, counts and uids only, no emails and no names:
+**The SQL as originally written in this file did not run.** Neither `uid` nor `is_superuser` exists on
+`authentik_core_user`. That is worth stating rather than quietly fixing: the query was written into the
+migration plan and executed by nobody until now. What actually works:
 
 ```sql
-select count(*) from authentik_core_user;
-select uid, is_active, is_superuser from authentik_core_user order by uid;
-select count(*) from authentik_core_group;
+select type, count(*) as n,
+       count(*) filter (where last_login is null) as never_logged_in
+  from authentik_core_user group by 1 order by 1;
+
+select name from authentik_core_group order by 1;
+
+select username, path, last_login from authentik_core_user
+ where type = 'internal' order by last_login nulls first;
 ```
 
-**The decision rule, stated before the result so the result cannot be rationalised afterwards:** 1–2
-users (the operator plus authentik's internal `ak`) and ~0 groups means the claim holds and R2 can be
-scheduled. Anything else is **a person or a service account with a live login on a box being switched
-off**, and this plan has no drilled recovery for that. If it comes back with more, R2 does not run
-until every extra identity has a named destination on titan's authentik.
+### Result
 
-R2 is additionally gated on R1, because the VPS authentik's own database lives on the Postgres that R1
-retires.
+| type | n | never logged in |
+|---|---|---|
+| `internal` | 3 | 2 |
+| `internal_service_account` | 2 | 2 |
+
+Groups: `Users`, `authentik Admins`, `authentik Agent-Users`, `authentik Read-only`.
+
+The three `internal` accounts are `AnonymousUser` (Django/authentik's placeholder for unauthenticated
+policy evaluation — a real row, never logs in by design), `javierarrieta` (the operator) and `akadmin`
+(authentik's bootstrap admin, created when `AUTHENTIK_BOOTSTRAP_PASSWORD` is set). **No third human.
+The claim holds and R2's identity gate is clear.**
+
+### The enum, because the obvious reading is the wrong one
+
+`internal` does **not** mean "authentik's own system user". From `authentik/core/models.py`:
+
+```python
+class UserTypes(models.TextChoices):
+    INTERNAL = "internal"                                  # locally-managed users — humans
+    EXTERNAL = "external"                                  # federated
+    SERVICE_ACCOUNT = "service_account"                    # user-created
+    INTERNAL_SERVICE_ACCOUNT = "internal_service_account"  # "such as outpost users"
+```
+
+authentik's own docs put it as *"Internal users: typically workforce identities... employees and
+partners"*. So **`internal` is the human-type bucket**, and reading it as "the system user" — which is
+the natural guess — turns a real finding into a false all-clear. The `ak` user is one of the two
+`internal_service_account` rows, alongside the outpost's token owner; both have null `last_login`,
+which is expected, since service accounts authenticate by token and never run a login flow.
+
+### The gate in this file was miscalibrated, and would have blocked a correct retirement
+
+The rule as first written was *"1–2 users and ~0 groups means the claim holds."* **The VPS came back
+with 5 users and 4 groups** — which under that rule is a refusal.
+
+But 5 and 4 are **exactly what a clean, single-human authentik contains**: `AnonymousUser` + one human
++ `akadmin` + 2 internal service accounts, and three shipped groups (`authentik Admins`,
+`authentik Agent-Users`, `authentik Read-only`) plus one. Only `Users` is not shipped. The raw counts
+were noise; the `type` breakdown was the answer. **So the gate is now type-based, not count-based:**
+
+> Retire when `select type, count(*) from authentik_core_user group by 1` shows `internal` rows only
+> for people who have a named destination on titan's authentik. `internal_service_account` rows are
+> authentik's own machinery and retire with it. A count, on its own, proves nothing either way.
+
+Anyone re-running this on another box and seeing 5/4 should not treat that as a finding.
+
+### `akadmin` is the working admin, on both clusters — which is a live risk, not history
+
+The one account on the VPS authentik with a real `last_login` is **`akadmin`** (2026-10-28). The
+operator's own `javierarrieta` has **never logged in** — the Google identity source was never bound
+successfully, so the bootstrap admin is what got used instead. That is the concrete shape of "never
+wired correctly", and it is also why the personal account exists at all: something created it, nothing
+used it.
+
+**The consequence reaches titan.** `docs/authentik-runbook.md` records that titan's authentik also has
+an `akadmin`, created through the browser flow on 2026-10-05, and titan's Google login is a sops
+blueprint (`apply/10-secrets/authentik-google-blueprint.yaml`) that is mounted and checked by
+`blueprint-mount-check` — but **mounted is not working**, and the only place this failure mode has ever
+been observed is the box where it silently never worked. So before the VPS is released:
+
+> **Prove you can log into titan's authentik with Google, not just with `akadmin`.** Several apps —
+> Grafana, open-webui, Sure — map roles from a `groups` claim that originates in that source's group
+> mapping. If the source cannot actually authenticate, those mappings have nothing to map, and the
+> evidence would be a 403 on an app that looks healthy rather than a red release.
+
+R2 remains gated on R1, because the VPS authentik's own database lives on the Postgres that R1 retires.
