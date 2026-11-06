@@ -307,8 +307,11 @@ Three things worth pointing at in that line:
 **What this run does not cover**, restated so nobody has to go looking: the other three
 opted-in volumes; application consistency (this is a cold snapshot into a scratch volume, not
 a restore under load); whether an app starts against a restored volume; whether a failed
-backup would be noticed, since nothing alerts on it; and any RTO — no timing has been
-measured for the 10Gi volumes.
+backup would be noticed — **this drill did not test that, and it is no longer true that nothing
+alerts**: casa's `TitanBackup*` rules cover it and were seen firing on 2026-11-04, but by a different
+cause than anything exercised here, so treat that clause as covered elsewhere rather than as proven by
+this run. See `AGENTS.md`, which names the rule file and its surviving gap. And any RTO — no timing has
+been measured for the 10Gi volumes.
 
 **What it cost to get here:** five bugs, all found by the drill rather than by production.
 `snapshots --json` key names, `ls --json` key names, `restic dump` rather than `restic cat`,

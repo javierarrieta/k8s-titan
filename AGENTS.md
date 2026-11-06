@@ -92,9 +92,17 @@ kind**; `coder-workspaces`, by operator decision — a coder workspace must be r
 from its image and from git, so **anything in a workspace home that is neither is not
 recoverable**; and both Grafana volumes, because every provider sets `allowUiUpdates: false`, the
 datasources and the admin credentials are in git, and a wiped PVC rebuilds itself — what it loses
-is anything built by hand in the UI. Neither path is monitored yet: casa owns the Prometheus that would alert on a stale
-snapshot and no such alert exists for titan, so a week of failed backups currently looks exactly
-like a week of successful ones. **One restic volume has been restored and verified** —
+is anything built by hand in the UI. Both paths are monitored, and **the rules do not live in this repo**: titan runs no Prometheus, so
+alerting for backups lives in `../k8s-casa` — `apply/50-apps/monitoring/titan-pv-backup-alerts.yaml`
+(a failed Job; per-volume staleness at 26h; each of the `backup-discovery` / `-housekeeping` /
+`-integrity` loops scored separately; and an `absent()` guard so the file cannot go decorative when the
+series vanish) and `titan-backup-alerts.yaml` for the etcd snapshots. **They have been observed
+firing in production, not merely deployed** — 2026-11-04, a stale restic lock (k8s-titan#240) paged
+`TitanBackupJobFailed` for 37h, which is also the story behind that rule's 26h recency bound. Read
+that file before changing anything about backup alerting; its comments are the record of what was
+measured. **The gap that survives all of it:** a volume whose `backup.titan.arrieta.eu/class`
+annotation was removed produces no Job, so it has no series and therefore cannot be stale. Nothing on
+the metrics side can see that; only `make backup-coverage`, on the tree side, can. **One restic volume has been restored and verified** —
 `mealie/mealie-data`, 2026-11-03, `DRILL_RESULT … match=yes`, recorded in
 [`pv-restore-drill.md`](pv-restore-drill.md). The other three opted-in volumes
 (`apps/investing-agent-pv-claim`, `open-webui/open-webui-data`, `sure/sure-storage`) have
