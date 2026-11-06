@@ -281,7 +281,7 @@ bindings drift from the reviewed set, when `policy_engine_mode` stops being `any
 provider appears, when `cookie_domain` moves off the apex, or when `skip_path_regex` grows — the last
 being the exact field `docs/teslamate-runbook.md` §9's rejected alternative turns on. Its honest limit is
 the repo's standing one: committed bindings are not applied bindings. For which VPS host got which
-mechanism on titan — and the four gated VPS hosts that exist in no repo at all — see
+mechanism on titan — and what the four mystery gated VPS hosts turned out to be — see
 `docs/vps-auth-cutover.md`. `blueprint-mount-check` is that
 gate for authentik's blueprints, which
 nothing here could see before it: authentik applies blueprints itself, on its own schedule, and
