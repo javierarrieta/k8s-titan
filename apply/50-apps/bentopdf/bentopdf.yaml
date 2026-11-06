@@ -1,0 +1,337 @@
+# bentopdf.titan.arrieta.eu — a client-side PDF tool, migrated from ../k8s-techdelivery
+# `apply/50-apps/apps/bentopdf.yaml`.
+#
+# WHAT THIS ACTUALLY IS, because it decides the gate below: bentopdf is a static SPA served by nginx
+# (`root /usr/share/nginx/html`) whose PDF conversion runs in the visitor's browser through the
+# LibreOffice WASM bundle it ships. There is no upload endpoint, no server-side conversion queue, no
+# database and no credential. The workload is a file server. That is why this passes the §3.1 admission
+# test for the shared `apps` namespace — one pod, no volume, no Secret — and buys no new namespace, no
+# Certificate and no DNS record: `*.titan.arrieta.eu` is already a wildcard A at titan's own address
+# (../public-dns-tf records_public.tf:13) and `apps` is already on the Reflector allow-list.
+#
+# MIGRATION NOTE THAT MATTERS — THE SOURCE REPO'S IMAGE PIN IS STALE AND WAS NEVER THE LIVE ONE.
+# The source file pins `bentopdf/bentopdf:sha-fb8c8c0`. The live VPS pod runs
+# `bentopdf/bentopdf:v1.15.3` (measured 2026-11-06, `apps/deploy/bentopdf`, revision 4). That is not
+# the automated updater: ../k8s-techdelivery SECURITY-FOLLOWUP.md:149 records that the updater
+# deliberately could not bump this image ("repo deprecated, no versioned tags available on Docker
+# Hub"), so a person changed it out of band and never committed it. Copying the git pin here would
+# have been a silent downgrade of an unknown number of releases. **Take the live tag, not the source
+# repo's.** Everything else about the pod is undrifted — resources, probes and the absence of env vars
+# all match git.
+#
+# THE SOURCE ISSUE WAS WRONG ABOUT THIS HOST, and the correction is what makes it a migration at all.
+# Issue #107 states there is no Ingress and the service is "cluster-internal and unreachable". It is
+# published: `bentopdf.v.arrieta.eu` is one of nine hosts on `auth/ak-outpost-reverse-proxy-outpost`,
+# the Ingress authentik creates for its own embedded outpost — foreign-owned, which is why git could
+# not see it. Measured before this file was written:
+#
+#     curl -si https://bentopdf.v.arrieta.eu/  ->  302 /outpost.goauthentik.io/start?rd=...
+#
+# So "retire it, nobody can reach it" was never available as a reason, and the exposure class is
+# unchanged by this move: gated and public before, gated and public now.
+#
+# WHAT IS DELIBERATELY NOT COPIED: the source's `namespace: apps` is the same word but a different
+# cluster's namespace; it happens to be the right one here for the §3.1 reason above. Object names are
+# kept intact so a reader diffing the two repos sees a move rather than a rewrite.
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: bentopdf-nginx-conf
+  labels:
+    app: bentopdf
+  namespace: apps
+data:
+  nginx.conf: |
+    pid /etc/nginx/tmp/nginx.pid;
+
+    error_log /dev/stderr warn;
+
+    events {
+        worker_connections 1024;
+    }
+
+    http {
+        include /etc/nginx/mime.types;
+        types {
+            application/javascript mjs;
+        }
+        default_type application/octet-stream;
+
+        access_log /dev/stdout;
+
+        gzip_static on;
+
+        gzip on;
+        gzip_vary on;
+        gzip_min_length 1024;
+        gzip_comp_level 9;
+        gzip_types text/plain text/css text/xml text/javascript application/javascript application/xml+rss application/json application/wasm application/x-javascript text/x-component;
+
+        server {
+            listen 8080;
+            server_name localhost;
+            root /usr/share/nginx/html;
+            index index.html;
+
+            location ~* \.html$ {
+                expires 1h;
+                add_header Cache-Control "public, must-revalidate";
+                add_header Cross-Origin-Embedder-Policy "require-corp" always;
+                add_header Cross-Origin-Opener-Policy "same-origin" always;
+            }
+
+            location ~* /libreoffice-wasm/soffice\.wasm\.gz$ {
+                gzip off;
+                types {} default_type application/wasm;
+                add_header Content-Encoding gzip;
+                add_header Vary "Accept-Encoding";
+                add_header Cache-Control "public, immutable";
+                add_header Cross-Origin-Embedder-Policy "require-corp" always;
+                add_header Cross-Origin-Opener-Policy "same-origin" always;
+            }
+
+            location ~* /libreoffice-wasm/soffice\.data\.gz$ {
+                gzip off;
+                types {} default_type application/octet-stream;
+                add_header Content-Encoding gzip;
+                add_header Vary "Accept-Encoding";
+                add_header Cache-Control "public, immutable";
+                add_header Cross-Origin-Embedder-Policy "require-corp" always;
+                add_header Cross-Origin-Opener-Policy "same-origin" always;
+            }
+
+            location ~* \.(wasm|wasm\.gz|data|data\.gz)$ {
+                expires 1y;
+                add_header Cache-Control "public, immutable";
+                add_header Cross-Origin-Embedder-Policy "require-corp" always;
+                add_header Cross-Origin-Opener-Policy "same-origin" always;
+            }
+
+            location ~* \.(js|mjs|css|woff|woff2|ttf|eot|otf)$ {
+                expires 1y;
+                add_header Cache-Control "public, immutable";
+                add_header Cross-Origin-Embedder-Policy "require-corp" always;
+                add_header Cross-Origin-Opener-Policy "same-origin" always;
+            }
+
+            location ~* \.(png|jpg|jpeg|gif|ico|svg|webp|avif|mp4|webm)$ {
+                expires 1y;
+                add_header Cache-Control "public, immutable";
+            }
+
+            location ~* \.json$ {
+                expires 1w;
+                add_header Cache-Control "public, must-revalidate";
+            }
+
+            location ~* \.pdf$ {
+                expires 1y;
+                add_header Cache-Control "public, immutable";
+            }
+
+            location ~ ^/(en|de|es|zh|zh-TW|vi|it|id|tr|fr|pt)(/.*)?$ {
+                try_files $uri $uri/ $uri.html /$1/index.html /index.html;
+                expires 5m;
+                add_header Cache-Control "public, must-revalidate";
+                add_header Cross-Origin-Embedder-Policy "require-corp" always;
+                add_header Cross-Origin-Opener-Policy "same-origin" always;
+            }
+
+            location ~ ^/(.+?)/(en|de|es|zh|zh-TW|vi|it|id|tr|fr|pt)(/.*)?$ {
+                try_files $uri $uri/ $uri.html /$1/$2/index.html /$1/index.html /index.html;
+                expires 5m;
+                add_header Cache-Control "public, must-revalidate";
+                add_header Cross-Origin-Embedder-Policy "require-corp" always;
+                add_header Cross-Origin-Opener-Policy "same-origin" always;
+            }
+
+            location / {
+                try_files $uri $uri/ $uri.html /index.html;
+                expires 5m;
+                add_header Cache-Control "public, must-revalidate";
+                add_header Cross-Origin-Embedder-Policy "require-corp" always;
+                add_header Cross-Origin-Opener-Policy "same-origin" always;
+            }
+
+            add_header X-Frame-Options "SAMEORIGIN" always;
+            add_header X-Content-Type-Options "nosniff" always;
+            add_header X-XSS-Protection "1; mode=block" always;
+            add_header Cross-Origin-Opener-Policy "same-origin" always;
+            add_header Cross-Origin-Embedder-Policy "require-corp" always;
+            add_header Cross-Origin-Resource-Policy "cross-origin" always;
+        }
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bentopdf
+  labels:
+    app: bentopdf
+  namespace: apps
+  annotations:
+    reloader.stakater.com/auto: "true"
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: bentopdf
+  template:
+    metadata:
+      labels:
+        app: bentopdf
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 101   # "nginx" uid in the image (verified via image config)
+        runAsGroup: 101
+        fsGroup: 101     # makes the emptyDirs writable for uid 101
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: bentopdf
+        # NOT the source repo's pin. See the header: the live VPS pod runs v1.15.3 while
+        # ../k8s-techdelivery still says sha-fb8c8c0, and the live one is the truth.
+        image: bentopdf/bentopdf:v1.15.3
+        ports:
+        - containerPort: 8080
+          name: http
+          protocol: TCP
+        resources:
+          limits:
+            cpu: 500m
+            memory: 512Mi
+          requests:
+            cpu: 100m
+            memory: 128Mi
+        # DISABLE_IPV6 is intentionally NOT set. The image's 99-disable-ipv6.sh patches
+        # /etc/nginx/nginx.conf with `sed -i`, which aborts the entrypoint on a read-only root
+        # filesystem. IPv6 is already removed in the bentopdf-nginx-conf ConfigMap mounted below.
+        readinessProbe:
+          httpGet:
+            path: /
+            port: http
+          initialDelaySeconds: 5
+          periodSeconds: 10
+          timeoutSeconds: 2
+          failureThreshold: 3
+        livenessProbe:
+          httpGet:
+            path: /
+            port: http
+          initialDelaySeconds: 20
+          periodSeconds: 20
+          timeoutSeconds: 3
+          failureThreshold: 5
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: [ALL]
+          readOnlyRootFilesystem: true
+        volumeMounts:
+          # Non-root-safe nginx.conf (no IPv6 listener, logs to stdout/stderr).
+        - name: nginx-conf
+          mountPath: /etc/nginx/nginx.conf
+          subPath: nginx.conf
+          readOnly: true
+          # pid file lives here per "pid /etc/nginx/tmp/nginx.pid;"
+        - name: nginx-run
+          mountPath: /etc/nginx/tmp
+          # nginx temp buffers: client_body/proxy/fastcgi/uwsgi/scgi
+        - name: nginx-cache
+          mountPath: /var/cache/nginx
+        - name: tmp
+          mountPath: /tmp
+      volumes:
+        - name: nginx-conf
+          configMap:
+            name: bentopdf-nginx-conf
+            defaultMode: 0444
+            items:
+            - key: nginx.conf
+              path: nginx.conf
+        - name: nginx-run
+          emptyDir: {}
+        - name: nginx-cache
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: bentopdf
+  namespace: apps
+spec:
+  selector:
+    app: bentopdf
+  ports:
+    - name: bentopdf
+      protocol: TCP
+      port: 8080
+      targetPort: 8080
+
+---
+# THE GATE, and the debt it knowingly takes on.
+#
+# `apps-teslamate-auth` is the forwardAuth Middleware declared at apply/60-tesla/teslamate.yaml —
+# same namespace, so it is referenceable without a new object. It works for a host that appears nowhere
+# in authentik because the proxy provider in apply/50-apps/auth/tesla-outpost-blueprint.yaml is
+# `mode: forward_domain` with `cookie_domain: titan.arrieta.eu`, and matching is
+# `host.ends_with(cookie_domain)`. `investing-agent` already relies on exactly this
+# (apply/50-apps/investing-agent/investing-agent.yaml:328), so this adds no blueprint, no provider, no
+# Application and no Secret.
+#
+# THE COST, stated rather than discovered: admission is the `tesla` Application's policy —
+# `titan-family` or `titan-tesla-grafana-admins` — so a PDF tool is gated by the Tesla apps' group.
+# That is semantically wrong and it is the same wart #245 tracks for hermes. The clean fix is its own
+# `Application` and provider; it is not taken here because it costs a blueprint, a Secret and a mount
+# for a static file server, and because inheriting an existing gate is the honest reading of "keep it
+# gated the way it is gated today". If #245 lands, this line should move with it.
+#
+# `@kubernetescrd` is the CRD provider's name; `@kubernetes` is the Ingress provider and does not
+# resolve a CRD middleware.
+#
+# THE CROSS-STAGE HAZARD, inherited along with the reference: the Middleware is built by `60-tesla` and
+# this Ingress by `50-apps`, and neither stage `dependsOn` the other, so on a cold restore their order
+# is undefined. While the reference is unresolvable Traefik disables this router and the host 404s —
+# fail-closed, self-healing once `tesla` reconciles. Same accepted tradeoff as investing-agent.
+#
+# THE `websecure` PIN IS THE OTHER LINE THAT MATTERS, and nothing here can see it being deleted:
+# `make ingress-auth` reads the middleware annotation but deliberately not this one, and `crd-check`
+# walks custom resources. There is no global HTTP->HTTPS redirect on this cluster to fall back on —
+# measured, `http://meals.titan.arrieta.eu/` answers 200 while `http://llm.titan.arrieta.eu/` answers
+# 404 — so an unpinned router serves this host in cleartext, which for a gated host means the authentik
+# session cookie crosses the wire unencrypted.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: bentopdf
+  namespace: apps
+  annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+    traefik.ingress.kubernetes.io/router.middlewares: apps-teslamate-auth@kubernetescrd
+spec:
+  ingressClassName: traefik
+  rules:
+  - host: bentopdf.titan.arrieta.eu
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: bentopdf
+            port:
+              name: bentopdf
+  tls:
+  - hosts:
+    - bentopdf.titan.arrieta.eu
+    # The cluster wildcard, reflected into `apps` by the allow-list on
+    # apply/40-certificates/titan-wildcard.yaml. `apps` is already on that list, so this needed no
+    # certificate work and no hand-copied Secret.
+    secretName: titan-tls
