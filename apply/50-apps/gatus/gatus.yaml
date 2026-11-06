@@ -78,9 +78,118 @@ data:
             failure-threshold: 3
             send-on-resolved: true
 
-      # NOT DONE BY THIS CHANGE, and deliberately so (#224 is scoped to the two hosts with an
-      # out-of-band dependency): the other 14 public hostnames are still unprobed, and nothing here
-      # alerts on a stale backup either. Monitoring landed; the rules did not.
+      # --------------------------------------------------------------------------------------------
+      # THE THREE BELOW ARE THE MIGRATED HALF OF #109 — the VPS probe list, re-derived from titan's
+      # network position rather than copied. Every entry in ../k8s-techdelivery
+      # apply/50-apps/apps/gatus.yaml was an assertion about the VPS's view of the network, and the
+      # spec's warning was right: copying it produces a monitor confidently wrong about titan.
+      #
+      # WHAT WAS NOT COPIED, AND WHY — this is the part that matters. The VPS probes were
+      # `icmp://192.168.0.1`, `icmp://192.168.0.5`, `icmp://192.168.0.6` and
+      # `http://192.168.133.3:8123`. **None of the three ICMP probes were carried over, and it is not
+      # a judgement call about their value.** ICMP from a pod needs `CAP_NET_RAW` (or a root image),
+      # and this Deployment declares no `securityContext` at all, so whether the gatus pod can send it
+      # depends entirely on the image's default user — which cannot be read from a read-only kube
+      # context (`kubectl auth can-i create pods -n gatus` -> `no`, and `pods/exec` is likewise
+      # refused). #109 names the exact hazard: "a pod that cannot send ICMP fails a probe for a reason
+      # that has nothing to do with the target being down, and that is a false alarm generator." An
+      # unprovable probe is worse than no probe, so every probe below is TCP or HTTP, and every one was
+      # measured from a pod on this cluster before being written.
+      #
+      # MEASURED 2026-11-06 from a pod on this cluster (source 10.62.0.x, the same proof method
+      # `apply/50-apps/home-hass/home-hass.yaml:20` uses):
+      #
+      #     192.168.0.1:22   TCP OPEN      192.168.0.1:53   TCP OPEN
+      #     192.168.0.1:80   filtered      192.168.0.1:443  filtered
+      #     192.168.0.6:9000 -> /minio/health/live  HTTP 200
+      #     192.168.0.29:8731 -> /health           HTTP 200
+      #     192.168.0.5:8123 TCP OPEN      192.168.133.3:8123 TCP OPEN
+      #
+      # THE ONE THAT MATTERS MOST is the MinIO probe. `apply/70-backup/` ships restic to casa's MinIO
+      # at 192.168.0.6:9000, and this file's own closing comment used to say "nothing here alerts on a
+      # stale backup either" — that line is being replaced by this probe. A MinIO that is down or
+      # refusing writes turns every nightly backup into a silent no-op; the backup Jobs exit non-zero
+      # into pods nobody watches, which is techdelivery#160 repeated on a different cluster. This does
+      # not prove a backup *ran* — only that the place it writes to is alive. The rule that proves a
+      # backup went stale is a Prometheus alert on the snapshot age and lives in k8s-casa, not here.
+      - name: casa-minio-backup-target
+        group: casa
+        url: http://192.168.0.6:9000/minio/health/live
+        interval: 1m
+        client:
+          timeout: 10s
+        conditions:
+          - "[STATUS] == 200"
+        alerts:
+          - type: telegram
+            failure-threshold: 3
+            send-on-resolved: true
+
+      # casa's halogen endpoint. Three things in this cluster depend on it and none of them can say so
+      # when it is gone: `apply/50-apps/llm/llm.yaml` proxies it, `sure/sure.yaml` sets
+      # OPENAI_URI_BASE to it, and investing-agent's OPENAI_BASE_URL is the same address. A failure
+      # here reads as three unrelated apps misbehaving, which is the shape of outage nobody connects to
+      # one cause. Plain HTTP on the mesh, as those files record — the mesh is what encrypts it.
+      - name: casa-halogen-llm
+        group: casa
+        url: http://192.168.0.29:8731/health
+        interval: 1m
+        client:
+          timeout: 10s
+        conditions:
+          - "[STATUS] == 200"
+        alerts:
+          - type: telegram
+            failure-threshold: 3
+            send-on-resolved: true
+
+      # The home LAN gateway, standing in for the VPS's `icmp://192.168.0.1`. It is the OPNsense peer
+      # whose `allowedIPs` carry 192.168.0.0/24, and `home-hass.yaml:26` names it as a single point of
+      # failure with no second path — so "the gateway is down" is the failure that takes the home
+      # passthroughs, MinIO and the LLM endpoint out together. Probed on TCP/53 rather than ICMP
+      # because that is what was proven open from here and it needs no privilege; 80 and 443 are
+      # filtered from the mesh, so an HTTP probe would fail for a reason that is not an outage.
+      #
+      # WHAT THIS CANNOT DISTINGUISH: a gateway that answers on 53 while its WireGuard peer is broken.
+      # The two `*-hass-public` probes above are what catch that, because they traverse the peer.
+      - name: home-lan-gateway
+        group: home
+        url: tcp://192.168.0.1:53
+        interval: 1m
+        client:
+          timeout: 5s
+        conditions:
+          - "[CONNECTED] == true"
+        alerts:
+          - type: telegram
+            failure-threshold: 3
+            send-on-resolved: true
+
+      # DROPPED FROM THE VPS SET, with the reason rather than silence: `icmp://192.168.0.5` is the home
+      # HA box, and `hass-home-public` above covers it through the whole user path (DNS -> Traefik ->
+      # TLS -> HA) rather than just the box; `icmp://192.168.0.6` is casa, now covered by the MinIO
+      # health probe, which is a stronger claim than reachability; `http://192.168.133.3:8123` is the
+      # chiclana box, and `chiclana-hass-public` covers the same backend by way of
+      # `apply/50-apps/chiclana-hass/chiclana-hass.yaml:38`. Three probes became three better ones.
+      #
+      # THE PROOF THIS FILE STILL OWES (#109's last clause): no alert from this Deployment has ever been
+      # seen to arrive. The mechanism is wired — Secret `gatus-telegram`, token and chat id — but
+      # "wired" is what a monitor says right up until the first outage it misses. To prove delivery
+      # without waiting for a real failure, add a probe whose condition can never hold, let it cross
+      # `failure-threshold`, confirm the message lands, and delete it:
+      #
+      #     - name: telegram-delivery-test
+      #       url: https://hass.titan.arrieta.eu/
+      #       interval: 1m
+      #       conditions: [ "[STATUS] == 418" ]
+      #       alerts: [ { type: telegram, failure-threshold: 1, send-on-resolved: true } ]
+      #
+      # It targets a host known to be healthy, so the only thing that can fail is the alert path.
+      #
+      # STILL NOT DONE, unchanged from before: the other public hostnames are unprobed, and a *stale*
+      # backup — one that silently stopped running rather than one whose target is down — is still not
+      # alerted on from anywhere. That rule needs casa's Prometheus and lives in k8s-casa.
+      # `apply/70-backup/`'s own header is the record of that gap.
 ---
 apiVersion: apps/v1
 kind: Deployment
