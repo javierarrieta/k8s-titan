@@ -159,3 +159,12 @@ resources:
   # rather than merely stated.
   - home-hass/home-hass.yaml
   - chiclana-hass/chiclana-hass.yaml
+  # bentopdf, the client-side PDF tool, migrated from ../k8s-techdelivery. One hand-written manifest
+  # (ConfigMap + Deployment + Service + Ingress in namespace `apps`), no volume, no Secret and no
+  # database, so it passes the §3.1 admission test for the shared namespace and buys no stage. It is
+  # gated by the same shared outpost as investing-agent rather than by an Application of its own — the
+  # debt is named in the file and tracked by #245.
+  #
+  # The image pin in that file is deliberately NOT the source repo's: the live VPS pod runs a tag git
+  # does not know about. Read the file's header before "correcting" it.
+  - bentopdf/bentopdf.yaml
