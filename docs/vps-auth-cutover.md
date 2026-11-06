@@ -79,20 +79,26 @@ That returns the entire proxy surface — nine apps, which also cross-checks the
 
 **`uptime.v.arrieta.eu` is gatus.** The hostname and the workload have different names, which is why
 neither repo connected them. Gatus is migrated and its probe list was re-derived for titan (#109), but
-**titan's gatus has no Ingress in any namespace** — `kubectl --context titan get ingress -A` returns no
-gatus rule and no `uptime` rule. So the workload survived and **the thing people actually look at did
-not**: the VPS published a status page, titan's gatus only pushes Telegram alerts. That is a decision
-nobody has taken, not a bug — either publish `uptime.titan.arrieta.eu` or record that the public status
-page was dropped on purpose. Right now it is being dropped by accident, in the sense that nobody chose
-it.
+**titan's gatus arrived as a ConfigMap and a Deployment and nothing else** — no Service, no Ingress —
+so it could only ever push Telegram alerts while the public status page stayed on the VPS. The workload
+survived; **the thing people actually look at did not.**
+
+**Decided 2026-11-06: publish it, gated.** `uptime.titan.arrieta.eu` now exists, with a Service and an
+Ingress in `apply/50-apps/gatus/gatus.yaml`, gated by the same shared outpost as bentopdf and vert-sh.
+Gated rather than open because **a gatus page is a rendered map of the internal network** — the probe
+list names LAN addresses and internal service names — so "it's only a status page" is the wrong default
+when the page's entire content is topology. No authentik change was needed: mode `forward_domain` with
+`cookie_domain: titan.arrieta.eu` means `host.ends_with()` matches the new host automatically. `gatus`
+was added to the Reflector allow-list so `titan-tls` reaches it. The cost is #245's cost with a fourth
+consumer: admission is the `tesla` Application's group, semantically wrong for a monitoring page, and
+still tracked there rather than quietly accepted here.
 
 **`q1` pointed at `192.168.0.62`, a LAN address rather than a cluster Service.** This workspace has a
 route to `192.168.0.0/24` — verified with `192.168.0.6:80`, a known-live control — and against that
 route `192.168.0.62` answers nothing: 100% packet loss on ICMP, no neighbour entry, and none of ports
-80/443/3000/8080/8123/11434/32400/9000/8000/5000 open. **The honest limit: a host that suppresses ICMP
-and serves something other than those ten ports would look identical from here.** So this reads as a
-decommissioned LAN box rather than a proven one, and the operator is the only one who can say what
-`q1` was.
+80/443/3000/8080/8123/11434/32400/9000/8000/5000 open. **Confirmed by the operator: it was a 3D printer,
+and it is gone.** So the measurement and the testimony agree, and `q1` is dead config that retires with
+the box — the third authentik Application pointing at nothing, alongside `agent0` and `llm-chat`.
 
 Two of the four are dead config and get deleted with the box. One — gatus — needs a decision about its
 status page. One — `q1` — needs a name.
@@ -212,14 +218,17 @@ wired correctly", and it is also why the personal account exists at all: somethi
 used it.
 
 **The consequence reaches titan.** `docs/authentik-runbook.md` records that titan's authentik also has
-an `akadmin`, created through the browser flow on 2026-10-05, and titan's Google login is a sops
-blueprint (`apply/10-secrets/authentik-google-blueprint.yaml`) that is mounted and checked by
-`blueprint-mount-check` — but **mounted is not working**, and the only place this failure mode has ever
-been observed is the box where it silently never worked. So before the VPS is released:
+an `akadmin`, created through the browser flow on 2026-10-05. **Titan is a different story, and the
+operator settled it on 2026-11-06:** titan is used with the Gmail account, never `akadmin`. That is
+attested, not measured — this workspace has no SQL path to titan's authentik either — but it is the
+operator's own daily login and nobody else could supply it. The residual, still unproven from here: the
+`groups` claim that Grafana, open-webui and Sure map roles from originates in that source's group
+mapping, so if the mapping were empty the symptom would be **a 403 on an app that looks healthy, not a
+red release**. The operator using those apps is the evidence; it is simply not evidence this workspace
+can check.
 
-> **Prove you can log into titan's authentik with Google, not just with `akadmin`.** Several apps —
-> Grafana, open-webui, Sure — map roles from a `groups` claim that originates in that source's group
-> mapping. If the source cannot actually authenticate, those mappings have nothing to map, and the
-> evidence would be a 403 on an app that looks healthy rather than a red release.
+What the VPS record still means: `akadmin` was the only VPS account with a real `last_login`, so
+**the VPS's last working admin credential is a bootstrap password that dies with the box.** Nothing on
+titan depends on it, but nobody should reach for it after the release.
 
 R2 remains gated on R1, because the VPS authentik's own database lives on the Postgres that R1 retires.

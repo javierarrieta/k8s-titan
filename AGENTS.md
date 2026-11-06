@@ -192,7 +192,7 @@ the stream is rejected per-pod, silently, with promtail reporting healthy.
   `Certificate` and reflected into consuming namespaces by Reflector; reference it as
   `secretName: titan-tls` from the namespace your Ingress lives in. Nothing else
   receives it — the allow-list is the `secretTemplate` annotations on
-  `apply/40-certificates/titan-wildcard.yaml`, today `apps,auth,open-webui,observability,files,mealie,llm,sure`,
+  `apply/40-certificates/titan-wildcard.yaml`, today `apps,auth,open-webui,observability,files,mealie,llm,sure,gatus`,
   so a new consuming namespace means editing that file, never copying the Secret by hand. **The one deliberate exception is
   `streaming.titan.arrieta.eu`, which points at `tesla-streaming-tls` from
   `apply/40-certificates/tesla-streaming.yaml`. That is not duplication to collapse back into the

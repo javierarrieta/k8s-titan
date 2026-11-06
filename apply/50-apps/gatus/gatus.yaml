@@ -244,3 +244,95 @@ spec:
               port: http
             periodSeconds: 30
             failureThreshold: 3
+---
+# The status page, published.
+#
+# `uptime.v.arrieta.eu` on the VPS was gatus under a different name, which is why #109 migrated the
+# workload without anyone noticing it was also the thing people actually look at. Titan's gatus arrived
+# as a ConfigMap and a Deployment and nothing else — no Service, no Ingress — so for sixteen days it
+# could only ever push Telegram alerts while the public status page stayed on a box scheduled for
+# release. Recorded in `docs/vps-auth-cutover.md`; the hostname/workload name mismatch is the reason
+# neither repo ever connected them.
+#
+# WHY GATED AND NOT OPEN. A gatus page is a rendered map of the internal network: the probe list added
+# in #109 names LAN addresses and internal service names (`home-lan-gateway`,
+# `casa-minio-backup-target`, `192.168.0.29`). "It's only a status page, leave it open" is the wrong
+# default when the page's whole content is topology. So it takes the same shared outpost as bentopdf and
+# vert-sh — mode `forward_domain` with `cookie_domain: titan.arrieta.eu`, so `host.ends_with()` matches
+# `uptime.titan.arrieta.eu` and **no authentik change is needed**. The cost is #245's cost, now with a
+# fourth consumer: admission is the `tesla` Application's group, which is semantically wrong for a
+# monitoring page and remains tracked there rather than being silently accepted here.
+#
+# `gatus` also had to be added to the Reflector allow-list in
+# `apply/40-certificates/titan-wildcard.yaml` — `titan-tls` is not reflected into a namespace that has
+# not asked for it, and copying the Secret by hand is what #221 exists to forbid.
+#
+# WHY THE MIDDLEWARE IS COPIED RATHER THAN REFERENCED. `tools/ingress-auth-check.py` rule 3 requires the
+# middleware reference to name a Middleware in the Ingress's own namespace — a cross-namespace reference
+# is a failure there, deliberately, because the bare form means "whichever namespace this Ingress happens
+# to be in", which is how a namespace move turns into a dangling reference. So `gatus` cannot point at
+# `apps/teslamate-auth`. The spec below is a copy of what authentik generates there, read off the live
+# cluster rather than guessed at:
+#
+#   address: http://authentik-server.auth.svc.cluster.local/outpost.goauthentik.io/auth/traefik
+#   maxResponseBodySize: 4194304 · trustForwardHeader: true
+#
+# **The drift this accepts:** authentik regenerates `apps/teslamate-auth` on its own schedule and this
+# copy does not follow it. If an upgrade moves that path or changes the mode, the copy breaks — and it
+# breaks **closed**: an unresolvable forwardAuth is a 403, not an open door. That asymmetry is the whole
+# reason to hand-copy an auth path rather than leave the page open. If #245 ever gives titan a
+# general-purpose application, this object is the thing to delete.
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: status-auth
+  namespace: gatus
+spec:
+  forwardAuth:
+    address: http://authentik-server.auth.svc.cluster.local/outpost.goauthentik.io/auth/traefik
+    maxResponseBodySize: 4194304
+    trustForwardHeader: true
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gatus
+  namespace: gatus
+  labels:
+    app: gatus
+spec:
+  selector:
+    app: gatus
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: gatus
+  namespace: gatus
+  annotations:
+    # Both lines are load-bearing and neither is visible to a gate: drop the entrypoint pin and the host
+    # answers on :80 unauthenticated-but-redirecting; drop the middleware and it answers openly. See the
+    # bentopdf file for the longer version of that warning.
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+    traefik.ingress.kubernetes.io/router.middlewares: gatus-status-auth@kubernetescrd
+spec:
+  ingressClassName: traefik
+  rules:
+    - host: uptime.titan.arrieta.eu
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: gatus
+                port:
+                  name: http
+  tls:
+    - hosts:
+        - uptime.titan.arrieta.eu
+      secretName: titan-tls
