@@ -104,9 +104,14 @@ So all four are answered. Three — `llm-chat`, `agent0` and `q1` — are authen
 nothing, and they retire with the box. The fourth, `uptime`, was the only one with a live workload
 behind it, and it is published at `uptime.titan.arrieta.eu`, gated.
 
-What is **not** proven is the two things #253 could not do from a read-only workspace: `make dry-run`
-against the live API server, and one browser load of the page to show the forwardAuth admits rather
-than loops. `make check-ci` passing says the tree is self-consistent, not that the host works.
+What is **not** proven is the three things #253 could not do from a read-only workspace: `make dry-run`
+against the live API server; one browser load to show the forwardAuth admits rather than loops; and —
+because gatus is a polling SPA behind the same outpost that #243 removed from both Grafanas — **leaving
+the tab open twenty minutes**, since the outpost cookie is minted only on a top-level navigation and a
+fresh cookie is exactly what a first load has. `make check-ci` passing says the tree is self-consistent,
+not that the host works, and a first load that renders green proves nothing about the tenth minute.
+`apply/50-apps/gatus/gatus.yaml` carries the reasoning and the accepted residual. Nothing probes gatus
+itself, so a blank page is also unalerted — pre-existing, and it wants a ticket.
 
 ## `bearer-auth-service`: reproduced, and the open question about it was based on a false premise
 

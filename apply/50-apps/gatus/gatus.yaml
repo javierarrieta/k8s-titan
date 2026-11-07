@@ -265,6 +265,25 @@ spec:
 # `tesla` Application's group, which is semantically wrong for a monitoring page and remains tracked
 # there rather than being silently accepted here.
 #
+# **The gate has a known cost, and it is #243's cost, not a new one.** Gatus is a Vue SPA that polls its
+# own status API (`/api/v1/endpoints/statuses`, 5m default refresh), and authentik mints the outpost
+# cookie only when a browser follows a top-level navigation through the outpost — an XHR can never
+# complete the redirect that mints one. When the cookie ages, Traefik 302s the poll, the fetch receives
+# HTML instead of JSON, and the page renders empty while the pod is healthy and a reload silently fixes
+# it. `docs/grafana-runbook.md` §10 measured the aging gaps at 588s, 364s and 987s, and removed this
+# exact Middleware from both Grafanas for exactly this reason. That exit is not available here: the
+# page's entire content is topology, so the edge gate is the only gate it has, and widening
+# `skip_path_regex` is rejected on blast radius in `docs/teslamate-runbook.md` §9 because it exempts the
+# path on every host under the apex. The accepted residual is therefore a status page that wants a
+# reload after roughly ten to fifteen idle minutes. **One browser load does not prove this works** — the
+# cookie is fresh on first load. The check that would is leaving the tab open twenty minutes and watching
+# whether the tiles go stale.
+#
+# And nothing watches the watcher. gatus probes casa and the two Home Assistant instances
+# (`apply/50-apps/home-hass/home-hass.yaml:50`) and nothing probes gatus, so a gatus pod that stops
+# serving is a blank page and no alert. Pre-existing — #109 shipped that shape — but publishing the page
+# is what makes it user-visible, and it wants a ticket rather than silence.
+#
 # `gatus` also had to be added to the Reflector allow-list in
 # `apply/40-certificates/titan-wildcard.yaml` — `titan-tls` is not reflected into a namespace that has
 # not asked for it, and copying the Secret by hand is what #221 exists to forbid.
