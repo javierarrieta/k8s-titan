@@ -13,12 +13,12 @@ KUSTOMIZE_DIRS := $(shell find apply -name kustomization.yaml 2>/dev/null | sed 
 # not be able to slip between the encryption rule and the validation glob.
 SECRET_FIND := find apply/10-secrets \( -name '*.yaml' -o -name '*.yml' \) ! -name kustomization.yaml
 
-.PHONY: check check-ci kustomize-check kustomize-listing dry-run py-deps validate update-keys scan leak-check secrets-placement secrets-list secrets-present release-secrets secret-refs ingress-auth outpost-binding-check backup-coverage db-url-check oidc-check grafana-oidc-check observability-oidc-check open-webui-oidc-check mealie-check sure-check crd-check namespace-check tesla-forwarder-test chart-values-check traefik-exposure-check update-cnpg-crds update-crds blueprint-mount-check
+.PHONY: check check-ci kustomize-check kustomize-listing dry-run py-deps validate update-keys scan leak-check secrets-placement secrets-list secrets-present release-secrets secret-refs ingress-auth tls-reflection-check outpost-binding-check backup-coverage db-url-check oidc-check grafana-oidc-check observability-oidc-check open-webui-oidc-check mealie-check sure-check crd-check namespace-check tesla-forwarder-test chart-values-check traefik-exposure-check update-cnpg-crds update-crds blueprint-mount-check
 
 # leak-check runs FIRST: make has no -k, so it stops at the first failing prerequisite.
 # validate needs the age key, so an operator who forgot SOPS_AGE_KEY_FILE would never
 # reach a leak gate placed behind it.
-check: py-deps leak-check kustomize-check kustomize-listing validate secrets-placement release-secrets secret-refs ingress-auth blueprint-mount-check outpost-binding-check backup-coverage db-url-check oidc-check grafana-oidc-check observability-oidc-check open-webui-oidc-check mealie-check sure-check crd-check namespace-check chart-values-check traefik-exposure-check tesla-forwarder-test
+check: py-deps leak-check kustomize-check kustomize-listing validate secrets-placement release-secrets secret-refs ingress-auth tls-reflection-check blueprint-mount-check outpost-binding-check backup-coverage db-url-check oidc-check grafana-oidc-check observability-oidc-check open-webui-oidc-check mealie-check sure-check crd-check namespace-check chart-values-check traefik-exposure-check tesla-forwarder-test
 	@echo "check: all offline gates passed"
 
 # The subset provable from the tree alone - no age key, no cluster, no network.
@@ -42,7 +42,7 @@ check: py-deps leak-check kustomize-check kustomize-listing validate secrets-pla
 # network is unhappy is worse than one that is not here at all.
 check-ci:
 	@rc=0; \
-	for t in py-deps leak-check kustomize-check kustomize-listing secrets-placement release-secrets secret-refs ingress-auth blueprint-mount-check outpost-binding-check backup-coverage crd-check namespace-check tesla-forwarder-test; do \
+	for t in py-deps leak-check kustomize-check kustomize-listing secrets-placement release-secrets secret-refs ingress-auth tls-reflection-check blueprint-mount-check outpost-binding-check backup-coverage crd-check namespace-check tesla-forwarder-test; do \
 	  echo "--- $$t ---"; \
 	  $(MAKE) --no-print-directory $$t || rc=1; \
 	done; \
@@ -544,6 +544,24 @@ ingress-auth:
 	  || { echo "ingress-auth: PyYAML is missing (pip install pyyaml) - refusing to report clean"; exit 1; }; \
 	{ for d in $(KUSTOMIZE_DIRS); do kubectl kustomize "$$d" || exit 1; printf -- '---\n'; done; } \
 	  | python3 tools/ingress-auth-check.py apply
+
+# tls-reflection-check: every namespace that serves TLS from a Reflector-mirrored Secret is named by
+# that Secret's allow-list, and AGENTS.md's prose copy of the list matches the annotation it quotes.
+#
+# The failure this closes is invisible in every other sense. The Ingress applies, reports Accepted, the
+# Secret simply is not in the namespace, and Traefik answers the host with its fallback certificate.
+# `make dry-run` cannot see it either, because Reflector rather than this tree creates the mirrored
+# Secret, so no API server is ever asked about the object that is missing. `sure-check` and
+# `mealie-check` each carry a private version of this rule for one app apiece, written because the
+# failure is silent; this is the rule for the whole tree. It was added when #253 had to hand-edit two
+# lists to give `gatus` the wildcard - the ninth namespace added that way, with nothing comparing them.
+tls-reflection-check:
+	@command -v python3 >/dev/null 2>&1 \
+	  || { echo "tls-reflection-check: python3 is missing - refusing to report clean"; exit 1; }; \
+	python3 -c 'import yaml' >/dev/null 2>&1 \
+	  || { echo "tls-reflection-check: PyYAML is missing (pip install pyyaml) - refusing to report clean"; exit 1; }; \
+	{ for d in $(KUSTOMIZE_DIRS); do kubectl kustomize "$$d" || exit 1; printf -- '---\n'; done; } \
+	  | python3 tools/tls-reflection-check.py .
 
 # blueprint-mount-check: every authentik blueprint this tree declares is mounted, and mounted where
 # it will actually be read.

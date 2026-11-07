@@ -34,49 +34,84 @@ Two sources, and neither one alone is enough:
 | `databasus.v.arrieta.eu` | **none — 200** | — | retired, #113 | — |
 | `tr.v.arrieta.eu` | **none — 200** | — | retired, #106 | — |
 | `kanghuru.v.arrieta.eu`, `kanghuru.es` | **none — public product** | — | parked, #111 — the domain is the blocker | #111 |
-| `uptime.v.arrieta.eu` | outpost | **?** | **UNKNOWN — see below** | nothing |
-| `llm-chat.v.arrieta.eu` | outpost | **?** | **UNKNOWN — see below** | nothing |
-| `agent0.v.arrieta.eu` | outpost | **?** | **UNKNOWN — see below** | `../k8s-techdelivery unused/agent-zero.yaml`, not applied |
-| `q1.v.arrieta.eu` | outpost | **?** | **UNKNOWN — see below** | nothing |
+| `uptime.v.arrieta.eu` | outpost | `uptime.titan` | same shared outpost, reached through a hand copy of its Middleware | `apply/50-apps/gatus/gatus.yaml`; the copy is held to the canonical by rule 6 of `tools/ingress-auth-check.py` |
+| `llm-chat.v.arrieta.eu` | outpost | — | **dead config** — `llm-chiclana` Service does not exist | see below |
+| `agent0.v.arrieta.eu` | outpost | — | **dead config** — `agent-zero` Service does not exist | `../k8s-techdelivery unused/agent-zero.yaml`, not applied |
+| `q1.v.arrieta.eu` | outpost | — | **LAN address `192.168.0.62`, unreachable** — not a cluster workload | see below |
 
 Every row that has a titan host has a named mechanism, and every row that is deliberately open is
 enforced by a gate rather than by prose. **That half of #103's done-when is met.**
 
-## The four hosts nobody has an answer for
+## The four mystery hosts — resolved, and one of them was a real gap
 
-`uptime`, `llm-chat`, `agent0` and `q1` are gated by authentik on the VPS and appear **nowhere in
-either repo** — `agent0` excepted, whose workload sits in `unused/agent-zero.yaml` and is not applied.
-Re-probed 2026-11-06, all four still answer:
+`uptime`, `llm-chat`, `agent0` and `q1` were gated by authentik on the VPS and appeared **nowhere in
+either repo**. Re-probed 2026-11-06 all four still answered `302 -> /outpost.goauthentik.io/start`, and
+**the 302 proved nothing**: the outpost gates before it proxies, so a live Application in front of a
+workload that died months ago is indistinguishable from outside. `postgresus` (#114) is the precedent.
 
-```
-uptime.v.arrieta.eu     302 -> /outpost.goauthentik.io/start
-llm-chat.v.arrieta.eu   302 -> /outpost.goauthentik.io/start
-agent0.v.arrieta.eu     302 -> /outpost.goauthentik.io/start
-q1.v.arrieta.eu         302 -> /outpost.goauthentik.io/start
-```
-
-**What the 302 proves, and what it does not.** It proves authentik holds an Application whose ingress
-covers that host — the outpost will not claim a host it does not own. It does **not** prove a backend
-exists: the outpost gates first and only then proxies to the provider's internal host, so a host whose
-application is alive and whose workload died months ago looks identical from outside. `postgresus`
-(#114) is the precedent for exactly that shape — app gone, configuration still dutifully running.
-
-So these are not four migrations to plan. They are **four questions to answer before the box is
-released**, and the only place the answer lives is authentik's database:
+The answer was in authentik's database the whole time. **The SQL first written into this file did not
+run** — the column is `internal_host`, singular, and `ProxyProvider` inherits through `OAuth2Provider`,
+so its primary key is `oauth2provider_ptr_id`, not `id` or `provider_ptr_id`. Because Django
+multi-table inheritance makes every level of the chain share one integer, the oauth2 table drops out
+entirely:
 
 ```sql
-select a.name, a.slug, p.internal_hosts
+select a.name, a.slug, p.internal_host, p.external_host
   from authentik_core_application a
-  left join authentik_providers_proxy_proxyprovider p on p.id = a.provider_id
- where a.slug in ('uptime','llm-chat','agent0','q1')
-    or p.internal_hosts ~ 'uptime|llm-chat|agent0|q1';
+  join authentik_core_provider pr                 on pr.id = a.provider_id
+  join authentik_providers_proxy_proxyprovider p on p.oauth2provider_ptr_id = pr.id
+ order by a.slug;
 ```
 
-If `internal_hosts` names a workload that is not deployed, the row is dead config and the Application
-gets deleted. If it names something live, it is a workload with no ticket and it needs one. **Nothing
-in this epic currently accounts for these four**, and switching the box off takes them with it silently
-— which is the failure mode §9 of the migration plan warns about, arriving through the auth side
-instead of the traffic side.
+That returns the entire proxy surface — nine apps, which also cross-checks the table above:
+
+| Application | `internal_host` | published as | verdict |
+|---|---|---|---|
+| Agent0 | `http://agent-zero.apps.svc` | `agent0.v` | **dead** — no such Service on the VPS cluster; manifest sits in `unused/agent-zero.yaml`, unapplied |
+| bentopdf | `http://bentopdf.apps.svc:8080` | `bentopdf.v` | migrated (#107) |
+| Gatus | `http://gatus.apps.svc` | **`uptime.v`** | live on the VPS, migrated to titan — **but see below** |
+| investing-agent | `http://investing-agent.apps.svc` | `investment-agent.v` | migrated |
+| llm-chat | `http://llm-chiclana.apps.svc` | `llm-chat.v` | **dead** — no `llm-chiclana` Service on the VPS cluster |
+| Prometheus | `http://prometheus-k8s.monitoring.svc:9090` | `prometheus.v` | retired with the box — decided in the table above: titan runs no Prometheus and casa is the alerting brain |
+| q1 | `http://192.168.0.62` | `q1.v` | **a raw LAN address, not a cluster workload** — see below |
+| tesla | `http://teslamate.apps.svc` | `tesla.v` | migrated |
+| vert | `http://vert.apps.svc` | `vert.v` | migrated (#110) |
+
+**`uptime.v.arrieta.eu` is gatus.** The hostname and the workload have different names, which is why
+neither repo connected them. Gatus is migrated and its probe list was re-derived for titan (#109), but
+**titan's gatus arrived as a ConfigMap and a Deployment and nothing else** — no Service, no Ingress —
+so it could only ever push Telegram alerts while the public status page stayed on the VPS. The workload
+survived; **the thing people actually look at did not.**
+
+**Decided 2026-11-06: publish it, gated.** `uptime.titan.arrieta.eu` now exists, with a Service and an
+Ingress in `apply/50-apps/gatus/gatus.yaml`, gated by the same shared outpost as bentopdf and vert-sh.
+Gated rather than open because **a gatus page is a rendered map of the internal network** — the probe
+list names LAN addresses and internal service names — so "it's only a status page" is the wrong default
+when the page's entire content is topology. No authentik change was needed: mode `forward_domain` with
+`cookie_domain: titan.arrieta.eu` means `host.ends_with()` matches the new host automatically. `gatus`
+was added to the Reflector allow-list so `titan-tls` reaches it. The cost is #245's cost with a fourth
+consumer: admission is the `tesla` Application's group, semantically wrong for a monitoring page, and
+still tracked there rather than quietly accepted here.
+
+**`q1` pointed at `192.168.0.62`, a LAN address rather than a cluster Service.** This workspace has a
+route to `192.168.0.0/24` — verified with `192.168.0.6:80`, a known-live control — and against that
+route `192.168.0.62` answers nothing: 100% packet loss on ICMP, no neighbour entry, and none of ports
+80/443/3000/8080/8123/11434/32400/9000/8000/5000 open. **Confirmed by the operator: it was a 3D printer,
+and it is gone.** So the measurement and the testimony agree, and `q1` is dead config that retires with
+the box — the third authentik Application pointing at nothing, alongside `agent0` and `llm-chat`.
+
+So all four are answered. Three — `llm-chat`, `agent0` and `q1` — are authentik Applications pointing at
+nothing, and they retire with the box. The fourth, `uptime`, was the only one with a live workload
+behind it, and it is published at `uptime.titan.arrieta.eu`, gated.
+
+What is **not** proven is the three things #253 could not do from a read-only workspace: `make dry-run`
+against the live API server; one browser load to show the forwardAuth admits rather than loops; and —
+because gatus is a polling SPA behind the same outpost that #243 removed from both Grafanas — **leaving
+the tab open twenty minutes**, since the outpost cookie is minted only on a top-level navigation and a
+fresh cookie is exactly what a first load has. `make check-ci` passing says the tree is self-consistent,
+not that the host works, and a first load that renders green proves nothing about the tenth minute.
+`apply/50-apps/gatus/gatus.yaml` carries the reasoning and the accepted residual. Nothing probes gatus
+itself, so a blank page is also unalerted — pre-existing, and it wants a ticket.
 
 ## `bearer-auth-service`: reproduced, and the open question about it was based on a false premise
 
@@ -193,14 +228,17 @@ wired correctly", and it is also why the personal account exists at all: somethi
 used it.
 
 **The consequence reaches titan.** `docs/authentik-runbook.md` records that titan's authentik also has
-an `akadmin`, created through the browser flow on 2026-10-05, and titan's Google login is a sops
-blueprint (`apply/10-secrets/authentik-google-blueprint.yaml`) that is mounted and checked by
-`blueprint-mount-check` — but **mounted is not working**, and the only place this failure mode has ever
-been observed is the box where it silently never worked. So before the VPS is released:
+an `akadmin`, created through the browser flow on 2026-10-05. **Titan is a different story, and the
+operator settled it on 2026-11-06:** titan is used with the Gmail account, never `akadmin`. That is
+attested, not measured — this workspace has no SQL path to titan's authentik either — but it is the
+operator's own daily login and nobody else could supply it. The residual, still unproven from here: the
+`groups` claim that Grafana, open-webui and Sure map roles from originates in that source's group
+mapping, so if the mapping were empty the symptom would be **a 403 on an app that looks healthy, not a
+red release**. The operator using those apps is the evidence; it is simply not evidence this workspace
+can check.
 
-> **Prove you can log into titan's authentik with Google, not just with `akadmin`.** Several apps —
-> Grafana, open-webui, Sure — map roles from a `groups` claim that originates in that source's group
-> mapping. If the source cannot actually authenticate, those mappings have nothing to map, and the
-> evidence would be a 403 on an app that looks healthy rather than a red release.
+What the VPS record still means: `akadmin` was the only VPS account with a real `last_login`, so
+**the VPS's last working admin credential is a bootstrap password that dies with the box.** Nothing on
+titan depends on it, but nobody should reach for it after the release.
 
 R2 remains gated on R1, because the VPS authentik's own database lives on the Postgres that R1 retires.

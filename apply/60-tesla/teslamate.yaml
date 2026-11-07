@@ -168,6 +168,12 @@ spec:
 # from X-Forwarded-Host ahead of Host (packages/ak-axum/src/extract/host.rs:13, 52-59, and
 # src/server/mod.rs:266-275), and Traefik sets that header from the original request when this is on.
 # authentik's own generator defaults it to true for the same reason (traefik_3.py:28, :144).
+#
+# A COPY EXISTS IN ANOTHER NAMESPACE. `apply/50-apps/gatus/gatus.yaml` carries a field-for-field copy of
+# this Middleware, because Traefik resolves a CRD middleware in the Ingress's own namespace and gatus is
+# not `apps`. Change this and you change the copy in the same commit — `ingress-auth` rule 6 fails the
+# build when they differ, so forgetting costs a red gate rather than a status page that 403s behind a
+# perfectly healthy login page.
 apiVersion: traefik.io/v1alpha1
 kind: Middleware
 metadata:

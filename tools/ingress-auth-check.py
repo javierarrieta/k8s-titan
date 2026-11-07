@@ -41,10 +41,18 @@ WHAT IT CHECKS, for every built `Ingress` that serves a host under APEX:
      in the clear. A dropped pin makes the reason above it a false statement. It is a failure, not a
      paragraph.
 
+Rule 6 is not per-Ingress. It walks every `forwardAuth` `Middleware` in the build and demands each one
+is the canonical outpost gate (OUTPOST_CANONICAL below), a field-for-field copy of it, or named in
+OTHER_FORWARD_AUTH with the reason it is a different endpoint. This is the gate for the hand copy in
+`apply/50-apps/gatus/gatus.yaml`: a copy that drifts is a copy that silently means something else, and
+both copies are Flux-owned, so the tree - not the live cluster - is the whole truth about them.
+
 VACUITY. It refuses to report clean when it found nothing to check - no Ingress, no apex
-Ingress, no declared Middleware, an allow-list entry that no longer matches anything, or an empty
-PIN_REQUIRED. A gate that passes on an empty set is worse than no gate, and an allow-list entry left
-behind by a deleted Ingress is a hole nobody would re-justify.
+Ingress, no declared Middleware, an allow-list entry that no longer matches anything, an empty
+PIN_REQUIRED, no canonical outpost Middleware, a forwardAuth that is neither the canonical nor declared
+in OTHER_FORWARD_AUTH, or an OTHER_FORWARD_AUTH entry that no longer matches anything. A gate that
+passes on an empty set is worse than no gate, and an allow-list entry left behind by a deleted Ingress
+is a hole nobody would re-justify.
 
 WHAT IT DOES NOT PROVE, in order of how much it matters:
 
@@ -58,6 +66,10 @@ WHAT IT DOES NOT PROVE, in order of how much it matters:
     answers 200 today. Extending the rule past the hosts whose allow-list justification depends on
     the pin would need a per-host cleartext decision for each of the others, and that is a decision
     this gate must not make by accident.
+  * Rule 6 compares the tree to itself. It proves every copy in git matches the canonical in git; it
+    cannot prove the live Middleware still matches either, because an out-of-band `kubectl edit` leaves
+    no trace here. That is the hole `make dry-run` and AGENTS.md's live-drift rule exist for, not this
+    one.
   * It does not prove a gated host is gated on every path. An `IngressRoute` or a
     `skip_path_regex` on the outpost can open a path around the middleware, and neither is
     visible from an `Ingress` annotation.
@@ -152,20 +164,23 @@ NOT_PROXY_GATED = {
 # produces, and an unpinned Ingress produces one router per entrypoint. This cluster runs no
 # HTTP->HTTPS redirect (the ports.web.http.redirections.entryPoint note in
 # apply/20-infra/traefik/traefik.yaml) and port 80 is published, so an unpinned host answers in
-# cleartext. For the seven hosts below that is not untidiness. Four of them (both Grafanas, both Home
+# cleartext. For the ten hosts below that is not untidiness. Four of them (both Grafanas, both Home
 # Assistant passthroughs) are allowed to have no proxy-side gate ONLY because the application behind
 # them authenticates on its own, and an application that authenticates over cleartext hands the session
-# - the Grafana session, the Home Assistant long-lived token - to anyone on the path. The other three
-# (llm, investing-agent, teslamate) do carry a forwardAuth, and an unpinned Ingress runs that gate on
-# :80 as well, so the outpost cookie, the hermes session, the TeslaMate session and the llm bearer token
-# travel in the clear beside the HTTPS router. Either way, delete the pin and the row above stops being a
-# true statement while this gate still prints clean, which is the exact defect this file exists to close.
+# - the Grafana session, the Home Assistant long-lived token - to anyone on the path. The other six
+# (llm, investing-agent, teslamate, bentopdf, vert-sh, gatus) do carry a forwardAuth, and an unpinned
+# Ingress runs that gate on :80 as well, so the outpost cookie, the hermes session, the TeslaMate
+# session and the llm bearer token travel in the clear beside the HTTPS router. Either way, delete the
+# pin and the row above stops being a true statement while this gate still prints clean, which is the
+# exact defect this file exists to close.
 #
-# WHY ONLY SEVEN. The other apex hosts are unpinned today (coder, open-webui, opencloud, collabora,
+# WHY ONLY TEN. The other apex hosts are unpinned today (coder, open-webui, opencloud, collabora,
 # mealie, and the two tesla protocol hosts whose paths have to answer for Tesla's own fetches) and each
 # needs its own cleartext decision, made on its own evidence. Demanding the pin everywhere would either
 # fail on all of them or get widened into a skip list, and either outcome teaches the next person to
-# distrust the gate.
+# distrust the gate. bentopdf, vert-sh and gatus joined this set on 2026-11-06 rather than joining the
+# unpinned list above, because all three already pin websecure in git: a pin that is already there and
+# asserted by nothing is a pin the next person deletes on the assumption that nothing reads it.
 PIN_REQUIRED = {
     ("observability", "grafana"): "its NOT_PROXY_GATED row says authentik OIDC in-app is the gate; "
                                   "GF_AUTH_BASIC_ENABLED is also true, so an unpinned router serves "
@@ -189,6 +204,34 @@ PIN_REQUIRED = {
     ("apps", "home-assistant-chiclana-ingress"): "same decision and same reasoning as "
                                                  "home-assistant-home-ingress (issue #112; "
                                                  "apply/50-apps/chiclana-hass/chiclana-hass.yaml)",
+    ("apps", "bentopdf"): "forward-auth to the shared outpost and nothing else on the host, so unpinned "
+                          "the outpost cookie travels in the clear on the :80 router beside the gated "
+                          "HTTPS one (apply/50-apps/bentopdf/bentopdf.yaml)",
+    ("apps", "vert-sh"): "same shape as apps/bentopdf above: forward-auth to the shared outpost and no "
+                         "other credential (apply/50-apps/vert-sh/vert-sh.yaml)",
+    ("gatus", "gatus"): "same shape again, and what it protects is a rendered map of the internal "
+                        "network, so its session is worth having (apply/50-apps/gatus/gatus.yaml)",
+}
+
+# The canonical outpost forwardAuth, and the rule for every other one in the build.
+#
+# WHY A COPY NEEDS A GATE AT ALL. `apply/50-apps/gatus/gatus.yaml` carries a hand copy of
+# `apps/teslamate-auth` because Traefik resolves a CRD middleware in the Ingress's own namespace and
+# `gatus` is not `apps`. The original is NOT generated by authentik - Flux owns it (measured
+# 2026-11-06: no ownerReferences, `kustomize.toolkit.fluxcd.io/name=tesla`) and
+# `apply/60-tesla/teslamate.yaml:172` is its source of truth - so the only way the two diverge is a
+# commit, and a commit is exactly what a gate here can catch. `trustForwardHeader` is the field that
+# matters most: the embedded outpost picks the provider from X-Forwarded-Host, so a copy that loses it
+# stops resolving the host and every consumer of the shared outpost 403s behind a healthy-looking
+# login page.
+OUTPOST_CANONICAL = ("apps", "teslamate-auth")
+
+# forwardAuth Middlewares deliberately NOT the outpost, each with the reason it is a different
+# endpoint. An entry here is a decision, so an entry that matches nothing fails.
+OTHER_FORWARD_AUTH = {
+    ("llm", "bearer-auth"): "the hermes bearer-token gate: a throwaway nginx rather than the authentik "
+                            "outpost, so it shares no fields with the canonical "
+                            "(apply/50-apps/llm/llm.yaml)",
 }
 
 
@@ -260,6 +303,43 @@ def main():
     allow_used = set()
     pin_used = set()
     apex_count = 0
+
+    # Rule 6: every forwardAuth in the build is the canonical outpost gate, a field-for-field copy of
+    # it, or declared in OTHER_FORWARD_AUTH as a deliberately different endpoint.
+    canonical = middlewares.get(OUTPOST_CANONICAL)
+    canonical_fa = ((canonical.get("spec") or {}).get("forwardAuth") or {}) if canonical else {}
+    forward_auth_keys = {(ns, name) for (ns, name), doc in middlewares.items()
+                         if (doc.get("spec") or {}).get("forwardAuth")}
+    copies = []
+    if canonical is None:
+        failures.append(f"no Middleware {OUTPOST_CANONICAL[0]}/{OUTPOST_CANONICAL[1]} in the build - it is "
+                        "the canonical outpost forwardAuth that every copy is compared against, so rule 6 "
+                        "cannot pass vacuously by renaming it")
+    elif not canonical_fa:
+        failures.append(f"Middleware {OUTPOST_CANONICAL[0]}/{OUTPOST_CANONICAL[1]} declares no forwardAuth, "
+                        "so there is nothing for rule 6 to compare copies against")
+    for (ns, name), doc in sorted(middlewares.items()):
+        fa = (doc.get("spec") or {}).get("forwardAuth")
+        if not fa or not canonical_fa:
+            continue  # not a forwardAuth, or no canonical to compare against (already failed)
+        if (ns, name) == OUTPOST_CANONICAL or (ns, name) in OTHER_FORWARD_AUTH:
+            continue
+        if fa.get("address") != canonical_fa.get("address"):
+            failures.append(f"Middleware {ns}/{name} is a forwardAuth that is neither the canonical outpost "
+                            f"gate nor named in OTHER_FORWARD_AUTH; its address is {fa.get('address')!r}. "
+                            "Either it is a different endpoint and needs an entry there with a reason, or "
+                            "it is a copy and its address is wrong")
+            continue
+        copies.append((ns, name))
+        for field in sorted(set(canonical_fa) | set(fa)):
+            if fa.get(field) != canonical_fa.get(field):
+                failures.append(f"Middleware {ns}/{name} is a hand copy of "
+                                f"{OUTPOST_CANONICAL[0]}/{OUTPOST_CANONICAL[1]} but {field} differs: "
+                                f"{fa.get(field)!r} against {canonical_fa.get(field)!r}. Both are "
+                                "Flux-owned, so fix the copy in git or record why they should differ")
+    for ns, name in sorted(set(OTHER_FORWARD_AUTH) - forward_auth_keys):
+        failures.append(f"OTHER_FORWARD_AUTH names {ns}/{name}, which no longer matches any forwardAuth "
+                        "Middleware in the build; delete the entry or say why it came back")
 
     for doc in ingresses:
         meta = doc.get("metadata") or {}
@@ -334,7 +414,8 @@ def main():
     unused = len(NOT_PROXY_GATED) - len(allow_used)
     print(f"ingress-auth: {apex_count} apex Ingress object(s) scanned; {gated} gated by a resolvable "
           f"forwardAuth middleware, {len(allow_used)} allow-listed as deliberately not proxy-gated, "
-          f"{len(pin_used)} pinned to websecure where the admission story depends on it"
+          f"{len(pin_used)} pinned to websecure where the admission story depends on it, "
+          f"{len(copies)} hand copy(ies) of the outpost forwardAuth all matching the canonical"
           + (f", {unused} allow-list entry(ies) for non-apex Ingresses" if unused else ""))
     for note in notes:
         print(f"  {note}")

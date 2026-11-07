@@ -1,12 +1,19 @@
 #!/usr/bin/env python3
 """outpost-binding-check: the outpost's own admission set, asserted instead of described.
 
-WHY THIS EXISTS. Since #242 and #246 removed the forwardAuth Middleware from both Grafanas, exactly
-one host is still gated by this outpost for group membership: `tesla.titan.arrieta.eu`. Its own login
-is Tesla's OAuth (`TESLA_AUTH_HOST=auth.tesla.com`), which proves a person signed in and proves
-nothing about whether that person belongs to this household, so the outpost's application bindings are
-the ONLY thing between that host and anyone who can produce a Tesla account. `apply/60-tesla/
-teslamate.yaml` and `docs/teslamate-runbook.md` §9 both say that in as many words.
+WHY THIS EXISTS. The outpost has one proxy provider, `forward_domain` over `titan.arrieta.eu`, so it
+resolves EVERY host under the apex that points a forwardAuth at it to the `tesla` Application — today
+`tesla`, `vert`, `bentopdf`, `investing-agent` and, from #253, `uptime`. That host set is recorded in
+`apply/50-apps/auth/tesla-outpost-blueprint.yaml`, which is also where its justification is argued, and
+this gate asserts the bindings and never the host set. The split is deliberate: the sentence this
+paragraph used to carry — "exactly one host is still gated by this outpost" — was already false when it
+was written, because a list kept in three files goes stale in two of them.
+
+The claim this gate is for is narrower, and it is about `tesla.titan.arrieta.eu` alone. Its own login is
+Tesla's OAuth (`TESLA_AUTH_HOST=auth.tesla.com`), which proves a person signed in and proves nothing
+about whether that person belongs to this household, so the outpost's application bindings are the ONLY
+thing between that host and anyone who can produce a Tesla account. `apply/60-tesla/teslamate.yaml` and
+`docs/teslamate-runbook.md` §9 both say that in as many words.
 
 Nothing proved it. `make grafana-oidc-check` asserts the exact binding set for the two Grafana
 applications — and deliberately so, because those bindings became the whole gate when their edge gate
