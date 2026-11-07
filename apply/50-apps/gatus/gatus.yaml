@@ -52,9 +52,21 @@ data:
           - "[STATUS] == 200"
           # The cert path is otherwise unmonitored end to end: a `Certificate` can be `Ready` while
           # Reflector has no Secret in the consuming namespace, and `secretTemplate` allow-list
-          # omissions fail silently. 720h is 30 days — the wildcard renews at roughly two thirds of
-          # its lifetime, so this only fires when a renewal has actually failed more than once.
-          - "[CERTIFICATE_EXPIRATION] < 720h"
+          # omissions fail silently.
+          #
+          # THIS CONDITION WAS INVERTED, and it is written down because it is the single most
+          # instructive bug this file has carried. It read `[CERTIFICATE_EXPIRATION] < 720h`, which
+          # passes only when the certificate expires WITHIN 30 days. Gatus conditions describe the
+          # HEALTHY state -- the upstream example is `> 48h`, "must not expire in the next 48 hours"
+          # -- so as written this endpoint was DOWN every minute it had a healthy certificate, which
+          # is to say always: measured 2026-11-07 the wildcard had 1317h (54.9 days) left, and 1317
+          # is not < 720. The comment justified the wrong operator by reasoning about when a renewal
+          # failure would fire, never about which side of the comparison the healthy state lives on.
+          #
+          # Why nobody saw it: no alert from this Deployment has ever been observed arriving (see the
+          # delivery note at the foot of this ConfigMap). A monitor that cannot deliver reports its
+          # own failure as silence. 120h matches the bound already used in ../k8s-casa.
+          - "[CERTIFICATE_EXPIRATION] > 120h"
         alerts:
           - type: telegram
             failure-threshold: 3
@@ -72,7 +84,8 @@ data:
           timeout: 10s
         conditions:
           - "[STATUS] == 200"
-          - "[CERTIFICATE_EXPIRATION] < 720h"
+          # Same inverted operator as `hass-home-public`; see the record there.
+          - "[CERTIFICATE_EXPIRATION] > 120h"
         alerts:
           - type: telegram
             failure-threshold: 3
@@ -165,6 +178,475 @@ data:
             failure-threshold: 3
             send-on-resolved: true
 
+      # ================================================================================================
+      # TITAN'S OWN PUBLIC HOSTS -- added 2026-11-07, measured from a pod on this cluster the same day.
+      #
+      # WHAT A HAIRPIN PROBE PROVES, AND WHAT IT DOES NOT. These targets resolve to titan's own public
+      # address and come back, so each one exercises DNS -> public NIC -> Traefik -> TLS -> app, which
+      # is the user's whole path. What they cannot do is report that titan is down: the prober dies with
+      # the box. That gap is closed from the other side by `titan auth` and `titan k8s api` in
+      # ../k8s-casa apply/50-apps/casa/gatus.yaml, which watch titan from a box that is not titan.
+      # Reading this list without that pairing reads as more coverage than there is.
+      #
+      # WHY EVERY CONDITION HERE WAS MEASURED BEFORE BEING WRITTEN. Six of the eighteen public hostnames
+      # answer something other than 200 to an unauthenticated client, and a `[STATUS] == 200` written
+      # from habit on any of them is a permanent DOWN -- the exact failure the cert condition above
+      # carried. The ones NOT probed and why:
+      #
+      #   - `tesla`, `vert`, `bentopdf`, `investing-agent`, `uptime` are forwardAuth-gated. Traefik runs
+      #     the forwardAuth BEFORE proxying to the backend, so an unauthenticated probe gets authentik's
+      #     login page at HTTP 200 and proves nothing about the app behind it. The starkest form of
+      #     this: `uptime.titan.arrieta.eu/api/v1/endpoints/statuses` -- gatus's own status API --
+      #     answers 200 with an HTML login page to an unauthenticated caller. Five probes written the
+      #     obvious way would have sat green over five dead apps, which is worse than no probe.
+      #     `titan-auth-frontdoor` below is what those five genuinely do prove, so it is written once.
+      #   - `llm` answers 401 without the bearer token. Provable later via `client.headers` off the
+      #     existing Secret; the backend is already covered by `casa-halogen-llm`.
+      #   - `sure` has no health path found (`/api/health` and `/health` both 404); `/` serves the app
+      #     shell, which is a thin but honest claim, so it is probed on `/`.
+      #
+      # THE CERT CONDITION IS ON EVERY HTTPS PROBE ON PURPOSE. One wildcard covers seventeen of these
+      # hosts, so a failed renewal is not one outage but seventeen, and until now exactly two probes
+      # looked at it.
+      #
+      # WHY THIS URL AND NOT A HEALTH ENDPOINT. Authentik is the single point of failure behind five
+      # forwardAuth hosts and five OIDC apps and nothing probed it. Its health paths are not reachable
+      # unauthenticated -- `/api/-/health/live`, `/api/-/health/ready`, `/-/health/` and
+      # `/api/v3/inf/health/` all 404 -- and the login-flow URL 404s when requested directly, answering
+      # 200 only as the tail of a redirect carrying `?next=`. The OIDC discovery endpoint is both the
+      # provable URL and the stronger claim: it needs the web process, a live Postgres (the app registry
+      # is in the DB), the provider and the application to all answer. The issuer condition ties the body
+      # to authentik rather than to anything answering 200. Six apps sit behind it, all measured 200:
+      # coder, open-webui, sure, mealie, tesla, opencloud.
+      - name: titan-auth-frontdoor
+        group: titan
+        url: https://auth.titan.arrieta.eu/application/o/coder/.well-known/openid-configuration
+        interval: 1m
+        client:
+          timeout: 10s
+        conditions:
+          - "[STATUS] == 200"
+          - "[BODY].issuer == \"https://auth.titan.arrieta.eu/application/o/coder/\""
+          - "[CERTIFICATE_EXPIRATION] > 120h"
+        alerts:
+          - type: telegram
+            failure-threshold: 3
+            send-on-resolved: true
+
+      - name: titan-coder
+        group: titan
+        url: https://coder.titan.arrieta.eu/api/version
+        interval: 1m
+        client:
+          timeout: 10s
+        conditions:
+          - "[STATUS] == 200"
+          - "[CERTIFICATE_EXPIRATION] > 120h"
+        alerts:
+          - type: telegram
+            failure-threshold: 3
+            send-on-resolved: true
+
+      # `files` is probed because it is user-facing, not because it is safe: opencloud's blob bucket has
+      # no backup of any kind (docs/superpowers/specs/2026-10-22-titan-restic-pv-backups-design.md), so
+      # this probe says whether the front door is up and says nothing about recoverability.
+      - name: titan-files
+        group: titan
+        url: https://files.titan.arrieta.eu/
+        interval: 1m
+        client:
+          timeout: 10s
+        conditions:
+          - "[STATUS] == 200"
+          - "[CERTIFICATE_EXPIRATION] > 120h"
+        alerts:
+          - type: telegram
+            failure-threshold: 3
+            send-on-resolved: true
+
+      - name: titan-mealie
+        group: titan
+        url: https://meals.titan.arrieta.eu/
+        interval: 5m
+        client:
+          timeout: 10s
+        conditions:
+          - "[STATUS] == 200"
+          - "[CERTIFICATE_EXPIRATION] > 120h"
+        alerts:
+          - type: telegram
+            failure-threshold: 3
+            send-on-resolved: true
+
+      - name: titan-open-webui
+        group: titan
+        url: https://open-webui.titan.arrieta.eu/health
+        interval: 1m
+        client:
+          timeout: 10s
+        conditions:
+          - "[STATUS] == 200"
+          - "[CERTIFICATE_EXPIRATION] > 120h"
+        alerts:
+          - type: telegram
+            failure-threshold: 3
+            send-on-resolved: true
+
+      # Grafana's /api/health says the process is up. It does NOT say the datasource over the mesh
+      # answers -- docs/grafana-runbook.md records that a datasource outage empties every panel with
+      # the pod healthy, and that is a different probe or it is nothing.
+      - name: titan-grafana
+        group: titan
+        url: https://grafana.titan.arrieta.eu/api/health
+        interval: 1m
+        client:
+          timeout: 10s
+        conditions:
+          - "[STATUS] == 200"
+          - "[CERTIFICATE_EXPIRATION] > 120h"
+        alerts:
+          - type: telegram
+            failure-threshold: 3
+            send-on-resolved: true
+
+      - name: titan-collabora
+        group: titan
+        url: https://collabora.titan.arrieta.eu/
+        interval: 5m
+        client:
+          timeout: 10s
+        conditions:
+          - "[STATUS] == 200"
+          - "[CERTIFICATE_EXPIRATION] > 120h"
+        alerts:
+          - type: telegram
+            failure-threshold: 3
+            send-on-resolved: true
+
+      - name: titan-sure
+        group: titan
+        url: https://sure.titan.arrieta.eu/
+        interval: 5m
+        client:
+          timeout: 10s
+        conditions:
+          - "[STATUS] == 200"
+          - "[CERTIFICATE_EXPIRATION] > 120h"
+        alerts:
+          - type: telegram
+            failure-threshold: 3
+            send-on-resolved: true
+
+      # Earns its place twice. The cert here is `tesla-streaming-tls`, NOT the wildcard, because the
+      # Erlang stream client rejects wildcard SANs (apply/40-certificates/tesla-streaming.yaml). So a
+      # cert probe on this host also catches anyone "simplifying" it back to the wildcard -- the one
+      # edit that would look like a cleanup and break every car coming online.
+      - name: titan-streaming
+        group: titan
+        url: https://streaming.titan.arrieta.eu/
+        interval: 5m
+        client:
+          timeout: 10s
+        conditions:
+          - "[STATUS] == 200"
+          - "[CERTIFICATE_EXPIRATION] > 120h"
+        alerts:
+          - type: telegram
+            failure-threshold: 3
+            send-on-resolved: true
+
+      # ================================================================================================
+      # THE VPS, WATCHED FROM A PUBLIC BOX -- transitional, and built to be deleted as one block.
+      #
+      # These six endpoints were deleted from ../k8s-casa rather than duplicated, and the reason is the
+      # vantage point. Casa probes the WAN from a residential ISP; titan holds a routable public IPv4.
+      # Only the second can honestly test inbound SMTP :25 and MX reachability -- a home ISP is not that
+      # claim, and two of casa's six VPS probes were already pointing at `vps.techdelivery.es`, which
+      # has no A record.
+      #
+      # THE BOX IS BEING DRAINED, NOT RETIRED, and the difference is the whole reason this block exists.
+      # Measured 2026-11-07 it is carrying live traffic: every host answers, mail's MX still resolves to
+      # this box, and `uptime.v.arrieta.eu` still serves the old gatus. "Drained" is a direction, not a
+      # state. The box's address is deliberately not written here -- leak-check allows exactly one
+      # concrete public IPv4 (titan's own) and this is not it.
+      #
+      # WHEN THE BOX GOES: delete this whole group in one commit. It is kept contiguous for exactly that
+      # reason, so decommissioning is a deletion rather than an archaeological dig.
+      #
+      # NOT PROBED HERE: `hass.v.arrieta.eu` answers HTTP 400 today -- the third instance of the
+      # `trusted_proxies` failure this file already documents twice. Probing it would be a permanent
+      # DOWN; fix the box first. `llm.v` answers 401.
+      - name: vps-smtp-25
+        group: vps
+        url: starttls://mail.techdelivery.es:25
+        interval: 5m
+        client:
+          timeout: 10s
+        conditions:
+          - "[CONNECTED] == true"
+        alerts:
+          - type: telegram
+            failure-threshold: 3
+            send-on-resolved: true
+
+      - name: vps-submission-587
+        group: vps
+        url: starttls://mail.techdelivery.es:587
+        interval: 5m
+        client:
+          timeout: 10s
+        conditions:
+          - "[CONNECTED] == true"
+          - "[CERTIFICATE_EXPIRATION] > 120h"
+        alerts:
+          - type: telegram
+            failure-threshold: 3
+            send-on-resolved: true
+
+      - name: vps-imaps-993
+        group: vps
+        url: tls://mail.techdelivery.es:993
+        interval: 5m
+        client:
+          timeout: 10s
+        conditions:
+          - "[CONNECTED] == true"
+          - "[CERTIFICATE_EXPIRATION] > 120h"
+        alerts:
+          - type: telegram
+            failure-threshold: 3
+            send-on-resolved: true
+
+      - name: vps-smtps-465
+        group: vps
+        url: tls://smtp.techdelivery.es:465
+        interval: 5m
+        client:
+          timeout: 10s
+        conditions:
+          - "[CONNECTED] == true"
+        alerts:
+          - type: telegram
+            failure-threshold: 3
+            send-on-resolved: true
+
+      - name: vps-pop3s-995
+        group: vps
+        url: tls://mail.techdelivery.es:995
+        interval: 5m
+        client:
+          timeout: 10s
+        conditions:
+          - "[CONNECTED] == true"
+        alerts:
+          - type: telegram
+            failure-threshold: 3
+            send-on-resolved: true
+
+      # The MX claim, or rather the honest version of it. What this CAN see is a zone that stopped
+      # serving MX for the domain at all -- the shape left behind by DNS damage during a half-finished
+      # migration off the box. What it CANNOT see is an MX that still resolves but points somewhere
+      # else: gatus exposes only [DNS_RCODE] and [BODY] on DNS endpoints, and asserting the exact MX
+      # string was not measured, so this file does not claim it. A box that answers SMTP while its
+      # domain's MX points elsewhere is a mail outage this probe calls healthy.
+      - name: vps-mx
+        group: vps
+        url: 1.1.1.1
+        interval: 15m
+        client:
+          timeout: 10s
+        dns:
+          query-name: techdelivery.es
+          query-type: MX
+        conditions:
+          - "[DNS_RCODE] == NOERROR"
+        alerts:
+          - type: telegram
+            failure-threshold: 3
+            send-on-resolved: true
+
+      - name: vps-ssh
+        group: vps
+        url: tcp://techdelivery.es:13491
+        interval: 1m
+        client:
+          timeout: 5s
+        conditions:
+          - "[CONNECTED] == true"
+        alerts:
+          - type: telegram
+            failure-threshold: 3
+            send-on-resolved: true
+
+      - name: vps-auth
+        group: vps
+        url: https://auth.v.arrieta.eu/
+        interval: 5m
+        client:
+          timeout: 10s
+        conditions:
+          - "[STATUS] == 200"
+          - "[CERTIFICATE_EXPIRATION] > 120h"
+        alerts:
+          - type: telegram
+            failure-threshold: 3
+            send-on-resolved: true
+
+      - name: vps-trading-reports
+        group: vps
+        url: https://tr.v.arrieta.eu/
+        interval: 5m
+        client:
+          timeout: 10s
+        conditions:
+          - "[STATUS] == 200"
+        alerts:
+          - type: telegram
+            failure-threshold: 3
+            send-on-resolved: true
+
+      - name: vps-databasus
+        group: vps
+        url: https://databasus.v.arrieta.eu/
+        interval: 5m
+        client:
+          timeout: 10s
+        conditions:
+          - "[STATUS] == 200"
+        alerts:
+          - type: telegram
+            failure-threshold: 3
+            send-on-resolved: true
+
+      - name: vps-kanghuru
+        group: vps
+        url: https://kanghuru.v.arrieta.eu/
+        interval: 5m
+        client:
+          timeout: 10s
+        conditions:
+          - "[STATUS] == 200"
+        alerts:
+          - type: telegram
+            failure-threshold: 3
+            send-on-resolved: true
+
+      - name: vps-grafana
+        group: vps
+        url: https://grafana.v.arrieta.eu/api/health
+        interval: 5m
+        client:
+          timeout: 10s
+        conditions:
+          - "[STATUS] == 200"
+        alerts:
+          - type: telegram
+            failure-threshold: 3
+            send-on-resolved: true
+
+      - name: vps-openwebui
+        group: vps
+        url: https://openwebui.v.arrieta.eu/health
+        interval: 5m
+        client:
+          timeout: 10s
+        conditions:
+          - "[STATUS] == 200"
+        alerts:
+          - type: telegram
+            failure-threshold: 3
+            send-on-resolved: true
+
+      # ================================================================================================
+      # THE MESH, FROM THE HUB'S SEAT. Titan is the WireGuard hub, so these probes are about titan's
+      # own forwarding and routing, which no other box can observe. Every one is TCP or HTTP, never ICMP:
+      # the #109 rule still holds that a pod which cannot prove it can send ICMP is a false-alarm
+      # generator, and this Deployment still declares no securityContext.
+      #
+      # NOT PROBED: the OPNsense peer at 192.168.133.2. Every port tried from a pod timed out, so there
+      # is no provable probe for it; `home-lan-gateway` above already traverses that peer, which is the
+      # claim anyone would have wanted from .2 in the first place.
+      - name: mesh-chiclana
+        group: mesh
+        url: tcp://192.168.133.3:9100
+        interval: 1m
+        client:
+          timeout: 5s
+        conditions:
+          - "[CONNECTED] == true"
+        alerts:
+          - type: telegram
+            failure-threshold: 3
+            send-on-resolved: true
+
+      # The techdelivery VPS as a mesh leaf. This peer exists for the leaf -> titan -> VPS path and
+      # nothing else (nixos-configurations hosts/titan/configuration.nix), so a probe on the mesh
+      # address is the only thing that tests the reason it is there. 13491 was proven open from a pod;
+      # 22 on the same address times out, so it is not the port to use.
+      - name: mesh-vps-leaf
+        group: mesh
+        url: tcp://192.168.133.5:13491
+        interval: 1m
+        client:
+          timeout: 5s
+        conditions:
+          - "[CONNECTED] == true"
+        alerts:
+          - type: telegram
+            failure-threshold: 3
+            send-on-resolved: true
+
+      # The etcd snapshot WRITE PATH, which is not the same claim as `casa-minio-backup-target` above.
+      # That one is MinIO on the LAN at 192.168.0.6:9000. k3s writes its snapshots to
+      # `s3.l.arrieta.eu` over 443 -- public DNS, casa's Traefik, a certificate, path-style bucket
+      # lookup -- so the two fail independently, and only this one can fail because of a DNS or
+      # ingress change. hosts/titan/vars.nix records four separate defects that lived in exactly this
+      # endpoint string, and k3s reports a bad one SILENTLY in the server.
+      #
+      # What it still does not prove: that a snapshot RAN. That rule is a Prometheus alert on snapshot
+      # age and lives in ../k8s-casa (TitanEtcdSnapshotStale and friends), not here.
+      - name: casa-s3-etcd-path
+        group: mesh
+        url: https://s3.l.arrieta.eu/minio/health/live
+        interval: 5m
+        client:
+          timeout: 10s
+        conditions:
+          - "[STATUS] == 200"
+        alerts:
+          - type: telegram
+            failure-threshold: 3
+            send-on-resolved: true
+
+      # The apex A record itself. Every HTTPS probe above fails after this breaks, and each fails in a
+      # way that looks like its own outage; a DNS probe is the one that names the cause.
+      #
+      # THE SYNTAX WAS GOT WRONG FIRST AND IS RECORDED SO IT IS NOT REPEATED: `url` on a DNS endpoint is
+      # the RESOLVER address bare (`1.1.1.1`), not `dns://1.1.1.1` -- there is no dns:// scheme, and the
+      # query answer comes back in `[BODY]`, not a `[DNS_ANSWER]` placeholder, which does not exist.
+      # Asserting the answer rather than only NOERROR is the point: a record that resolves to anything
+      # else is a hijack or a migration half-applied, and both answer NOERROR.
+      #
+      # THE BRITTLE HALF, stated plainly: 37.187.159.156 is hardcoded, so a deliberate IP change needs
+      # this edited in the same commit. That is the feature. A monitor that silently follows a moved
+      # record is a monitor that cannot see the move.
+      - name: dns-titan-apex
+        group: dns
+        url: 1.1.1.1
+        interval: 15m
+        client:
+          timeout: 10s
+        dns:
+          query-name: titan.arrieta.eu
+          query-type: A
+        conditions:
+          - "[DNS_RCODE] == NOERROR"
+          - "[BODY] == 37.187.159.156"
+        alerts:
+          - type: telegram
+            failure-threshold: 3
+            send-on-resolved: true
+
       # DROPPED FROM THE VPS SET, with the reason rather than silence: `icmp://192.168.0.5` is the home
       # HA box, and `hass-home-public` above covers it through the whole user path (DNS -> Traefik ->
       # TLS -> HA) rather than just the box; `icmp://192.168.0.6` is casa, now covered by the MinIO
@@ -186,10 +668,21 @@ data:
       #
       # It targets a host known to be healthy, so the only thing that can fail is the alert path.
       #
-      # STILL NOT DONE, unchanged from before: the other public hostnames are unprobed, and a *stale*
-      # backup — one that silently stopped running rather than one whose target is down — is still not
-      # alerted on from anywhere. That rule needs casa's Prometheus and lives in k8s-casa.
-      # `apply/70-backup/`'s own header is the record of that gap.
+      # STILL NOT DONE, rewritten 2026-11-07 because the previous version of this paragraph was itself
+      # stale -- it claimed a *stale* backup was "not alerted on from anywhere", which commit 2ef8df8
+      # had already made false everywhere else in the repo and this file missed. Current state:
+      #
+      #   - Public hostnames: probed above, with the forwardAuth exception written into the header
+      #     there. The five gated hosts remain unprobed AS APPS and that is not fixable by adding a
+      #     probe; it needs an authenticated probe or an unauthenticated health path per app.
+      #   - Stale backups: alerting EXISTS and lives in ../k8s-casa (TitanBackupJobFailed,
+      #     TitanBackupVolumeStale at 26h, and the absent() guard on the discovery loops). It has been
+      #     observed firing in production, 2026-11-04, on a stale restic lock. Not this file's gap.
+      #   - Telegram delivery: still owed, and it is the one above that gates trusting anything else
+      #     here. The cert-condition bug sat invisible for exactly as long as delivery was unproven.
+      #   - Titan watching titan: closed from the other side, not from here. See `titan auth` and
+      #     `titan k8s api` in ../k8s-casa apply/50-apps/casa/gatus.yaml. Nothing added to this file
+      #     can ever report that titan itself is down.
 ---
 apiVersion: apps/v1
 kind: Deployment
