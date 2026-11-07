@@ -227,7 +227,15 @@ data:
           timeout: 10s
         conditions:
           - "[STATUS] == 200"
-          - "[BODY].issuer == \"https://auth.titan.arrieta.eu/application/o/coder/\""
+          # UNQUOTED ON PURPOSE. Gatus compares the right-hand side as a literal string including any
+          # quote characters, so `== \"https://...\"` expects a value that literally begins with a `\"`
+          # and never matches. The failure message is the trap: it prints the resolved value and the
+          # expected value looking byte-identical, which reads like a gatus bug rather than like quotes
+          # being part of the literal. Every documented example in the gatus README writes the literal
+          # bare, and the two other `[BODY]` conditions in this file -- `[BODY].status == UP` and
+          # `[BODY] == 37.187.159.156` -- are bare and pass. This was the only quoted one, and the only
+          # failing condition on the first run the probe set ever had.
+          - "[BODY].issuer == https://auth.titan.arrieta.eu/application/o/coder/"
           - "[CERTIFICATE_EXPIRATION] > 120h"
         alerts:
           - type: telegram
