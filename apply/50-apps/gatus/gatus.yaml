@@ -809,6 +809,12 @@ spec:
     metadata:
       labels:
         app: gatus
+      annotations:
+        # Restart on ConfigMap change. Gatus hot-reloads a config file it can see change, but this
+        # mount is the deterministic path and it is the pattern this repo already uses everywhere else
+        # a ConfigMap is the whole of an app's behaviour. Without a restart mechanism a ConfigMap edit
+        # can sit applied-and-ignored, which is the failure this Deployment is already famous for.
+        reloader.stakater.com/auto: "true"
     spec:
       containers:
         - name: gatus
@@ -829,6 +835,11 @@ spec:
                 secretKeyRef:
                   name: gatus-telegram
                   key: TELEGRAM_BOT_ID
+            # Gatus reads `config/config.yaml` relative to its working directory unless told otherwise,
+            # and the WORKDIR of the upstream image is not something this manifest should have to trust.
+            # Naming the absolute path is what makes the mount below provable rather than hopeful.
+            - name: GATUS_CONFIG_PATH
+              value: /config/config.yaml
           resources:
             requests:
               cpu: 25m
@@ -848,6 +859,32 @@ spec:
               port: http
             periodSeconds: 30
             failureThreshold: 3
+          volumeMounts:
+            # THE MOUNT THAT WAS MISSING. Until 2026-11-19 this Deployment had no `volumes` and no
+            # `volumeMounts` at all: the `gatus-config` ConfigMap was built, applied, listed in the
+            # stage kustomization, reviewed, and never read by the container. Gatus falls back to the
+            # example config shipped in the image when its config file is absent, so the pod monitored
+            # `front-end`, `back-end`, `icmp-ping`, `nas`, `monitoring`, `check-domain-expiration` and
+            # `example-dns-query` -- gatus's own demo endpoints -- for the entire life of the
+            # Deployment.
+            #
+            # Nothing downstream noticed, and that is the part to keep. `/health` returns
+            # {"status":"UP"} from the HTTP server regardless of which config loaded, so readiness and
+            # liveness were green; the status page rendered; the Ingress served; and not one real probe
+            # had ever run. Every claim this file makes about what titan watches was, until the mount
+            # landed, a claim about a file Flux keeps current and nothing reads.
+            #
+            # Mounted as a directory, not a subPath: a subPath mount is never refreshed when the
+            # ConfigMap changes, so it would have reintroduced the same applied-and-ignored shape in a
+            # subtler form. With a directory mount kubelet repoints the file and gatus hot-reloads; the
+            # Reloader annotation above is the deterministic backstop.
+            - name: config
+              mountPath: /config
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: gatus-config
 ---
 # The status page, published.
 #
