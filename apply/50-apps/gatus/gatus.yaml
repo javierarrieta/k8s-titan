@@ -765,6 +765,51 @@ data:
             failure-threshold: 3
             send-on-resolved: true
 
+      # ================================================================================================
+      # TEMPORARY. DELETE THIS PROBE ONCE THE MESSAGE IS CONFIRMED IN TELEGRAM.
+      #
+      # THE LAST UNPROVEN LINK, and the one #109 left open: the Secret is wired, the token and chat id
+      # are in the pod, and "wired" is what a monitor says right up until the first outage it misses.
+      # This probe exists only to fail, so the only thing that can be tested is the delivery path.
+      #
+      # WHY IT WILL FIRE ON THE FIRST CHECK RATHER THAN THE SECOND. Read from v5.37.0 itself,
+      # `watchdog/alerting.go`, because assuming this is how you end up waiting ten minutes for nothing
+      # and concluding the alert path is broken:
+      #
+      #     if !endpointAlert.IsEnabled() || endpointAlert.FailureThreshold > ep.NumberOfFailuresInARow {
+      #         continue
+      #     }
+      #     sendInitialAlert := !endpointAlert.Triggered
+      #
+      # There is no requirement of a prior UP state. First failure sets NumberOfFailuresInARow to 1,
+      # `1 > 1` is false so it proceeds, and Triggered is false so the initial alert sends. With
+      # `failure-threshold: 1` the message should arrive within one interval of the reconcile.
+      #
+      # TARGET CHANGED FROM THE VERSION DOCUMENTED AT THE FOOT OF THIS FILE. That version named
+      # `hass.titan.arrieta.eu` as a host known to be healthy; it is now genuinely returning 400 on
+      # every path (HA does not trust titan's address -- see `hass-home-public`, which is red for that
+      # real reason and stays red deliberately). A canary aimed at a broken host proves nothing, so this
+      # one aims at the OIDC discovery endpoint, measured 200 and UP in the same run.
+      #
+      # TO CONFIRM, two independent pieces of evidence rather than one:
+      #
+      #     kubectl -n gatus logs deploy/gatus | grep handleAlertsToTrigger
+      #
+      # should show `Sending initial telegram alert ... has been TRIGGERED`. If instead it shows
+      # `Not sending alert of type=telegram ... because the provider wasn't configured properly`, the
+      # Secret is the problem, not the network. Then: the message in Telegram itself.
+      - name: telegram-delivery-test
+        group: titan
+        url: https://auth.titan.arrieta.eu/application/o/coder/.well-known/openid-configuration
+        interval: 1m
+        client:
+          timeout: 10s
+        conditions:
+          - "[STATUS] == 418"
+        alerts:
+          - type: telegram
+            failure-threshold: 1
+            send-on-resolved: true
       # DROPPED FROM THE VPS SET, with the reason rather than silence: `icmp://192.168.0.5` is the home
       # HA box, and `hass-home-public` above covers it through the whole user path (DNS -> Traefik ->
       # TLS -> HA) rather than just the box; `icmp://192.168.0.6` is casa, now covered by the MinIO
