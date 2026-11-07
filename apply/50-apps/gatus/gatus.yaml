@@ -720,6 +720,9 @@ data:
           timeout: 10s
         conditions:
           - "[STATUS] == 200"
+          # Measured with a verifying context: publicly trusted, 46.7d left. Worth a condition because
+          # this is the one backup path whose failure mode includes a certificate this tree does not own
+          # -- casa's cert, on casa's ingress, reached over the mesh.
         alerts:
           - type: telegram
             failure-threshold: 3
