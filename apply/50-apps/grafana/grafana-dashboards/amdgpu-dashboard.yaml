@@ -1,5 +1,31 @@
 ---
 # AMD GPU dashboard JSON
+#
+# Copied from ../k8s-casa apply/50-apps/casa/grafana-dashboards/amdgpu-dashboard.yaml and then
+# diverged: this copy adds an "Inference" row (requests deferred/processing, KV cache tokens).
+#
+# THE "Daily tokens" PANEL SHOWS THE SAME NUMBERS AS CASA'S BOARD, BY CONSTRUCTION. Titan runs no
+# Prometheus of its own -- apply/50-apps/grafana/grafana-datasources.yaml points Grafana at
+# https://prometheus.local.arrieta.eu, casa's, over the OPNsense WireGuard peer. The panel queries
+# job="halogen", which is the one engine at 192.168.0.29:8731 (llm01) that both clusters front:
+# casa directly, titan through the llm.titan.arrieta.eu Endpoints in
+# apply/50-apps/llm/llm.yaml. So this panel is a second view of one backend, not titan's own usage.
+# Per-caller attribution is not available from metrics either way: these series carry no
+# per-request labels.
+#
+# The counter split is easy to get backwards, so the proof is here rather than only in the panel
+# description:
+#
+#   llamacpp:prompt_tokens_total          prompt tokens the engine actually processed
+#   halogen:prompt_tokens_cached_total    prompt tokens the prompt cache covered
+#   llamacpp:tokens_predicted_total       output tokens
+#
+# Total input is the sum of the first two. Measured 2026-11-07 against job="halogen": lifetime
+# counter values 20.5 M processed against 622 M cached, from one process with one reset point, so
+# prompt_tokens_total cannot include cached tokens -- it would have to be the larger of the two.
+# halogen also exports halogen:cache_prompt_tokens_saved_total, a near-duplicate of
+# prompt_tokens_cached_total (0.25% apart over 24h); this panel uses prompt_tokens_cached_total and
+# should not be changed to mix the two.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -1105,6 +1131,95 @@ data:
           "type": "timeseries"
         },
         {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "$datasource"
+          },
+          "description": "Daily token totals for the halogen engine at 192.168.0.29:8731 (job=halogen), the same backend llm.titan.arrieta.eu fronts. Titan has no Prometheus of its own: this reads casa's, so the numbers match casa's AMD GPU board exactly.\n\nThree bars per day, deliberately NOT stacked: 'input cached' is not a subset of 'input processed', they are disjoint halves of the same input. Total input = cached + processed. Measured 2026-11-07, the cache covers 96% of input tokens over 14 days.\n\nStep is pinned to 1d so each bar is one day, which means two things: use a time range of at least 24h (7d recommended -- at this dashboard's 6h default the panel shows one partial bar), and the bars align to the range start rather than to local midnight.\n\nNo per-client breakdown is possible: these counters carry no per-request labels.",
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "min": 0,
+              "custom": {
+                "drawStyle": "bars",
+                "fillOpacity": 100,
+                "lineWidth": 0,
+                "showPoints": "never",
+                "stacking": {
+                  "mode": "none",
+                  "groupWidth": 0.7
+                }
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 9,
+            "w": 24,
+            "x": 0,
+            "y": 35
+          },
+          "id": 21,
+          "options": {
+            "legend": {
+              "calcs": [
+                "sum",
+                "max"
+              ],
+              "displayMode": "table",
+              "placement": "right",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "$datasource"
+              },
+              "expr": "increase(halogen:prompt_tokens_cached_total{job=\"halogen\",model=~\"$model\"}[1d])",
+              "interval": "1d",
+              "legendFormat": "input cached",
+              "refId": "A"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "$datasource"
+              },
+              "expr": "increase(llamacpp:prompt_tokens_total{job=\"halogen\",model=~\"$model\"}[1d])",
+              "interval": "1d",
+              "legendFormat": "input processed",
+              "refId": "B"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "$datasource"
+              },
+              "expr": "increase(llamacpp:tokens_predicted_total{job=\"halogen\",model=~\"$model\"}[1d])",
+              "interval": "1d",
+              "legendFormat": "output",
+              "refId": "C"
+            }
+          ],
+          "title": "Daily tokens (input cached / input processed / output)",
+          "type": "timeseries"
+        },
+        {
           "collapsed": false,
           "datasource": {
             "type": "prometheus",
@@ -1114,7 +1229,7 @@ data:
             "h": 1,
             "w": 24,
             "x": 0,
-            "y": 35
+            "y": 44
           },
           "id": 18,
           "title": "Inference",
@@ -1151,7 +1266,7 @@ data:
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 36
+            "y": 45
           },
           "id": 19,
           "options": {
@@ -1224,7 +1339,7 @@ data:
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 36
+            "y": 45
           },
           "id": 20,
           "options": {
