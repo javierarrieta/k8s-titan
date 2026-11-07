@@ -28,9 +28,11 @@ WHAT IT CHECKS, from the built stream:
      membership in both for the one app it covers.
   4. The two lists must agree with each other. They are maintained as one pair everywhere in this tree,
      and a namespace in one and not the other is a half-added consumer.
-  5. AGENTS.md carries a copy of the `titan-tls` allow-list in prose ("today `apps,auth,...`"). That
-     copy must match the annotation. One credential kept twice is one drift away from a silent split —
-     the same reasoning as `db-url-check`, applied to a list instead of a URL.
+  5. AGENTS.md carries a copy of the allow-list in prose ("today `apps,auth,...`") on the line naming
+     the Certificate called PROSE_CERT. That copy must match the annotation. One list kept twice is one
+     edit away from a silent split — the same reasoning as `db-url-check`, applied to a list instead of
+     a URL. The Secret is found by the Certificate's NAME rather than by the Secret it writes, so
+     renaming the Secret cannot quietly downgrade this check to a note.
 
 VACUITY. No reflected `Certificate` in the build, no consumer of any of them, an empty allow-list, an
 unreadable AGENTS.md, or an AGENTS.md that no longer carries the prose copy is a failure, never a clean
@@ -42,9 +44,12 @@ WHAT IT DOES NOT PROVE, in order of how much it matters:
     Secret being issued, and the mirror landing are live facts; a cold cluster with cert-manager behind
     is a tree that passes this gate and has no certificate anywhere. `make dry-run` does not close this
     either — see the note above about who creates the Secret.
-  * A consumer is found by NAME. If a chart renders its TLS block from a value this tree never sets, or
-    a manifest hardcodes a Secret name that no `Certificate` produces, neither is a mismatch here; the
-    second is reported as a note so it cannot be mistaken for coverage.
+  * A consumer is found by NAME. A chart that renders its TLS block from a value this tree never sets
+    is invisible to it, and so is a `HelmRelease` that names the Secret only inside a block its own
+    values keep disabled — that second case asks for MORE reflection than the host needs, so it fails
+    safe, but it means an allow-list entry can exist for a consumer that is not actually serving. A
+    Secret name that no `Certificate` in this build produces is reported as a note, so it cannot be
+    mistaken for coverage.
   * It does not judge whether a namespace SHOULD be on the list. Every entry is a decision made
     elsewhere; a namespace on the list that consumes nothing is reported as a note, not a failure,
     because a namespace may be added ahead of the workload that needs it — which is how `sure` and
@@ -113,20 +118,22 @@ def main():
         return 1
 
     consumers = {secret: {} for secret in certs}
+    unproduced = {}
     for doc in docs:
         kind = doc.get("kind")
         ns = (doc.get("metadata") or {}).get("namespace")
         spec = doc.get("spec") or {}
+        who = f"{kind} {ns}/{(doc.get('metadata') or {}).get('name')}"
         if kind == "Ingress":
             for block in spec.get("tls") or []:
                 secret = (block or {}).get("secretName")
                 if secret in consumers:
-                    who = f"Ingress {ns}/{(doc.get('metadata') or {}).get('name')}"
                     consumers[secret].setdefault(ns, []).append(who)
+                elif secret:
+                    unproduced.setdefault(secret, []).append(who)
         elif kind == "HelmRelease":
             hit = {s for s in strings(spec.get("values") or {}) if s in consumers}
             for secret in hit:
-                who = f"HelmRelease {ns}/{(doc.get('metadata') or {}).get('name')}"
                 consumers[secret].setdefault(ns, []).append(who)
     if not any(consumers.values()):
         print("FAIL: no built Ingress or HelmRelease consumes a reflected Certificate - tls-reflection "
@@ -163,8 +170,18 @@ def main():
                          "HelmRelease there names the Secret. Fine if the workload is coming or a chart "
                          "reaches it by a path this gate cannot see; delete the entry if neither is true.")
 
+    for secret, who in sorted(unproduced.items()):
+        notes.append(f"NOTE: {', '.join(sorted(set(who)))} names TLS Secret {secret!r}, which no "
+                     "Certificate in this build produces. Fine if something outside this tree issues it; "
+                     "otherwise that host has no certificate and this gate cannot see it, because it only "
+                     "knows Secrets a Certificate here declares.")
+
+    # The prose copy is bound to the Certificate by NAME, not by the Secret it writes, so renaming the
+    # Secret cannot downgrade this comparison to a silent note.
+    prose_secret = next((s for s, (_, cname, _) in certs.items() if cname == PROSE_CERT), None)
     agents = Path(sys.argv[1]) / "AGENTS.md"
-    titan = certs.get("titan-tls")
+    reflected = certs.get(prose_secret) if prose_secret else None
+    prose_compared = False
     if not agents.is_file():
         failures.append(f"no AGENTS.md at {agents} - the prose copy of the allow-list cannot be compared")
     else:
@@ -180,16 +197,18 @@ def main():
                             "it or delete the claim, because a doc that says the allow-list is one thing "
                             "while the annotation says another is how the next namespace gets added to "
                             "the wrong one of the two.")
-        elif titan is None:
-            notes.append("NOTE: AGENTS.md quotes the titan-wildcard allow-list but no Certificate in the "
-                         "build produces Secret titan-tls, so the prose copy was not compared.")
+        elif reflected is None:
+            notes.append(f"NOTE: AGENTS.md quotes the {PROSE_CERT} allow-list but no Certificate named "
+                         f"{PROSE_CERT} is in the build with Reflector annotations, so the prose copy was "
+                         "not compared.")
         else:
             prose = set(quoted)
-            annotation = set(split_list(titan[2].get(ALLOWED, "")))
+            annotation = set(split_list(reflected[2].get(ALLOWED, "")))
+            prose_compared = True
             if prose != annotation:
                 failures.append(f"AGENTS.md's prose allow-list {sorted(prose)} does not match "
                                 f"reflection-allowed-namespaces {sorted(annotation)} on Certificate "
-                                f"{titan[0]}/{titan[1]}: "
+                                f"{reflected[0]}/{reflected[1]} (Secret {prose_secret}): "
                                 f"only in AGENTS.md {sorted(prose - annotation)}, only in the annotation "
                                 f"{sorted(annotation - prose)}. Fix AGENTS.md to match the annotation.")
 
@@ -201,10 +220,11 @@ def main():
         return 1
 
     total = sum(len(v) for v in consumers.values())
+    prose_line = ("and AGENTS.md's prose copy matches the annotation it quotes" if prose_compared
+                  else "but the AGENTS.md prose copy was NOT compared - see the note below")
     print(f"tls-reflection: {len(certs)} reflected Certificate(s) ({', '.join(sorted(certs))}); "
           f"{total} consumer(s) across {len({ns for c in consumers.values() for ns in c})} namespace(s), "
-          "every one named by both Reflector annotations, and AGENTS.md's prose copy matches the "
-          "annotation it quotes")
+          f"every one named by both Reflector annotations, {prose_line}")
     for note in notes:
         print(f"  {note}")
     return 0
