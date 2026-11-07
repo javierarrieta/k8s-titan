@@ -765,51 +765,6 @@ data:
             failure-threshold: 3
             send-on-resolved: true
 
-      # ================================================================================================
-      # TEMPORARY. DELETE THIS PROBE ONCE THE MESSAGE IS CONFIRMED IN TELEGRAM.
-      #
-      # THE LAST UNPROVEN LINK, and the one #109 left open: the Secret is wired, the token and chat id
-      # are in the pod, and "wired" is what a monitor says right up until the first outage it misses.
-      # This probe exists only to fail, so the only thing that can be tested is the delivery path.
-      #
-      # WHY IT WILL FIRE ON THE FIRST CHECK RATHER THAN THE SECOND. Read from v5.37.0 itself,
-      # `watchdog/alerting.go`, because assuming this is how you end up waiting ten minutes for nothing
-      # and concluding the alert path is broken:
-      #
-      #     if !endpointAlert.IsEnabled() || endpointAlert.FailureThreshold > ep.NumberOfFailuresInARow {
-      #         continue
-      #     }
-      #     sendInitialAlert := !endpointAlert.Triggered
-      #
-      # There is no requirement of a prior UP state. First failure sets NumberOfFailuresInARow to 1,
-      # `1 > 1` is false so it proceeds, and Triggered is false so the initial alert sends. With
-      # `failure-threshold: 1` the message should arrive within one interval of the reconcile.
-      #
-      # TARGET CHANGED FROM THE VERSION DOCUMENTED AT THE FOOT OF THIS FILE. That version named
-      # `hass.titan.arrieta.eu` as a host known to be healthy; it is now genuinely returning 400 on
-      # every path (HA does not trust titan's address -- see `hass-home-public`, which is red for that
-      # real reason and stays red deliberately). A canary aimed at a broken host proves nothing, so this
-      # one aims at the OIDC discovery endpoint, measured 200 and UP in the same run.
-      #
-      # TO CONFIRM, two independent pieces of evidence rather than one:
-      #
-      #     kubectl -n gatus logs deploy/gatus | grep handleAlertsToTrigger
-      #
-      # should show `Sending initial telegram alert ... has been TRIGGERED`. If instead it shows
-      # `Not sending alert of type=telegram ... because the provider wasn't configured properly`, the
-      # Secret is the problem, not the network. Then: the message in Telegram itself.
-      - name: telegram-delivery-test
-        group: titan
-        url: https://auth.titan.arrieta.eu/application/o/coder/.well-known/openid-configuration
-        interval: 1m
-        client:
-          timeout: 10s
-        conditions:
-          - "[STATUS] == 418"
-        alerts:
-          - type: telegram
-            failure-threshold: 1
-            send-on-resolved: true
       # DROPPED FROM THE VPS SET, with the reason rather than silence: `icmp://192.168.0.5` is the home
       # HA box, and `hass-home-public` above covers it through the whole user path (DNS -> Traefik ->
       # TLS -> HA) rather than just the box; `icmp://192.168.0.6` is casa, now covered by the MinIO
@@ -817,19 +772,44 @@ data:
       # chiclana box, and `chiclana-hass-public` covers the same backend by way of
       # `apply/50-apps/chiclana-hass/chiclana-hass.yaml:38`. Three probes became three better ones.
       #
-      # THE PROOF THIS FILE STILL OWES (#109's last clause): no alert from this Deployment has ever been
-      # seen to arrive. The mechanism is wired — Secret `gatus-telegram`, token and chat id — but
-      # "wired" is what a monitor says right up until the first outage it misses. To prove delivery
-      # without waiting for a real failure, add a probe whose condition can never hold, let it cross
-      # `failure-threshold`, confirm the message lands, and delete it:
+      # THE PROOF THIS FILE OWED (#109's last clause) -- DISCHARGED 2026-11-07.
+      #
+      # An alert from this Deployment was received in Telegram and the send is in the pod log:
+      #
+      #     [config.ValidateAlertingConfig] configuredProviders=[telegram]
+      #     [watchdog.handleAlertsToTrigger] Sending initial telegram alert because alert
+      #         for endpoint=telegram-delivery-test has been TRIGGERED
+      #
+      # with no `Failed to send an alert` line, which is what gatus logs whenever the provider's Send
+      # returns an error -- so Telegram accepted the call rather than rejecting a bad token or chat id.
+      #
+      # WHY IT HAD NEVER ARRIVED, because #109 recorded the wrong cause. It described a gap in the
+      # notification path. The notification path was fine; there was nothing to notify about. #256 found
+      # the Deployment had no `volumes` at all, so gatus had been running the demo endpoints shipped in
+      # the image since the day it was deployed. A missing alert was evidence of a missing probe, and it
+      # was read as a missing alert. Worth remembering as a shape: absence of a signal from a monitor is
+      # only evidence about the monitor if something is known to be feeding it.
+      #
+      # THE RECIPE, kept because re-verifying delivery is cheap and doing it during an outage is not.
+      # Add a probe whose condition can never hold, on a host measured healthy IN THE SAME RUN:
       #
       #     - name: telegram-delivery-test
-      #       url: https://hass.titan.arrieta.eu/
+      #       url: https://auth.titan.arrieta.eu/application/o/coder/.well-known/openid-configuration
       #       interval: 1m
       #       conditions: [ "[STATUS] == 418" ]
       #       alerts: [ { type: telegram, failure-threshold: 1, send-on-resolved: true } ]
       #
-      # It targets a host known to be healthy, so the only thing that can fail is the alert path.
+      # `failure-threshold: 1` fires on the FIRST failed check; no prior UP state is required. Read from
+      # v5.37.0 `watchdog/alerting.go`, where the gate is `FailureThreshold > NumberOfFailuresInARow`
+      # and `sendInitialAlert := !endpointAlert.Triggered`, so a brand-new endpoint alerts immediately.
+      #
+      # The earlier version of this snippet aimed at `hass.titan.arrieta.eu` as a host known to be
+      # healthy. It is not: HA returns 400 on every path because it does not trust titan's address, so
+      # `hass-home-public` is red for a real reason and stays red deliberately. A canary aimed at a
+      # broken host proves nothing about the alert path -- it cannot tell a working send from a host
+      # that was already failing. Pick a target that is UP right now, and check the pod log as well as
+      # the message: `the provider wasn't configured properly` in the log means the Secret, not the
+      # network, and that is a different fix.
       #
       # STILL NOT DONE, rewritten 2026-11-07 because the previous version of this paragraph was itself
       # stale -- it claimed a *stale* backup was "not alerted on from anywhere", which commit 2ef8df8
@@ -842,8 +822,19 @@ data:
       #   - Stale backups: alerting EXISTS and lives in ../k8s-casa (TitanBackupJobFailed,
       #     TitanBackupVolumeStale at 26h, and the absent() guard on the discovery loops). It has been
       #     observed firing in production, 2026-11-04, on a stale restic lock. Not this file's gap.
-      #   - Telegram delivery: still owed, and it is the one above that gates trusting anything else
-      #     here. The cert-condition bug sat invisible for exactly as long as delivery was unproven.
+      #   - Telegram delivery: PAID 2026-11-07, see the block above. It gated trusting everything else
+      #     here and it is now closed, with the send in the pod log and the message received. The
+      #     cert-condition bug #255 fixed had in fact never run at all -- the ConfigMap was not mounted
+      #     until #256 -- so the honest statement is that the bug was real and its blast radius was zero,
+      #     not that delivery hid it.
+      #   - Home Assistant's public front door: RED SINCE THE FIRST RUN, and correctly so.
+      #     `hass-home-public` answers 400 on every path; HA itself returns it (`Server: Python/3.14
+      #     aiohttp`), proven by hitting the backend at 192.168.0.5:8123 directly -- 200 with no
+      #     forwarded headers, 400 with `X-Forwarded-For` set to anything, 200 with `X-Forwarded-Proto`
+      #     or `X-Forwarded-Host` alone. HA has `use_x_forwarded_for` on and does not trust titan's
+      #     address. The fix is `trusted_proxies` on the HA box, which is not in this tree; `apply/50-
+      #     apps/home-hass/home-hass.yaml` predicted exactly this and flagged it as unverifiable from
+      #     git. Do not weaken the condition to accept 400 -- that hides a broken front door.
       #   - Titan watching titan: closed from the other side, not from here. See `titan auth` and
       #     `titan k8s api` in ../k8s-casa apply/50-apps/casa/gatus.yaml. Nothing added to this file
       #     can ever report that titan itself is down.
