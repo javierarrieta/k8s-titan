@@ -193,13 +193,14 @@ data:
       # from habit on any of them is a permanent DOWN -- the exact failure the cert condition above
       # carried. The ones NOT probed and why:
       #
-      #   - `tesla`, `vert`, `bentopdf`, `investing-agent`, `uptime` are forwardAuth-gated. Traefik runs
-      #     the forwardAuth BEFORE proxying to the backend, so an unauthenticated probe gets authentik's
-      #     login page at HTTP 200 and proves nothing about the app behind it. The starkest form of
-      #     this: `uptime.titan.arrieta.eu/api/v1/endpoints/statuses` -- gatus's own status API --
-      #     answers 200 with an HTML login page to an unauthenticated caller. Five probes written the
-      #     obvious way would have sat green over five dead apps, which is worse than no probe.
-      #     `titan-auth-frontdoor` below is what those five genuinely do prove, so it is written once.
+      #   - `tesla`, `vert`, `bentopdf`, `investing-agent`, `uptime` are forwardAuth-gated, so they are
+      #     NOT probed over the public URL. Traefik runs the forwardAuth BEFORE proxying to the backend,
+      #     so an unauthenticated public probe gets authentik's login page at HTTP 200 and proves
+      #     nothing about the app behind it. The starkest form of this: `uptime.titan.arrieta.eu/api/v1/
+      #     endpoints/statuses` -- gatus's own status API -- answers 200 with an HTML login page to an
+      #     anonymous caller. Five probes written the obvious way would have sat green over five dead
+      #     apps, which is worse than no probe. They ARE probed, at the cluster service level, in the
+      #     `*-backend` block below; `titan-auth-frontdoor` is what the public URL genuinely proves.
       #   - `llm` answers 401 without the bearer token. Provable later via `client.headers` off the
       #     existing Secret; the backend is already covered by `casa-halogen-llm`.
       #   - `sure` has no health path found (`/api/health` and `/health` both 404); `/` serves the app
@@ -356,6 +357,108 @@ data:
             send-on-resolved: true
 
       # ================================================================================================
+      # THE FIVE GATED APPS, PROBED AT THE CLUSTER SERVICE LEVEL.
+      #
+      # WHY NOT THROUGH THE PUBLIC URL. Traefik's forwardAuth runs BEFORE it proxies to the backend, so
+      # an unauthenticated probe of `tesla`/`vert`/`bentopdf`/`investing-agent`/`uptime` gets authentik's
+      # login page at HTTP 200 no matter whether the app behind it is alive, crash-looping, or deleted.
+      # Going through the Service bypasses Traefik entirely and asks the only question left: does the
+      # application answer?
+      #
+      # WHAT THIS DOES NOT PROVE, because the split is the whole point of doing it this way: it says
+      # nothing about DNS, TLS, the entrypoint, the Middleware, or the forwardAuth wiring. Those are the
+      # `*-public` probes and `titan-auth-frontdoor`. A green backend probe next to a red public probe is
+      # the signal that the app is fine and the path to it is not -- which is a different page to get and
+      # a different file to open, and is the reason these are separate endpoints rather than one.
+      #
+      # ALL FIVE WERE MEASURED FROM A POD ON THIS CLUSTER, and two findings changed what got written:
+      #
+      #   - `vert-sh`, `bentopdf` and `investing-agent` return 200 for ANY path -- SPA catch-all routing.
+      #     So `/health` on them is decorative, not a health endpoint, and a condition on it would imply
+      #     a check that does not exist. They are probed on `/`, which is the honest claim: the process
+      #     serves its shell.
+      #   - `teslamate` answers 404 on `/health`; its shell at `/` is the only real target.
+      #
+      # No NetworkPolicy exists anywhere in this tree, so cross-namespace pod-to-pod is open by default
+      # and these resolve today; that is a measured fact about the current tree, not a guarantee about a
+      # future one.
+      - name: teslamate-backend
+        group: titan
+        url: http://teslamate.apps.svc.cluster.local/
+        interval: 1m
+        client:
+          timeout: 10s
+        conditions:
+          - "[STATUS] == 200"
+        alerts:
+          - type: telegram
+            failure-threshold: 3
+            send-on-resolved: true
+
+      - name: vert-sh-backend
+        group: titan
+        url: http://vert-sh.apps.svc.cluster.local/
+        interval: 5m
+        client:
+          timeout: 10s
+        conditions:
+          - "[STATUS] == 200"
+        alerts:
+          - type: telegram
+            failure-threshold: 3
+            send-on-resolved: true
+
+      - name: bentopdf-backend
+        group: titan
+        url: http://bentopdf.apps.svc.cluster.local:8080/
+        interval: 5m
+        client:
+          timeout: 10s
+        conditions:
+          - "[STATUS] == 200"
+        alerts:
+          - type: telegram
+            failure-threshold: 3
+            send-on-resolved: true
+
+      - name: investing-agent-backend
+        group: titan
+        url: http://investing-agent.apps.svc.cluster.local/
+        interval: 5m
+        client:
+          timeout: 10s
+        conditions:
+          - "[STATUS] == 200"
+        alerts:
+          - type: telegram
+            failure-threshold: 3
+            send-on-resolved: true
+
+      # The watcher, watched -- partially, and the limit is the interesting part. `gatus` probing
+      # `gatus` is circular in one direction and useful in the other: if the pod is gone the probe never
+      # runs, so this can NEVER report "the gatus pod died". What it CAN report is the case the file at
+      # apply/50-apps/gatus/gatus.yaml used to leave open -- the monitor loop alive and the web listener
+      # dead, which is a blank status page and no alert. The Service has no ready endpoints, the connect
+      # fails, and the still-running monitor says so.
+      #
+      # `uptime.titan.arrieta.eu` is gated, so the public status page and this probe are different code
+      # paths: the page can be empty while this is green, and this can be red while the page still shows
+      # stale green tiles.
+      - name: gatus-backend
+        group: titan
+        url: http://gatus.gatus.svc.cluster.local:8080/health
+        interval: 1m
+        client:
+          timeout: 10s
+        conditions:
+          - "[STATUS] == 200"
+          - "[BODY].status == UP"
+        alerts:
+          - type: telegram
+            failure-threshold: 3
+            send-on-resolved: true
+
+      # ================================================================================================
       # THE VPS, WATCHED FROM A PUBLIC BOX -- transitional, and built to be deleted as one block.
       #
       # These six endpoints were deleted from ../k8s-casa rather than duplicated, and the reason is the
@@ -425,6 +528,9 @@ data:
           timeout: 10s
         conditions:
           - "[CONNECTED] == true"
+          # Every mail port presents a publicly trusted certificate (Let's Encrypt), measured with a
+          # verifying context on 587/993/995/465 -- 54.5d left on each. The one self-signed listener on
+          # that host is :443, which serves no mail protocol and is in no probe here.
         alerts:
           - type: telegram
             failure-threshold: 3
@@ -438,6 +544,7 @@ data:
           timeout: 10s
         conditions:
           - "[CONNECTED] == true"
+          - "[CERTIFICATE_EXPIRATION] > 120h"
         alerts:
           - type: telegram
             failure-threshold: 3
@@ -672,9 +779,10 @@ data:
       # stale -- it claimed a *stale* backup was "not alerted on from anywhere", which commit 2ef8df8
       # had already made false everywhere else in the repo and this file missed. Current state:
       #
-      #   - Public hostnames: probed above, with the forwardAuth exception written into the header
-      #     there. The five gated hosts remain unprobed AS APPS and that is not fixable by adding a
-      #     probe; it needs an authenticated probe or an unauthenticated health path per app.
+      #   - Public hostnames: probed above. The five forwardAuth-gated hosts are probed at the cluster
+      #     service level rather than through the public URL, because a gated public probe cannot see the
+      #     app behind the login redirect. What remains genuinely unprobed is the authenticated path
+      #     through the gate -- app health AND a working forwardAuth in one request.
       #   - Stale backups: alerting EXISTS and lives in ../k8s-casa (TitanBackupJobFailed,
       #     TitanBackupVolumeStale at 26h, and the absent() guard on the discovery loops). It has been
       #     observed firing in production, 2026-11-04, on a stale restic lock. Not this file's gap.
