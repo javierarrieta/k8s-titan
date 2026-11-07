@@ -295,9 +295,14 @@ fails when the two annotations disagree with each other or when this file's pros
 silent split. Its honest limit is permission, not delivery: it proves a namespace is allowed the Secret,
 never that the mirror landed, and a `HelmRelease` value is matched by name so a chart that renders its
 TLS block from something this tree never sets is invisible to it. `sure-check` and `mealie-check` each
-already carried a private version of this rule for one app apiece. `outpost-binding-check` is that gate for the outpost's own admission set:
-since #242 and #246 left `tesla.titan.arrieta.eu` as the one host gated by group membership with no IdP
-integration of its own behind it, nothing proved the three bindings still exist — `blueprint-mount-check`
+already carried a private version of this rule for one app apiece. `outpost-binding-check` is that gate
+for the outpost's own admission set: `tesla.titan.arrieta.eu` is gated by group membership with no IdP
+integration of its own behind it, so nothing but these bindings separates it from any Tesla account. The
+outpost's single `forward_domain` provider resolves every apex host that forwards to it — `vert`,
+`bentopdf`, `investing-agent` and `uptime` too — to the same Application, which is why the host set is
+recorded in the blueprint and this gate asserts only the bindings; a list kept in three files goes stale
+in two of them, which is what happened to the sentence this gate's own docstring used to carry. Nothing
+proved the three bindings still exist — `blueprint-mount-check`
 only asks whether a binding names a group this tree declares. It fails when the `tesla` application's
 bindings drift from the reviewed set, when `policy_engine_mode` stops being `any`, when a second proxy
 provider appears, when `cookie_domain` moves off the apex, or when `skip_path_regex` grows — the last
