@@ -278,7 +278,7 @@ spec:
       chart: sure
       # Pinned to an exact pre-release. NEVER `stable` here: this is pre-1.0 software (769 open
       # issues, and v0.7.6-alpha.9 was published the day this was written). An upgrade is a commit.
-      version: "0.7.6-alpha.9"
+      version: "0.7.6"
       sourceRef:
         kind: HelmRepository
         name: sure
@@ -298,7 +298,7 @@ spec:
   values:
     image:
       repository: ghcr.io/we-promise/sure
-      tag: "0.7.6-alpha.9"
+      tag: "0.7.6"
       pullPolicy: IfNotPresent
 
     rails:
