@@ -72,6 +72,15 @@ spec:
         # embedded outpost's provider list: that list is proxy-only and belongs to
         # apply/50-apps/auth/tesla-outpost-blueprint.yaml.
         - authentik-open-webui-blueprint
+        # Portfolio Prism's OIDC client. A Secret for the same reason as the others above: it carries
+        # the client_secret. Rendered from authentik/blueprints-portfolio-prism.yaml by
+        # scripts/setup-portfolio-prism-secrets.sh.
+        #
+        # This one replaces a provider that was created by hand in the admin UI on 2026-11-07, and the
+        # blueprint matches it by SLUG rather than by name for that reason — keying on the name the UI
+        # form happened to receive would have created a second provider with a different slug while the
+        # app kept pointing at the original. See the blueprint header.
+        - authentik-portfolio-prism-blueprint
         # Grafana's OIDC client for grafana.titan.arrieta.eu — a DIFFERENT Grafana from the
         # authentik-grafana-blueprint above, which is Tesla's (slug tesla-boards). A valid blueprint
         # that is never mounted is indistinguishable from one that was never written: the worker only
@@ -187,7 +196,7 @@ spec:
       #    mounted blueprints hourly plus at startup, so a blueprint edit would otherwise sit unread for
       #    up to an hour after a merge. That delay is what made PR #42's fix look like it had not landed.
       podAnnotations:
-        secret.reloader.stakater.com/reload: "authentik-secrets,authentik-coder-blueprint,authentik-google-blueprint,authentik-grafana-blueprint,authentik-open-webui-blueprint,authentik-observability-blueprint,authentik-mealie-blueprint,authentik-sure-blueprint"
+        secret.reloader.stakater.com/reload: "authentik-secrets,authentik-coder-blueprint,authentik-google-blueprint,authentik-grafana-blueprint,authentik-open-webui-blueprint,authentik-observability-blueprint,authentik-mealie-blueprint,authentik-sure-blueprint,authentik-portfolio-prism-blueprint"
         # The Tesla blueprint arrives as a ConfigMap and needs the same treatment for the same reason:
         # kubelet rewrites the mounted file in place and the worker only discovers blueprints hourly
         # plus at startup, so an edit would otherwise sit unread for up to an hour after a merge.
