@@ -1,10 +1,14 @@
 # Portfolio Prism — a portfolio and tax-lot tracker, at portfolio.titan.arrieta.eu.
 #
+# Design and evidence: docs/portfolio-prism-bringup-2026-11-08.md. That file is the bring-up record —
+# what was measured before merging, what has run, what is still unproven, and how to back this change
+# out. This header is the design; that file is the log.
+#
 # Rust (Rocket) backend + a React SPA served by nginx, in ONE pod as two containers. That is the
-# upstream shape (k8s/app-deployment.yaml in the app repo) and it is load-bearing, not incidental:
-# frontend/nginx.conf proxies /api, /api-docs and /auth to `http://127.0.0.1:8000`, a loopback
-# address. Splitting them into two Deployments does not fail loudly — nginx answers 502 for every API
-# call while both pods report Ready, which reads as a backend bug.
+# upstream shape (k8s/app-deployment.yaml in the app repo) and it is load-bearing: frontend/nginx.conf
+# proxies /api, /api-docs and /auth to `http://127.0.0.1:8000`, a loopback address. Splitting them
+# into two Deployments does not fail loudly — nginx answers 502 for every API call while both pods
+# report Ready, which reads as a backend bug.
 #
 # WHY IT IS HERE AT ALL, AND WHY `apps`
 # It passes §3.1 of docs/superpowers/specs/2026-10-19-titan-app-scale-out-design.md on the hard list:
@@ -14,23 +18,29 @@
 # apply/70-backup/preflight.yaml, rbac.yaml and runner.yaml to get its volume backed up at all — real
 # surface for zero isolation gain.
 #
-# IT AUTHENTICATES IN-APP, WHICH IS A DIFFERENT POSTURE FROM MOST OF THIS CLUSTER
-# Every other gated host here leans on the shared authentik outpost in front of the app. This one has
-# its own OIDC login — that is the feature of the release being deployed (portfolio-prism v0.0.6-M4,
-# PR #34). Two gates would mean two logins per session, and the outpost cookie's refresh behaviour is
-# already the cause of issue #243 on hosts that have it. So the Ingress carries no `router.middlewares`
-# annotation, and `tools/ingress-auth-check.py`'s NOT_PROXY_GATED records that as a decision rather
-# than an oversight. The consequence is stated where it can be seen: the group gate that decides WHO
-# may sign in lives in authentik as a policy binding on the `portfolio-prism` Application
+# IT AUTHENTICATES IN-APP, WITH NO PROXY-SIDE GATE AT ALL
+# Several hosts here already authenticate in-app (coder, open-webui, mealie, both Grafanas, and
+# tesla-grafana, which sits in this same namespace). What is new is the combination: this app's OIDC
+# client is declared in this repo AND its Ingress carries no `router.middlewares` at all. It has its
+# own OIDC login because that is the feature of the release being deployed (portfolio-prism v0.0.6-M4,
+# app-repo PR #34). Two gates would mean two logins per session, and the outpost cookie's refresh
+# behaviour is already the cause of issue #243 on hosts that have it. So
+# `tools/ingress-auth-check.py`'s NOT_PROXY_GATED records the missing middleware as a decision. The
+# consequence is stated where it can be seen: the group policy that decides WHO may sign in lives in
+# authentik as a binding on the `portfolio-prism` Application
 # (authentik/blueprints-portfolio-prism.yaml), and the app itself has no authorization model beyond
-# "has a valid session".
+# "has a valid session" — it names three access levels, but which one you hold is decided by whether
+# you have a session, not by who you are.
 #
 # WHAT IS NOT PROVEN, STATED BEFORE THE FIRST BOOT
-# Nothing in this file has run. The workspace it was written in has no docker and no admin kubeconfig,
-# so the two things that only a live pod can answer are called out at the object they affect: the
-# volume's write permissions (backend container, `volumeMounts` comment) and nginx's writable paths
+# Nothing in this change has been applied to a cluster. The HTTP probes cited in the bring-up record
+# were made from the authoring workspace against the live auth.titan.arrieta.eu and the public
+# internet; nothing in-cluster was executed. That workspace had no docker and no admin kubeconfig, so
+# the things only a live pod answers are called out at the object they affect: the volume's write
+# permissions (pod-level `securityContext` / `fsGroup` block below) and nginx's writable paths
 # (frontend container, `securityContext` comment). `make dry-run DRYRUN_CONTEXT=<admin context>` asks
-# the API server about admission rules and should be run before merge; it cannot see either of those.
+# the API server about admission rules and must be run before merge; see the bring-up record for the
+# context, the write-authorization requirement, and the expected pass signature.
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -40,10 +50,14 @@ metadata:
   namespace: apps
   annotations:
     # Opted in to restic PV backup. This annotation IS the scope decision — apply/70-backup/ discovers
-    # annotated PVCs at runtime rather than enumerating them in git. It matters more here than for
-    # most volumes in this cluster: the single SQLite file on it is the user's entire financial
-    # history and there is no second copy anywhere. `local-path-retain` is a deletion mitigation, not
-    # a backup — AGENTS.md, "Backups".
+    # annotated PVCs at runtime rather than enumerating them in git. The daily restic backup named on
+    # the next line is the only second copy this file knows about: `local-path-retain` is a deletion
+    # mitigation, not a backup — AGENTS.md, "Backups". The single SQLite file on this volume is the
+    # user's entire financial history, which is why the copy is not assumed good: restic file-copies a
+    # LIVE database with no quiescing, and the restic design spec §6 records exactly that as
+    # "SQLite-shaped risk, inherited not new", deferring the `sqlite3 .backup` upgrade and requiring
+    # `PRAGMA integrity_check` on any restore. See the bring-up record, "Backup", for what was decided
+    # about that here and what has never been drilled for this volume.
     backup.titan.arrieta.eu/class: daily
 spec:
   accessModes:
@@ -51,9 +65,10 @@ spec:
   storageClassName: local-path-retain
   resources:
     requests:
-      # 2Gi for a SQLite file that holds portfolio positions and tax lots. local-path-retain sets
-      # allowVolumeExpansion: false, so this cannot be grown later — the number is a guess with an
-      # order of magnitude of headroom, and the honest note is that nothing measured it.
+      # 2Gi, unmeasured, for a SQLite file of portfolio positions and tax lots. local-path-retain sets
+      # allowVolumeExpansion: false (apply/20-infra/storage-retain.yaml), so this cannot be grown
+      # later; the fix if it is ever tight is one line in that StorageClass, which is a cluster-wide
+      # change and deliberately not made here. Six other PVCs already live under the same class.
       storage: 2Gi
 ---
 apiVersion: apps/v1
@@ -85,14 +100,22 @@ spec:
       # baked into its image. OnRootMismatch avoids a recursive chown of the whole volume on every pod
       # start.
       #
-      # THE UNVERIFIED PART, AND HOW TO CHECK IT IN TEN SECONDS. The backend image sets `USER app`,
-      # created by `useradd -r` in a Debian slim base, so its uid is a system uid this file does not
-      # name — `runAsUser: 1000` below overrides it rather than depending on it, which is what makes
-      # fsGroup sufficient. If the first boot logs `unable to open database file` (SQLite error 14),
-      # the volume is not group-writable and the fix is to confirm the uid with
-      # `docker run --rm --entrypoint id ghcr.io/javierarrieta/portfolio-prism/backend:v0.0.6-M4`
-      # and set runAsUser/fsGroup to match. Named because it is the one line here that a green
-      # `make check` cannot vouch for.
+      # THE UNVERIFIED PART, AND HOW TO CHECK IT. The backend image sets `USER app`, created by
+      # `useradd -r` in a Debian slim base, so its uid is a system uid this file does not name —
+      # `runAsUser: 1000` below overrides it rather than depending on it, which is what makes fsGroup
+      # sufficient. What is actually unproven is narrower than the image's uid: because runAsUser is
+      # pinned here, the uid cannot matter — the open question is whether kubelet applies fsGroup to a
+      # hostPath-backed local-path volume at all. If the first boot logs `unable to open database
+      # file` (SQLite error 14), settle it in the pod, not against the image:
+      #   kubectl -n apps exec deploy/portfolio-prism -c backend -- sh -c 'touch /app/data/.w && ls -ln /app/data'
+      # then take the branch that matches: `fsGroupChangePolicy: OnRootMismatch` can treat a
+      # half-fixed root as already matched and skip the chmod, so drop it to `Always`; or chown the PV
+      # host path on the node, which is what investing-agent ended up doing
+      # (apply/50-apps/investing-agent/investing-agent.yaml, PV-path lookup in its own comment).
+      # To read the image's uid without a container runtime, use the skopeo + tar technique recorded at
+      # docs/superpowers/specs/2026-10-24-titan-llm-endpoint-design.md — and read it from the pinned
+      # DIGEST below, not from a tag, for the reason given on the image line.
+      # Named because it is the one line here that a green `make check` cannot vouch for.
       fsGroup: 1000
       fsGroupChangePolicy: OnRootMismatch
       containers:
@@ -115,11 +138,16 @@ spec:
               memory: 128Mi
           # NOT hardened to readOnlyRootFilesystem, and not by omission. nginx:1.27-alpine writes a
           # pid file to /var/run and request bodies to /var/cache/nginx/client_temp — the proxy passes
-          # upload bodies through for CSV import — and it binds :80, which needs the NET_BIND_SERVICE
-          # capability the unprivileged variant of the image gets by running as root. Making this
-          # container read-only means switching the image and moving those paths to emptyDirs, which is
-          # an app-repo change, not a titan one. What is set here is what is safe without that: no
-          # privilege escalation, and NET_RAW dropped so it cannot sniff or spoof.
+          # upload bodies through for CSV import — and this container runs as root, which is how it
+          # binds :80 without NET_BIND_SERVICE being added here. Making it read-only means switching to
+          # an unprivileged image and moving those paths to emptyDirs, which is an app-repo change.
+          # Half the hardening is manifest-only and is DECLINED here rather than impossible:
+          # `runAsUser: 101` + `capabilities.add: [NET_BIND_SERVICE]` + emptyDirs for /var/cache/nginx
+          # and /var/run would work without touching the image, and is declined only because it is a
+          # second deviation from the upstream manifest in the same PR as everything else here.
+          # This is also the one container reachable from the internet, and it is the least hardened of
+          # the two. What is set here: no privilege escalation, and NET_RAW dropped so it cannot sniff
+          # or spoof.
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:
@@ -135,7 +163,12 @@ spec:
         - name: backend
           image: ghcr.io/javierarrieta/portfolio-prism/backend@sha256:2941c247e8f608af2f4907aedc63cbc9be1765d1b94b64c7f98a83236381d2a1
           ports:
-            - name: http
+            # NOT named `http`. Named ports must be unique within a pod, and the Service below
+            # resolves `targetPort: http`; two containers both calling their port `http` (8000 here,
+            # 80 in the frontend) makes that reference ambiguous. Admission only warns about the
+            # duplicate as of k8s 1.33, so the ambiguity would not have failed loudly — which is the
+            # reason to fix the name rather than rely on the warning.
+            - name: api
               containerPort: 8000
           env:
             # `oidc` and nothing else. `disabled` is compiled out of a release build on purpose — the
@@ -201,6 +234,11 @@ spec:
           # backfill before Rocket binds the port, and on a restored database that is longer than a
           # liveness initialDelay. Without a startup probe the kubelet kills the container mid-migration
           # and it restarts into the same work, forever.
+          # All three probes hit `/` on 8000, which is a real route and not an assumption: the app
+          # mounts `#[get("/")] index()` at `/` (backend_rust/src/lib.rs in the app repo, the
+          # `.mount("/", routes![index])` line) and it answers 200 while migrations run. Worth naming
+          # because nginx only proxies /api, /api-docs and /auth to this port, so `/` on 8000 looks
+          # like it should be a 404 from the outside and is not.
           startupProbe:
             httpGet: {path: /, port: 8000}
             periodSeconds: 5
@@ -211,6 +249,10 @@ spec:
           readinessProbe:
             httpGet: {path: /, port: 8000}
             periodSeconds: 5
+      # No NetworkPolicy is enforced on this cluster (k3s with flannel runs no policy controller), so
+      # `podIP:8000` is reachable from every pod in every namespace. Loopback is how nginx reaches the
+      # backend; it is not a boundary, and the absence of a Service for the backend is a routing
+      # convenience, not isolation.
       volumes:
         - name: data
           persistentVolumeClaim:
@@ -250,8 +292,8 @@ metadata:
   # session cookie, and the app sets it `Secure` unconditionally, so the cleartext router would not
   # carry the cookie; it would serve the SPA and every API call would 401 into a login redirect loop.
   # Confusing rather than dangerous, and still the wrong answer: `ingress-auth` rule 5 requires the pin
-  # for exactly the hosts whose stated gate is in-app authentication, so this line is enforced, not
-  # prose. Check it with `curl -o /dev/null -w '%{http_code}\n' http://portfolio.titan.arrieta.eu/` and
+  # for every host named in its PIN_REQUIRED list — the hosts whose allow-list justification depends on
+  # the pin — and this host is on it, so this line is enforced, not prose. Check it with `curl -o /dev/null -w '%{http_code}\n' http://portfolio.titan.arrieta.eu/` and
   # expect 404; a 200 means the annotation is gone.
   annotations:
     traefik.ingress.kubernetes.io/router.entrypoints: websecure
@@ -264,14 +306,15 @@ metadata:
   # WHAT ACTUALLY RESTRICTS ACCESS, since the proxy no longer does: a policy binding on the
   # `portfolio-prism` Application to the `titan-family` group, declared in
   # authentik/blueprints-portfolio-prism.yaml. Anyone outside that group is refused at the IdP before
-  # a token exists. The app has no other authorization model — its Viewer/Editor/Owner levels are one
-  # predicate — so that binding is the whole gate, and `ingress-auth`'s own docstring says out loud
+  # a token exists. The app has no other authorization model — it names three access levels but all
+  # three are decided by having a session, not by who you are — so that binding is the whole gate, and
+  # `ingress-auth`'s own docstring says out loud
   # that a provider with no access policy gates a host open to every authenticated account and that
   # this is a row in authentik's database, invisible to every gate in this repo.
   #
   # TLS is `titan-tls`, reflected into `apps` by Reflector; `apps` is already on the secretTemplate
   # allow-list of apply/40-certificates/titan-wildcard.yaml, so this host cost nothing there. The
-  # wildcard is one label deep, which is this host's depth.
+  # wildcard `*.titan.arrieta.eu` covers one label below the apex, which is all this host needs.
 spec:
   ingressClassName: traefik
   rules:

@@ -32,7 +32,7 @@ cd "$REPO"
 
 usage() {
   echo "usage: $(basename "$0") <app> [--write]" >&2
-  echo "  apps: observability | tesla-boards | open-webui | mealie" >&2
+  echo "  apps: observability | tesla-boards | open-webui | mealie | portfolio-prism" >&2
   exit 2
 }
 
@@ -66,6 +66,14 @@ case "$APP" in
     BP_SECRET=apply/10-secrets/authentik-mealie-blueprint.yaml
     CRED_SECRET=apply/10-secrets/mealie-secrets.yaml
     PH_ID='${MEALIE_OIDC_CLIENT_ID}'; PH_SEC='${MEALIE_OIDC_CLIENT_SECRET}' ;;
+  # Without this branch, editing blueprints-portfolio-prism.yaml has NO path back into the mounted
+  # Secret: the setup script refuses to re-run without FORCE=1, and FORCE=1 rotates the client pair and
+  # the cookie key to change a comment. This is the path that keeps the two in step.
+  portfolio-prism)
+    TEMPLATE=authentik/blueprints-portfolio-prism.yaml
+    BP_SECRET=apply/10-secrets/authentik-portfolio-prism-blueprint.yaml
+    CRED_SECRET=apply/10-secrets/portfolio-prism-secrets.yaml
+    PH_ID='${PORTFOLIO_OIDC_CLIENT_ID}'; PH_SEC='${PORTFOLIO_OIDC_CLIENT_SECRET}' ;;
   *) echo "FAIL: unknown app '$APP' — see usage" >&2; usage ;;
 esac
 
@@ -87,7 +95,8 @@ trap cleanup EXIT INT TERM
 
 # --- the app's own copy of the client, never printed ---------------------------------------------
 # Key names differ per app — Grafana uses its config keys, open-webui and Mealie theirs — so the pair
-# is found by suffix rather than hard-coded a second time next to the values themselves.
+# is found by suffix rather than hard-coded a second time next to the values themselves. portfolio-prism
+# uses OIDC_CLIENT_ID / OIDC_CLIENT_SECRET, which the suffix lookup below reads without special-casing.
 PAIR=$(CRED="$CRED_SECRET" python3 -c '
 import os, subprocess, sys, yaml
 d = yaml.safe_load(subprocess.run(["sops", "-d", os.environ["CRED"]],

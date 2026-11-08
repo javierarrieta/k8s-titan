@@ -14,10 +14,12 @@
 # NOTHING PRINTS A VALUE. What you see is a truncated SHA-256 per file.
 #
 # ROCKET_SECRET_KEY IS THE ONE THAT BITES IF YOU RE-RUN THIS
-# It signs the session cookie. Rotating it invalidates every live session at once — annoying,
-# recoverable. Regenerating it on a whim while the old one is still in the cluster is worse: the app
-# boots with a key the running pods do not share, and sessions die on whichever pod did not get it.
-# That is why this script refuses to overwrite an existing file without FORCE=1.
+# It signs the session cookie. Rotating it invalidates every live session at once. The quiet failure is
+# not a malformed key — Rocket refuses to launch rather than sign with a key it cannot use, which is
+# loud. The quiet one is a valid key that the running pods do not share: the Deployment is
+# `replicas: 1` with `strategy: Recreate`, so the restarted pod simply rejects every cookie issued
+# before it, and nothing in the logs says so. That is why this script refuses to overwrite an existing
+# file without FORCE=1.
 set -euo pipefail
 
 REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -38,6 +40,10 @@ trap 'rm -f "$STAGE_BP" "$STAGE_APP"' EXIT
 for tool in sops python3; do
   command -v "$tool" >/dev/null || { echo "FAIL: $tool not on PATH"; exit 1; }
 done
+# The render step below hard-requires PyYAML, and every gate in the Makefile checks for it explicitly;
+# checking `python3` alone lets this script fail at the render step with a traceback instead of a line
+# saying what is missing.
+python3 -c 'import yaml' 2>/dev/null || { echo "FAIL: python3 has no yaml module - the render step needs PyYAML"; exit 1; }
 [ -f "$KEY" ] || { echo "FAIL: no age key at $KEY - set SOPS_AGE_KEY_FILE to the file holding the titan-k8s private key"; exit 1; }
 export SOPS_AGE_KEY_FILE="$KEY"
 [ -f "$TEMPLATE" ] || { echo "FAIL: $TEMPLATE missing - nothing to render"; exit 1; }
@@ -47,19 +53,28 @@ for f in "$BP_SECRET" "$APP_SECRET"; do
   [ -f "$f" ] && existing+=("$f")
 done
 if [ ${#existing[@]} -gt 0 ]; then
-  echo "FAIL: these already exist and would be replaced with NEW values:"
-  printf '  %s\n' "${existing[@]}"
-  echo "The app would then present a client authentik does not recognise and sign cookies with a key"
-  echo "no live session matches. If that is what you want, re-run with FORCE=1 and rotate the OIDC"
-  echo "client in the same change."
-  [ "${FORCE:-0}" = "1" ] || exit 1
+  if [ "${FORCE:-0}" = "1" ]; then
+    echo "FORCE=1 set - overwriting."
+    printf '  %s\n' "${existing[@]}"
+  else
+    echo "FAIL: these already exist and would be replaced with NEW values:"
+    printf '  %s\n' "${existing[@]}"
+    echo "The app would then present a client authentik does not recognise and sign cookies with a key"
+    echo "no live session matches. If that is what you want, re-run with FORCE=1 and rotate the OIDC"
+    echo "client in the same change."
+    echo "For a TEXT-ONLY edit to the blueprint, do not use FORCE=1: use"
+    echo "  scripts/rerender-authentik-blueprint.sh portfolio-prism"
+    echo "which re-renders with the existing client pair and rotates nothing."
+    exit 1
+  fi
 fi
 
 CID=$(python3 -c 'import uuid; print(uuid.uuid4())')
 CSEC=$(python3 -c 'import secrets; print(secrets.token_hex(32))')
 # Rocket wants 32 raw bytes, base64-encoded — the same shape `openssl rand -base64 32` produces. It is
-# not a passphrase and must not be "improved" into one: a key that is not 32 bytes makes Rocket refuse
-# to start, which is the loud failure; a key that is merely short is the quiet one.
+# not a passphrase and must not be "improved" into one. Minted at exactly 32 bytes so the value is never
+# the thing that fails: Rocket refuses to launch on a key it cannot use, which is loud, and the quiet
+# failure this line guards against is a VALID key that differs between two pods.
 RKEY=$(python3 -c 'import base64,secrets; print(base64.b64encode(secrets.token_bytes(32)).decode())')
 
 TEMPLATE="$TEMPLATE" STAGE_BP="$STAGE_BP" STAGE_APP="$STAGE_APP" \
@@ -79,6 +94,25 @@ rendered = (tpl.replace("${PORTFOLIO_OIDC_CLIENT_ID}", env["CID"])
 leftover = re.findall(r"\$\{[A-Z_]+\}", rendered)
 if leftover:
     sys.exit(f"FAIL: unsubstituted placeholder(s) remain: {leftover}")
+
+# Parse the rendered blueprint before it is written anywhere. Nothing else in this repo does: the
+# blueprint is inside a Secret, and blueprint-mount-check reads Secret NAMES only, never content. A
+# YAML error here would otherwise reach authentik, where the failure mode is a silent status=ERROR and
+# — per docs/authentik-runbook.md — a possible plaintext client_secret print if anyone runs
+# ak apply_blueprint on it without the redaction filter.
+#
+# The loader must tolerate authentik's `!Find` / `!KeyOf` tags; a plain yaml.safe_load rejects every
+# real blueprint on line one of the first entry, which is a bug that was caught by running this
+# script's own check against the committed Secret. Same device as TagTolerantLoader in
+# tools/blueprint-mount-check.py.
+class TagTolerantLoader(yaml.SafeLoader):
+    pass
+
+TagTolerantLoader.add_multi_constructor("!", lambda loader, suffix, node: None)
+try:
+    yaml.load(rendered, Loader=TagTolerantLoader)
+except yaml.YAMLError as exc:
+    sys.exit(f"FAIL: rendered blueprint is not valid YAML: {exc}")
 
 def dump(path, obj):
     with open(path, "w") as fh:
@@ -111,14 +145,20 @@ dump(env["STAGE_APP"], {
 })
 PY
 
+# Encrypt BOTH, then move both. Interleaving encrypt-and-move per file is how a failure on the second
+# file leaves the blueprint Secret holding a new client pair while the app Secret still holds the old
+# one — authentik then has a client the app does not present, which is the exact split this script
+# exists to prevent. setup-coder-secrets.sh has always done it in this order for the same reason.
 for f in "$STAGE_BP" "$STAGE_APP"; do
   sops --encrypt --in-place "$f"
-  if [ "$f" = "$STAGE_BP" ]; then dest=$BP_SECRET; else dest=$APP_SECRET; fi
   # Confirm the ciphertext is non-empty BEFORE it lands: sops picks recipients from the path it is
   # handed, and a creation-rule miss truncates the destination to zero bytes behind a redirect.
-  [ -s "$f" ] || { echo "FAIL: $f is empty after encryption"; exit 1; }
-  mv "$f" "$dest"
-  echo "wrote $dest  (fingerprint $(python3 -c "import hashlib,sys;print(hashlib.sha256(open(sys.argv[1],'rb').read()).hexdigest()[:12])" "$dest"))"
+  [ -s "$f" ] || { echo "FAIL: $f is empty after encryption - nothing has been moved; both destination files are untouched"; exit 1; }
+done
+mv "$STAGE_BP"  "$BP_SECRET"
+mv "$STAGE_APP" "$APP_SECRET"
+for f in "$BP_SECRET" "$APP_SECRET"; do
+  echo "wrote $f  (fingerprint $(python3 -c "import hashlib,sys;print(hashlib.sha256(open(sys.argv[1],'rb').read()).hexdigest()[:12])" "$f"))"
 done
 
 cat <<'DONE'
@@ -127,14 +167,30 @@ Done. Two files, three values, all encrypted.
 
 Still to do, in order:
   1. make check            the tree gates, including that the blueprint is mounted and listed.
-  2. Merge, then force the blueprint from the UI or wait for the worker's discovery pass.
-     Mounting is not applying - docs/authentik-runbook.md §5. Until it lands, the app's login fails
-     with authentik's "client identifier is missing or invalid" page, which is the same symptom a
-     wrong client id produces. Tell them apart by whether the blueprint has been applied.
-  3. The UI-created client from 2026-11-07 stops working when the blueprint lands. Anything still
-     using it — a local cargo run, a saved .env — needs the new values from:
+  2. Merge, then APPLY the blueprint. Mounting is not applying.
+     Do NOT "force it from the UI" — §5's UI path is read-only status. The procedure is
+     docs/authentik-runbook.md §5, and it starts with the redaction filter, because a validation
+     failure prints client_secret in plaintext and this file's secret is exactly the 64-hex shape
+     that filter redacts:
+       kubectl -n auth exec deploy/authentik-worker -- \
+         ak apply_blueprint --dry-run /blueprints/mounted/secret-authentik-portfolio-prism-blueprint/portfolio-prism.yaml \
+         2>&1 | sed -E 's/[a-f0-9]{64}/REDACTED/g' | tail -20
+     then the same command without --dry-run. Needs an admin context: k8s-reader is Forbidden on
+     pods/exec. Otherwise wait for the worker's discovery pass, which can be up to ~50 minutes —
+     during which "login fails" is the CORRECT state, not a fault.
+     To tell "not applied yet" from "wrong client id", read BlueprintInstance.status for
+     titan-portfolio-prism (UI Directory -> Blueprints, or the ak shell one-liner in
+     docs/grafana-runbook.md); expect `successful`. The worker log line "Applying blueprint due to
+     changed file" proves dispatch, not success.
+  3. The UI-created client from 2026-11-07 stops working IF the slug match held — that is the whole
+     point of keying on slug. Confirm no second provider exists: list Providers in the UI and delete
+     anything portfolio-prism-shaped that this blueprint did not create. Anything still using the old
+     credentials — a local cargo run, a saved .env — needs the new values from:
          sops -d apply/10-secrets/portfolio-prism-secrets.yaml
-  4. The FIRST authentik user to sign in owns whatever the placeholder row holds. On a fresh volume
-     that is nothing. Do not set BOOTSTRAP_OWNER_SUBJ to migrate an existing database without reading
-     the app's docs/auth-testing.md §6 first: the transfer is one-way.
+  4. The FIRST authentik user to sign in takes ownership of any rows that exist with no owner. On a
+     fresh volume there are none. titan-family has more than one member, so on a restored volume this
+     is a race, not a formality. Do not set BOOTSTRAP_OWNER_SUBJ to migrate an existing database
+     without reading the app's docs/auth-testing.md §6 first: the transfer is one-way.
+
+Rollback is not `git revert`. See docs/portfolio-prism-bringup-2026-11-08.md, "Rollback".
 DONE

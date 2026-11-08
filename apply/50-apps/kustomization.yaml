@@ -180,8 +180,8 @@ resources:
   # own database server (SQLite on a PVC), one pod with two containers — and a bad field here freezes
   # coder's and authentik's *updates*, which is the accepted cost recorded at the top of this file.
   #
-  # It is the first app in this cluster that authenticates itself: its OIDC client is declared in
-  # authentik/blueprints-portfolio-prism.yaml and its Ingress carries no forwardAuth, the decision
-  # `make ingress-auth` enforces through NOT_PROXY_GATED. The blueprint is mounted by the authentik
-  # HelmRelease below, not here.
+  # Several apps here already authenticate in-app (coder, open-webui, mealie, both Grafanas). What is
+  # new about this one is the combination: its OIDC client is declared in this repo AND its Ingress
+  # carries no proxy-side gate at all, the decision `make ingress-auth` enforces through
+  # NOT_PROXY_GATED. The blueprint is mounted by the authentik HelmRelease below, not here.
   - portfolio-prism/portfolio-prism.yaml
