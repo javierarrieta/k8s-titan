@@ -123,7 +123,7 @@ spec:
       - name: redis
         # Same image and digest tesla runs (apply/60-tesla/redis.yaml:41) — already proven on this
         # node, and pinned by digest per the fleet rule.
-        image: library/redis:8.8.3-alpine@sha256:0b2b77d3ea5078274795e3177cdbdada8b96316684a38911d528534ed679b5ec
+        image: library/redis:8.8.4-alpine@sha256:c027ae0f677dcf73d74038256f5b88c9ba7b11ccbfae97e96a9f091208d36125
         # No persistence, on purpose: Sure uses Redis for Sidekiq queues and short-lived cache. A
         # stale cache is worse than an empty one, and a volume would only make the stale state survive
         # a restart.
