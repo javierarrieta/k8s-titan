@@ -43,7 +43,7 @@ spec:
           # the 26.04-series tag, pushed 2026-10-23; header explains why this is a digest and how
           # to resolve it back to a tag. The full tag is deliberately not written here: a four-part
           # dotted version is what leak-check's IPv4 pattern matches.
-          image: collabora/code@sha256:808410e77b8695a35b93c7638fbba07c10cf0ba8307141b460248f18ab6e5c55
+          image: collabora/code@sha256:95f29f1c0a1778999125f53f058d968fe0afb37c95e32ebfb9f3444140faebd2
           env:
             # coolwsd must not try to create its own certificate; traefik terminates.
             - name: DONT_GEN_SSL_CERT
