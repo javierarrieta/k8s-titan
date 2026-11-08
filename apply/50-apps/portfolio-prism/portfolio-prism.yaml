@@ -96,6 +96,17 @@ spec:
       labels:
         app: portfolio-prism
     spec:
+      # THESE TWO FIELDS MUST LIVE UNDER `securityContext`, NOT AT POD-SPEC LEVEL. They did, and every
+      # offline gate in this repo passed it: kustomize builds, `kubectl kustomize` parses, the CRD field
+      # check does not cover core PodSpec. `make dry-run DRYRUN_CONTEXT=titan` was the only thing that
+      # caught it, with:
+      #   failed to create typed patch object (apps/portfolio-prism; apps/v1, Kind=Deployment):
+      #   .spec.template.spec.fsGroup: field not declared in schema
+      # The API server prunes unknown fields from structural schemas rather than erroring, so on a real
+      # apply this would most likely have been SILENTLY DROPPED — the pod would boot with no fsGroup, the
+      # volume would not be group-writable, and the backend would fail with SQLite error 14 while every
+      # gate in this tree stayed green. This is the whole argument for running dry-run before merge.
+      #
       # fsGroup is what makes the mounted volume writable by the backend, which runs as a non-root uid
       # baked into its image. OnRootMismatch avoids a recursive chown of the whole volume on every pod
       # start.
@@ -116,8 +127,9 @@ spec:
       # docs/superpowers/specs/2026-10-24-titan-llm-endpoint-design.md — and read it from the pinned
       # DIGEST below, not from a tag, for the reason given on the image line.
       # Named because it is the one line here that a green `make check` cannot vouch for.
-      fsGroup: 1000
-      fsGroupChangePolicy: OnRootMismatch
+      securityContext:
+        fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
       containers:
         - name: frontend
           # Pinned by digest, not by tag, and the digest is the one the v0.0.6-M4 release published.

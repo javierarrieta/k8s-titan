@@ -22,14 +22,36 @@ internet. **Nothing in-cluster was executed.**
 make dry-run DRYRUN_CONTEXT=<admin context>
 ```
 
-`k8s-reader` is Forbidden on the resources this touches, so this needs write authorization on the
-cluster, not read. It asks the API server about admission rules — namespace admission under §3.1,
-the `fsGroup`/`runAsUser` combination, Secret references. It cannot see whether the volume is
-writable or whether nginx can write its cache; those are pod-runtime facts and are listed as
-unverified below.
+`k8s-reader` is Forbidden on the resources this touches — a read-only context gets `Forbidden` on the
+first stage and the run reports `00-bootstrap rejected`, which is an auth state, not a schema verdict.
+Use the elevated context (`kadm`; the read-only one is `titan`). It asks the API server about admission
+rules — namespace admission under §3.1, the `fsGroup`/`runAsUser` combination, Secret references. It
+cannot see whether the volume is writable or whether nginx can write its cache; those are pod-runtime
+facts and are listed as unverified below.
 
-Expected pass signature: the script prints the per-namespace apply plan and exits 0. A §3.1 refusal
-names `apps` and the rejected field.
+### It has been run, and it caught a blocker
+
+Run on `ffe27cd`+review-response with a privileged context:
+
+```
+50-apps            REJECTED
+Error from server: failed to create typed patch object (apps/portfolio-prism; apps/v1, Kind=Deployment):
+.spec.template.spec.fsGroup: field not declared in schema
+```
+
+`fsGroup` and `fsGroupChangePolicy` were written at **pod-spec level** instead of under
+`spec.template.spec.securityContext`. Every offline gate passed that — `make check` was green, exit 0,
+all 25 members — because nothing in the offline set validates core PodSpec fields, and the API server
+prunes unknown fields from structural schemas rather than rejecting them. On a real apply the likely
+outcome was **silently dropped `fsGroup`**: pod boots, volume is not group-writable, backend fails with
+SQLite error 14, every gate green. This is the single strongest argument in this repo for running
+`make dry-run` before merging anything that touches a PodSecurityContext.
+
+**Status of the fix:** corrected to sit under `securityContext`, and verified structurally by parsing
+the built object (`pod securityContext: {fsGroup: 1000, fsGroupChangePolicy: OnRootMismatch}`, no stray
+pod-spec fields). **The dry-run has NOT been re-run against the API server on the fixed head** — the
+authoring context is read-only. Re-run it before merge; expected signature is `50-apps ok (N objects)`
+and `dry-run: 6 stage(s) built, 6 accepted by the API server`.
 
 ## Gate coverage — what `make check` actually proved
 
@@ -110,7 +132,7 @@ deliberately not done here.
 
 | Item | Symptom if wrong | Settle it with |
 | --- | --- | --- |
-| Does kubelet apply `fsGroup` to a hostPath-backed `local-path` volume? | backend logs SQLite error 14, `unable to open database file` | `kubectl -n apps exec deploy/portfolio-prism -c backend -- sh -c 'touch /app/data/.w && ls -ln /app/data'`. If it fails, try `fsGroupChangePolicy: Always` (OnRootMismatch can treat a half-fixed root as matched and skip the chmod); if that fails, chown the PV host path on the node — the route `apply/50-apps/investing-agent/investing-agent.yaml` ended up on. |
+| Does kubelet apply `fsGroup` to a hostPath-backed `local-path` volume? | backend logs SQLite error 14, `unable to open database file` | `kubectl -n apps exec deploy/portfolio-prism -c backend -- sh -c 'touch /app/data/.w && ls -ln /app/data'`. If it fails, try `fsGroupChangePolicy: Always` (OnRootMismatch can treat a half-fixed root as matched and skip the chmod); if that fails, chown the PV host path on the node — the route `apply/50-apps/investing-agent/investing-agent.yaml` ended up on. **Note:** until the fix landed this field was not being sent at all, so any earlier observation of "it works" or "it fails" was measuring the absence of fsGroup, not its effect. |
 | nginx writable paths (`/var/run`, `/var/cache/nginx/client_temp`) | CrashLoopBackOff at container start | `kubectl -n apps logs deploy/portfolio-prism -c frontend` |
 | `redirect_uri_type: logout` accepted by the pinned authentik (2026.8.5) | blueprint `status: ERROR`; login never works | the `--dry-run` below, **before** the real apply |
 | Slug match reuses the UI-created provider instead of creating a second one | two `portfolio-prism` providers | list Providers in the authentik UI after apply |
