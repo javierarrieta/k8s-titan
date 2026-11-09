@@ -187,6 +187,24 @@ spec:
             # binary refuses to start with it, which CI proves by running the binary rather than by
             # grepping for a cfg!. There is no env-only escape hatch out of authentication here, and
             # that is the point of the release.
+            # ROCKET_ADDRESS IS NOT OPTIONAL HERE, AND THE PROOF IS UNCOMFORTABLE. Rocket's default bind
+            # address is 127.0.0.1, so with this line absent the backend logs `Rocket has launched from
+            # http://127.0.0.1:8000`, is reachable from nginx in this pod over loopback, and is NOT
+            # reachable at the pod IP. The kubelet probes the pod IP, so the startup probe fails with
+            # `dial tcp <podIP>:8000: connect: connection refused`, the pod never becomes Ready, the
+            # Service excludes it, and the host serves 503 while both containers log success. That is
+            # exactly what happened on the first deploy of this manifest, on merge, with every offline
+            # gate and the full server-side dry-run green — a probe target that exists in the manifest
+            # and in the app's routing table but is unreachable at the address the prober uses is not a
+            # thing any static check can see.
+            #
+            # 0.0.0.0 is the fix, and it costs something: with no policy controller enforcing
+            # NetworkPolicy on this cluster, :8000 becomes reachable from every pod in every namespace,
+            # where loopback-only meant only nginx in this pod could reach it. The alternative — exec
+            # probes curling loopback from inside the container — keeps the tighter bind but needs a
+            # fetch tool in the image, which the slim base does not carry. Chosen: serve, then tighten.
+            - name: ROCKET_ADDRESS
+              value: "0.0.0.0"
             - name: AUTH_MODE
               value: "oidc"
             # Per-provider issuer, trailing slash included. The app compares this against the
