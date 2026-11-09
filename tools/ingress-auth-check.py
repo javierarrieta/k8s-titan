@@ -108,6 +108,16 @@ NOT_PROXY_GATED = {
                                   "ENABLE_LOGIN_FORM=false and group-mapped roles",
     ("mealie", "mealie"): "Mealie is OIDC-only with ALLOW_PASSWORD_LOGIN=false "
                           "(apply/50-apps/mealie/mealie.yaml)",
+    ("apps", "portfolio-prism"): "the app authenticates itself against authentik — OIDC Authorization "
+                                 "Code + PKCE with its own session cookie (AUTH_MODE=oidc on the "
+                                 "Deployment, apply/50-apps/portfolio-prism/portfolio-prism.yaml). A "
+                                 "forwardAuth here would add a second IdP round trip per session and "
+                                 "put the outpost cookie's refresh behaviour (issue #243) in the path "
+                                 "of a host that does not need it. WHO may sign in is a policy binding "
+                                 "to titan-family on the portfolio-prism Application "
+                                 "(authentik/blueprints-portfolio-prism.yaml), which is the whole "
+                                 "group gate: the app has no authorization model beyond a valid "
+                                 "session, and this repo cannot see that binding.",
     ("observability", "grafana"): "authentik OIDC in-app; GF_AUTH_GENERIC_OAUTH_* with auto_login, and "
                                   "the `observability` application is bound to titan-family / "
                                   "titan-grafana-admins so outsiders are refused at the IdP. The "
@@ -193,6 +203,12 @@ PIN_REQUIRED = {
     ("apps", "investing-agent"): "forward-auth plus hermes' own session; unpinned, both travel over "
                                  "cleartext :80 beside the gated HTTPS router "
                                  "(apply/50-apps/investing-agent/investing-agent.yaml)",
+    ("apps", "portfolio-prism"): "its NOT_PROXY_GATED row says the app authenticates in-app, and what "
+                                 "travels is the app's own session cookie, set Secure unconditionally. "
+                                 "Unpinned, the SPA is served over cleartext :80 and every API call "
+                                 "401s into a login redirect loop — the app has no http production "
+                                 "path, so there is nothing for a cleartext router to serve correctly "
+                                 "(apply/50-apps/portfolio-prism/portfolio-prism.yaml)",
     ("apps", "teslamate"): "the forwardAuth is the only group gate this host has, and unpinned it ran "
                            "on :80 too, so the outpost cookie and the TeslaMate session both travelled "
                            "in the clear; pinned 2026-11-05 in the review of #246 "

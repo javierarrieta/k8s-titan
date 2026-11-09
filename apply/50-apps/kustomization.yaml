@@ -174,3 +174,14 @@ resources:
   # namespace and buys no stage. Read that file's header before touching this one — and note that two
   # of the three keys in vert-sh-config are inert, for the reason stated there.
   - vert-sh/vert-sh.yaml
+  # Portfolio Prism, the portfolio and tax-lot tracker at portfolio.titan.arrieta.eu. One hand-written
+  # manifest (PVC + Deployment + Service + Ingress in namespace `apps`), so it is the same shape
+  # investing-agent above: it passes the §3.1 admission test on the hard list — no own Certificate, no
+  # own database server (SQLite on a PVC), one pod with two containers — and a bad field here freezes
+  # coder's and authentik's *updates*, which is the accepted cost recorded at the top of this file.
+  #
+  # Several apps here already authenticate in-app (coder, open-webui, mealie, both Grafanas). What is
+  # new about this one is the combination: its OIDC client is declared in this repo AND its Ingress
+  # carries no proxy-side gate at all, the decision `make ingress-auth` enforces through
+  # NOT_PROXY_GATED. The blueprint is mounted by the authentik HelmRelease below, not here.
+  - portfolio-prism/portfolio-prism.yaml

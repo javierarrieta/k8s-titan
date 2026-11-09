@@ -1,0 +1,190 @@
+# authentik blueprint: Portfolio Prism's OIDC application and provider, for
+# portfolio.titan.arrieta.eu.
+#
+# WHY A BLUEPRINT, WHEN A PROVIDER ALREADY EXISTS
+# A provider was clicked in the admin UI on 2026-11-07 to bring the app up locally. A rebuilt authentik
+# would come back with no Portfolio Prism client at all, and the app refuses to start without one.
+# Same argument as blueprints-mealie.yaml and blueprints-coder.yaml;
+# docs/authentik-runbook.md §5 is the record of what a blueprint that is never mounted looks like.
+#
+# IT MATCHES BY SLUG, NOT BY NAME — and that is not a style choice
+# `identifiers` decides whether a blueprint entry updates an existing object or creates a second one.
+# The UI-created provider's *name* is whatever was typed into the form; its *slug* is what the issuer
+# path is built from, and `https://auth.titan.arrieta.eu/application/o/portfolio-prism/.well-known/
+# openid-configuration` answering 200 is the proof of the slug. Identifying on `name` would have
+# created a second provider with a different slug and left the app pointing at the old one, with every
+# gate in this repo green — authentik's rows are not in this tree. Slug is the field the app actually
+# depends on, so slug is the field the identity is keyed on.
+#
+# HOW THIS FILE BECOMES A SECRET
+# Nothing here is applied directly. scripts/setup-portfolio-prism-secrets.sh substitutes the two
+# `${...}` placeholders and writes the result, sops-encrypted, to
+# apply/10-secrets/authentik-portfolio-prism-blueprint.yaml. Later text-only edits to this file go
+# through scripts/rerender-authentik-blueprint.sh portfolio-prism, which re-renders with the EXISTING
+# client pair; re-running the setup script rotates the client and the cookie key to change a comment.
+#
+# NOTHING HERE IS REVERTIBLE BY GIT
+# Every entry is `state: present`. Deleting this file and reverting the Secret does not delete the
+# provider, the application, or the binding from authentik's database — it leaves a live client whose
+# credentials no longer exist in this tree. docs/portfolio-prism-bringup-2026-11-08.md, "Rollback",
+# is the manual procedure. Do not assume `git revert` backs this change out.
+#
+# THE MINTED CLIENT ID SUPERSEDES THE ONE FROM THE UI
+# The script generates a fresh client id and secret. When the blueprint lands, the UI values stop
+# working and anything still using them — including a local `cargo run` against this provider — fails
+# at the authorize step with authentik's "client identifier is missing or invalid" page. Read the
+# current values with:
+#   sops -d apply/10-secrets/portfolio-prism-secrets.yaml
+# That is deliberate rather than an oversight: keeping the UI's secret would mean pasting a credential
+# into this repo's history to make the blueprint authoritative, which is the worse trade.
+#
+# THE ENDPOINTS ARE READ FROM THE LIVE DISCOVERY DOCUMENT, NOT COMPOSED
+# authorize/token/userinfo are GLOBAL paths with no slug; issuer and jwks are per-provider — see
+# blueprints-grafana.yaml. Building `.../o/<slug>/authorize/` returns 404; the app's smoke script
+# asserts that.
+version: 1
+metadata:
+  name: titan-portfolio-prism
+entries:
+  - model: authentik_providers_oauth2.oauth2provider
+    id: portfolio-prism-provider
+    identifiers:
+      slug: portfolio-prism
+    state: present
+    attrs:
+      name: portfolio-prism
+      # NOTE ON WRITING `name`: this provider already exists, created in the admin UI, and its name is
+      # whatever was typed into that form. Because the entry is identified by slug, applying this
+      # RENAMES that object to `portfolio-prism` on first apply. That is intended and harmless — the
+      # slug, not the name, is what the issuer path and every consumer use — but it is what writing
+      # this field does, and it is why `name` is not in `identifiers`.
+      # confidential. The backend is a server-side app holding a secret and it speaks Authorization
+      # Code + PKCE; the `openidconnect` crate refuses to build a confidential client without a
+      # secret, which is why the app refuses to start when OIDC_CLIENT_SECRET is unset rather than
+      # quietly running as a public client.
+      client_type: confidential
+      client_id: "${PORTFOLIO_OIDC_CLIENT_ID}"
+      client_secret: "${PORTFOLIO_OIDC_CLIENT_SECRET}"
+      # Every entry strict, because the port is part of the value and a prefix match would be a
+      # redirect bypass. The app compares nothing — authentik is the authority — but the app refuses
+      # to start if its own OIDC_REDIRECT_URI is an `http:` URL for any host other than localhost,
+      # because its session cookie is `Secure` unconditionally.
+      #
+      # `redirect_uris` is one list carrying both authorization and logout callbacks, told apart by
+      # `redirect_uri_type` (default `authorization`). authentik derives post_logout_redirect_uris
+      # from this same list; there is no separate field to fill.
+      redirect_uris:
+        # The production callback. The path is the backend route, not a frontend route: nginx in the
+        # pod proxies /auth to the backend on loopback, so the browser never sees the difference.
+        - url: https://portfolio.titan.arrieta.eu/auth/callback
+          matching_mode: strict
+        # The two development callbacks, registered because without them the only way to test a login
+        # is to port-forward into the cluster, which pushes people toward not testing at all. A code
+        # sent to `http://localhost` reaches only the developer's own machine and is unusable without
+        # the PKCE verifier that never left it; the residual is any local process on a family member's
+        # machine binding :8000 or :5173 to receive codes. If that reading ever stops being true,
+        # delete these two entries and nothing else in this file changes.
+        - url: http://localhost:8000/auth/callback
+          matching_mode: strict
+        - url: http://localhost:5173/auth/callback
+          matching_mode: strict
+        # LOGOUT callbacks. The app always sends post_logout_redirect_uri, derived as the ORIGIN of
+        # OIDC_REDIRECT_URI — scheme + authority, no trailing slash (origin_of() in the app repo, and
+        # its own test pins the no-slash form). Unregistered, authentik refuses the redirect and
+        # logout lands on an error page instead of the app; the app's docs/auth-testing.md says as
+        # much. Strict, and the no-trailing-slash form is the value actually sent.
+        #
+        # `redirect_uri_type` is the field that makes these logout-capable. It must be confirmed
+        # against the pinned authentik version by the mandated dry-run before any real apply:
+        #   ... ak apply_blueprint --dry-run <path> 2>&1 | sed -E 's/[a-f0-9]{64}/REDACTED/g' | tail -20
+        # A rejected field here is a blueprint that fails to apply, not a broken app — but see the
+        # runbook warning above about why the dry-run goes through the redaction filter first.
+        - url: https://portfolio.titan.arrieta.eu
+          matching_mode: strict
+          redirect_uri_type: logout
+        - url: http://localhost:8000
+          matching_mode: strict
+          redirect_uri_type: logout
+        - url: http://localhost:5173
+          matching_mode: strict
+          redirect_uri_type: logout
+      # authorization_code only, and no refresh_token. The app has no refresh path: its session is an
+      # 8-hour signed cookie and `logout-all` revokes by bumping a column. Advertising a grant the
+      # client never redeems adds a capability with no consumer.
+      grant_types:
+        - authorization_code
+      property_mappings:
+        - !Find [authentik_providers_oauth2.scopemapping, [managed, goauthentik.io/providers/oauth2/scope-openid]]
+        - !Find [authentik_providers_oauth2.scopemapping, [managed, goauthentik.io/providers/oauth2/scope-email]]
+        - !Find [authentik_providers_oauth2.scopemapping, [managed, goauthentik.io/providers/oauth2/scope-profile]]
+      # The app reads two profile claims, `email` and `name`, both optional, both used only to
+      # populate its own user row on first login. Identity is keyed on (issuer, sub) and NEVER on
+      # email. That is why the managed email mapping's `"email_verified": false` — a trap
+      # blueprints-coder.yaml records, and that coder and Mealie both carry an explicit opt-out for —
+      # needs no opt-out here. If a future change starts trusting that claim, this comment is the
+      # thing to re-read first.
+      #
+      # authorization_flow is the stock implicit-consent flow: it asserts NOTHING about how the user
+      # authenticated. Combined with the single group binding below, the whole access posture of this
+      # host is one group membership with whatever factor that default flow happens to require — and
+      # this file does not name or assert that factor. If a second factor is required for this host,
+      # it is enforced by a policy outside this repo, and the per-app gate that BL-1 asks for is where
+      # that assertion belongs.
+      authorization_flow: !Find [authentik_flows.flow, [slug, default-provider-authorization-implicit-consent]]
+      invalidation_flow: !Find [authentik_flows.flow, [slug, default-invalidation-flow]]
+      signing_key: !Find [authentik_crypto.certificatekeypair, [managed, goauthentik.io/crypto/jwt-managed]]
+      # per_provider makes the issuer carry the slug, which is what the app's OIDC_ISSUER must be,
+      # trailing slash included. The app compares its configured issuer against the discovery
+      # document byte for byte, so the two disagreeing by one character is a token-validation failure
+      # that looks like a bad signing key. The app's smoke script asserts that mismatch; it has not
+      # been run against this provider from this workspace.
+      issuer_mode: per_provider
+      # hashed_user_id: stable across renames, and it keeps the username out of every token.
+      #
+      # CHANGING THIS FIELD RE-ISSUES IDENTITY. The app keys a user on (issuer, sub), so flipping the
+      # mode gives the same human a different `sub` and therefore a brand-new user row with an empty
+      # portfolio — the data is not lost, it is owned by the old identity, and there is no admin
+      # surface to move it back. Set once here and never changed.
+      #
+      # It is also the value BOOTSTRAP_OWNER_SUBJ would have to be set to when migrating an existing
+      # database, and with this mode that value is not guessable: log in once and read it from
+      # /auth/me. The transfer it triggers is one-way.
+      sub_mode: hashed_user_id
+
+  - model: authentik_core.application
+    identifiers:
+      slug: portfolio-prism
+    state: present
+    attrs:
+      name: Portfolio Prism
+      slug: portfolio-prism
+      provider: !KeyOf portfolio-prism-provider
+      meta_launch_url: https://portfolio.titan.arrieta.eu/
+      # Written out rather than inherited. The default is `any`, which is what is wanted, but a
+      # security decision should not live in a default a future authentik release may change.
+      policy_engine_mode: any
+      # The Application is not decoration: without an owning Application the provider is not offered on
+      # the user dashboard, which is the only consumer that needs it here.
+
+  # --- who may reach the app at all -----------------------------------------------------------  #
+  # Same shape as the gates in blueprints-mealie.yaml, which carries the full reasoning. Short
+  # version: the IdP refuses before a token exists, `any` means a member of EITHER group gets in,
+  # and a binding naming a group that does not exist DENIES rather than allows.
+  #
+  # Portfolio Prism has no authorization gate of its own beyond "has a valid session", so this binding
+  # is the ONLY thing deciding who can become a user at all. Without it, anyone with any authentik
+  # account gets a login, a user row, and a private portfolio space.
+  #
+  # ONE BINDING, AND WHAT THAT COSTS. apply/50-apps/auth/identity-blueprint.yaml records the standing
+  # rule for this cluster: every app is bound to titan-family AND to its own admin group, precisely
+  # because "a binding naming a group that does not exist DENIES" — a single family-only binding is a
+  # lockout that includes the owner if titan-family is ever emptied or renamed. This app has the
+  # single binding and no second door. See docs/portfolio-prism-bringup-2026-11-08.md, "Access",
+  # for the decision recorded about that and for where titan-family's membership is measured.
+  - model: authentik_policies.policybinding
+    identifiers:
+      target: !Find [authentik_core.application, [slug, portfolio-prism]]
+      order: 0
+    state: present
+    attrs:
+      group: !Find [authentik_core.group, [name, titan-family]]
