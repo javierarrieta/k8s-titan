@@ -10,20 +10,27 @@ destination, and neither half of OpenCloud is backed up (spec 4 of
 `docs/superpowers/specs/2026-10-22-titan-restic-pv-backups-design.md`), so a sync that could delete
 would be a data-loss path with no net under it.
 
-## What has to be true first
+## App tokens are already enabled — this was assumed otherwise once
 
-Two switches in `apply/50-apps/opencloud/opencloud.yaml` gate app tokens, and both were off before
-`drive-sync.yaml` landed:
+Two settings gate app tokens, and **both are already on** in this deployment:
 
-| Setting | Why |
+| Setting | State on titan |
 | --- | --- |
-| `OC_ADD_RUN_SERVICES: collaboration,auth-app` | the token-minting service has to run |
-| `PROXY_ENABLE_APP_AUTH: "true"` | the proxy has to accept the tokens it mints |
+| `PROXY_ENABLE_APP_AUTH` | **defaults to `true`** in 8.1.0 — `services/proxy/pkg/config/defaults/defaultconfig.go:116` |
+| `auth-app` service | runs by default; the App Tokens page in the UI is the proof |
 
-**Deploy those before minting an app token.** With app auth off the web UI still creates tokens,
-still lists them, and WebDAV still answers `401` to every request made with one — which reads as a
-corrupt token rather than as a disabled feature. `AUTH_APP_ENABLE_IMPERSONATION` stays unset; its
-own description says *"Do NOT use in productive deployments"*.
+`apply/50-apps/opencloud/opencloud.yaml` names both explicitly anyway. Not because they are
+missing — because the nightly import rests on them and an upstream default flip should fail in
+review rather than at 04:00.
+
+This was **verified live, not inferred**: an app-token WebDAV listing of the personal space against
+`https://files.titan.arrieta.eu/remote.php/webdav/` succeeded with *neither* variable present in the
+running environment. An earlier draft of this doc claimed app tokens were disabled until this PR
+landed; that was wrong, and believing it would have wasted a merge cycle waiting for something that
+was never blocked. Check the running system before treating a manifest as the truth.
+
+`AUTH_APP_ENABLE_IMPERSONATION` stays unset; its own description says *"Do NOT use in productive
+deployments"*.
 
 ## 1. Google OAuth client — the part that bites
 
@@ -66,8 +73,10 @@ expiry, and copy it immediately; it is shown once.
 
 **The WebDAV username is the trap.** This deployment autoprovisions accounts from authentik
 (`PROXY_AUTOPROVISION_ACCOUNTS=true`), and OpenCloud's own docs warn that under autoprovisioning
-*"only the UUID can be used"* as the WebDAV username. Your login name may also work — try it, and if
-WebDAV keeps answering 401 use the UUID shown on the **Preferences** page instead.
+*"only the UUID can be used"* as the WebDAV username. **On this deployment the login name works** —
+`javier` authenticated over WebDAV and listed the personal space, so the UUID fallback was not
+needed. Keep reading anyway, because it is the first thing to try if a future account 401s: the
+UUID is shown on the **Preferences** page.
 
 Obscure the token for the config file — rclone never stores a plaintext password:
 
@@ -129,16 +138,18 @@ sops matches creation rules against the *input* path, so it dies with `no matchi
 found` *after* the redirect has already truncated the destination to zero bytes. Encrypt to a temp
 file, confirm it is non-empty, then move it into place.
 
-## 6. Turn it on
+## 6. Test it, then turn it on
 
-Flip `spec.suspend: false` in `apply/50-apps/opencloud/drive-sync.yaml`, commit, let Flux sync.
-Then run it once by hand rather than waiting for 04:00 — a suspended CronJob still allows a manual
-job:
+A suspended CronJob still allows a manual job, so test **before** flipping `suspend`:
 
 ```
 kubectl -n files create job drive-sync-once --from=cronjob/drive-sync
 kubectl -n files logs -f job/drive-sync-once
 ```
+
+Watch the first one. It is moving the whole tree into a bucket with no backup, and a half-finished
+import that nobody read the log of is the worst outcome available. When it finishes clean, flip
+`spec.suspend: false` in a commit and let Flux sync.
 
 The preflight in the job names the failing side explicitly, so `Google Drive rejected the token` and
 `OpenCloud WebDAV rejected the app token` are different diagnoses and neither is a guess.
@@ -157,11 +168,10 @@ The preflight in the job names the failing side explicitly, so `Google Drive rej
 
 Nothing in this file has been executed end to end. Specifically:
 
-- **The app-token path is unverified on this deployment.** `PROXY_ENABLE_APP_AUTH` and `auth-app`
-  were added in the same commit as this doc; nobody has watched a WebDAV request succeed with an app
-  token yet.
-- **Whether the login name or the UUID is the WebDAV username here is unknown.** Step 3 gives the
-  decision rule rather than the answer.
+- **Both credential paths are verified.** An app-token WebDAV listing returned the personal space,
+  and a `drive.readonly` refresh token listed Drive, both with a real rclone binary against the
+  committed `rclone.conf`. What has *not* been done is running the actual `rclone copy` inside the
+  cluster — see the `suspend` note in the manifest header.
 - **No alerting covers this job.** titan runs no Prometheus; alert rules live in `../k8s-casa`
   alongside `titan-pv-backup-alerts.yaml`. Until a `kube_job_status_failed` and a staleness rule
   exist there, a sync that stops produces nothing at all. That is the same gap that let the restic

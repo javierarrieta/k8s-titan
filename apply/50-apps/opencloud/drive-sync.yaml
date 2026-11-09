@@ -24,9 +24,10 @@
 # WHY AN APP TOKEN AND NOT A PASSWORD
 # authentik is the identity provider (OC_EXCLUDE_RUN_SERVICES=idp), so there is no OpenCloud password
 # to hand a client that cannot do OIDC. rclone is such a client: its webdav backend speaks
-# Authorization: Basic and nothing else. App tokens are the supported bridge, and they need two
-# switches that were both off until this file landed -- see the comments on OC_ADD_RUN_SERVICES and
-# PROXY_ENABLE_APP_AUTH in opencloud.yaml. docs/drive-sync.md is the procedure.
+# Authorization: Basic and nothing else. App tokens are the supported bridge, and they are ALREADY
+# enabled here -- AllowAppAuth defaults to true in 8.1.0 and auth-app runs by default. Both were
+# confirmed by an actual authenticated listing of the personal space rather than read off the
+# manifest; opencloud.yaml pins the two settings explicitly anyway. docs/drive-sync.md.
 #
 # NOTE ON THE WEBDAV USERNAME
 # Under autoprovisioning (PROXY_AUTOPROVISION_ACCOUNTS=true) the login name is not necessarily a
@@ -50,12 +51,12 @@
 # size means re-listing the whole tree nightly.
 #
 # WHY THE JOB STARTS SUSPENDED
-# The Secret ships holding a placeholder, because the Google refresh token and the OpenCloud app
-# token cannot be minted from a git checkout -- one needs a browser OAuth consent, the other needs
-# this file's own changes deployed first. An unsuspended job with a placeholder Secret fails loudly
-# every night and pages about a misconfiguration that is not a misconfiguration yet. So: fill the
-# Secret, then flip `suspend` to false in a commit. The preflight below catches a placeholder anyway
-# so that a future flip-too-early reads as its own message rather than as an auth failure.
+# Not because credentials are missing -- both remotes in drive-sync-secrets were confirmed
+# authenticating with a real rclone binary before this was committed. It is suspended because the
+# first run moves the whole tree into a bucket that has no backup, on a schedule, unwatched. Merge,
+# run one job by hand and watch it, then flip `suspend` to false in a commit so the nightly cadence
+# starts on something already known to work. The preflight below still catches a placeholder Secret,
+# so a Secret emptied later reads as its own message rather than as an auth failure.
 ---
 apiVersion: batch/v1
 kind: CronJob
