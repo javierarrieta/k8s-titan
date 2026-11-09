@@ -266,8 +266,12 @@ spec:
               value: idp
             # The one-container change: collaboration is an optional supervised service in 8.1.0
             # (opencloud/pkg/runtime/service/service.go:325) rather than a second container.
+            # auth-app is named here alongside it. It is NOT missing by default -- app tokens were
+            # proven working on this deployment before this line existed -- and it is written down for
+            # the same reason as PROXY_ENABLE_APP_AUTH below: drive-sync.yaml rests entirely on it, and
+            # an upgrade that dropped it from the default set should fail in review, not at 04:00.
             - name: OC_ADD_RUN_SERVICES
-              value: collaboration
+              value: collaboration,auth-app
             # --- required secrets -------------------------------------------------------------
             # Each of these is a startup gate, not a preference. Verified against the Validate()
             # functions in 8.1.0: JWT secret (many services), machine-auth key, transfer secret,
@@ -414,6 +418,18 @@ spec:
             - name: PROXY_ROLE_ASSIGNMENT_DRIVER
               value: default
             - name: GRAPH_ASSIGN_DEFAULT_USER_ROLE
+              value: "true"
+            # App tokens: Settings -> App Tokens in the web UI, then use the token as the WebDAV
+            # password. THIS IS ALREADY THE DEFAULT in 8.1.0 --
+            # services/proxy/pkg/config/defaults/defaultconfig.go:116 sets AllowAppAuth: true -- and
+            # it is written down anyway, for exactly the reason PROXY_OIDC_ACCESS_TOKEN_VERIFY_METHOD
+            # is: the nightly import rests on it, and a default flipped upstream would break it
+            # silently. Verified live rather than inferred: an app-token WebDAV listing of the personal
+            # space succeeded with this variable entirely ABSENT from the running environment.
+            # AUTH_APP_ENABLE_IMPERSONATION is deliberately NOT set. Its own desc is "Do NOT use in
+            # productive deployments": it lets an admin mint tokens for other users, which is a
+            # migration convenience and a standing privilege here.
+            - name: PROXY_ENABLE_APP_AUTH
               value: "true"
             # --- S3 as primary storage ---------------------------------------------------------
             - name: STORAGE_USERS_DRIVER

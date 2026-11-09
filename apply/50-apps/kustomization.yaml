@@ -80,18 +80,22 @@ resources:
   - grafana/grafana.yaml
   # Gatus probes casa through public DNS from titan and sends alerts directly to Telegram.
   - gatus/gatus.yaml
-  # OpenCloud, the Infinite Scale fork, replacing the PHP Nextcloud that runs in casa. Two files, and
-  # the split is the failure domain: `opencloud.yaml` is the app (including its WOPI collaboration
+  # OpenCloud, the Infinite Scale fork, replacing the PHP Nextcloud that runs in casa. Three files,
+  # and the split is the failure domain: `opencloud.yaml` is the app (including its WOPI collaboration
   # service, which since 8.1.0 runs inside the same process rather than in a sidecar), `collabora.yaml`
-  # is the editor. A bad field in the editor takes down document opening and nothing else; a bad field
-  # in the app takes down the file service. Both freeze coder's and authentik's updates for the length
-  # of the failure, which is the accepted cost recorded at the top of this file.
+  # is the editor, `drive-sync.yaml` is the nightly Google Drive import. A bad field in the editor
+  # takes down document opening and nothing else; a bad field in the sync job takes down the import and
+  # nothing else, which is the whole reason it is its own file rather than a stanza in the app. A bad
+  # field in the app takes down the file service. All three freeze coder's and authentik's updates for
+  # the length of the failure, which is the accepted cost recorded at the top of this file.
   #
   # Ordering here is intent, not mechanism (see the note at the top of this file): the app reads
   # opencloud-secrets from namespace `files` and titan-tls reflected into it, and a pod that starts
-  # before either exists crash-loops rather than converging.
+  # before either exists crash-loops rather than converging. The sync job reads drive-sync-secrets
+  # from the same namespace, and `secret-refs` is the gate that fails a name it cannot find here.
   - opencloud/opencloud.yaml
   - opencloud/collabora.yaml
+  - opencloud/drive-sync.yaml
   # Mealie, the recipe manager. Two files and the split is the same one open-webui has: the CNPG
   # Database and DatabaseRole live in namespace `databases` because that is where their Cluster is,
   # while the app lives in `mealie`. Listed DB-first for intent, not mechanism — Flux sorts by kind
