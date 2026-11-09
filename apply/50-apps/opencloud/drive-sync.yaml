@@ -1,0 +1,198 @@
+# Google Drive -> OpenCloud, one-way, nightly.
+#
+# WHY THIS EXISTS AS A JOB AND NOT ON SOMEONE'S LAPTOP
+# The alternative is rclone on a workstation, which is cheaper to build and worse: it only runs when
+# that machine is on, and a sync nobody can see fail is a sync that stopped months ago. A CronJob is
+# visible to `kubectl get jobs`, it is covered by the same kube_job_status_failed shape the k8s-casa
+# backup alerts already use, and its config is in git like everything else here.
+#
+# WHY ONE-WAY `copy` AND NOT `sync` OR `bisync`
+# Deliberate, and the reason is the backup gap, not taste. Neither half of OpenCloud is backed up:
+# `files/opencloud-data` is un-annotated for restic and casa cannot mirror the `opencloud-blobs`
+# bucket (spec 4, docs/superpowers/specs/2026-10-22-titan-restic-pv-backups-design.md). So the only
+# copy of anything here is the copy here. `rclone sync` deletes at the destination whatever is
+# missing at the source, which means a Drive-side mistake -- a folder trashed and emptied, a shared
+# drive reorganised, a stale second laptop syncing over the top -- becomes a deletion here, and
+# there is no restore path to catch it. `rclone copy` cannot delete. That is the whole design: this
+# job can only ever add and overwrite. If deletions ever do need to propagate, use
+# `sync --backup-dir trash/<date>` and never bare `sync`, and read the gap note above first.
+#
+# `bisync` was rejected for two reasons beyond direction. rclone still marks it beta, and it needs a
+# persistent state directory, which means a PVC whose loss makes the next run treat both sides as
+# new -- a state volume that would itself be un-backed-up, sitting under a two-way sync.
+#
+# WHY AN APP TOKEN AND NOT A PASSWORD
+# authentik is the identity provider (OC_EXCLUDE_RUN_SERVICES=idp), so there is no OpenCloud password
+# to hand a client that cannot do OIDC. rclone is such a client: its webdav backend speaks
+# Authorization: Basic and nothing else. App tokens are the supported bridge, and they need two
+# switches that were both off until this file landed -- see the comments on OC_ADD_RUN_SERVICES and
+# PROXY_ENABLE_APP_AUTH in opencloud.yaml. docs/drive-sync.md is the procedure.
+#
+# NOTE ON THE WEBDAV USERNAME
+# Under autoprovisioning (PROXY_AUTOPROVISION_ACCOUNTS=true) the login name is not necessarily a
+# valid WebDAV username; OpenCloud's own docs say only the account UUID may work, and the UUID is
+# shown on the Preferences page. Both are carried in the rclone.conf, so this file does not care
+# which one turned out to be right.
+#
+# WHY THE CONFIG IS COPIED OUT OF THE SECRET BEFORE RUNNING
+# rclone rewrites its own config file when it refreshes an OAuth token. The Secret mounts read-only,
+# so pointing RCLONE_CONFIG straight at it makes every run fail on a write error that looks like a
+# permissions bug and is really a design bug. The copy to the emptyDir is the fix, and it is also
+# correct about the consequence: a rotated refresh token is written to an ephemeral layer and lost,
+# which is fine because Google does not rotate refresh tokens on refresh -- it returns a new access
+# token and hands back the same refresh token. If that ever changes, the symptom is this job
+# re-authenticating from scratch every night, not silent corruption.
+#
+# WHY XDG_CACHE_HOME AND TMPDIR ARE SET EXPLICITLY
+# Same trap apply/70-backup/housekeeping.yaml documents for restic: caches resolve from
+# $XDG_CACHE_HOME or $HOME, and uid 65534 has no writable HOME. rclone survives it better than
+# restic did, but it loses its directory cache every run without this, which on a Drive tree of any
+# size means re-listing the whole tree nightly.
+#
+# WHY THE JOB STARTS SUSPENDED
+# The Secret ships holding a placeholder, because the Google refresh token and the OpenCloud app
+# token cannot be minted from a git checkout -- one needs a browser OAuth consent, the other needs
+# this file's own changes deployed first. An unsuspended job with a placeholder Secret fails loudly
+# every night and pages about a misconfiguration that is not a misconfiguration yet. So: fill the
+# Secret, then flip `suspend` to false in a commit. The preflight below catches a placeholder anyway
+# so that a future flip-too-early reads as its own message rather than as an auth failure.
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: drive-sync
+  namespace: files
+  labels:
+    app: drive-sync
+    app.kubernetes.io/name: drive-sync
+    app.kubernetes.io/component: google-drive-import
+    app.kubernetes.io/part-of: opencloud
+spec:
+  # 04:00 UTC. Clear of the restic volume block (18:30-21:00 starts, longest deadline ending 02:30)
+  # and of the 09:00 housekeeping job, so a slow Drive night never overlaps a backup window on the
+  # same MinIO target.
+  schedule: "0 4 * * *"
+  timeZone: "UTC"
+  # A second concurrent copy against the same destination would race on the same paths. Forbid, not
+  # Allow, and not Replace -- Replace would kill a legitimately long first run at the next deadline.
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  # Flip to false in a commit once apply/10-secrets/drive-sync-secrets.yaml holds real credentials.
+  suspend: true
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      # The first run moves the whole tree. At roughly 2 files/second out of Drive -- which is
+      # Google's rate limit and is nothing to do with this cluster's bandwidth -- a tree of tens of
+      # thousands of small files is hours, not minutes. 31 GiB of large files is under an hour.
+      # Generous on purpose: a deadline that kills a half-finished import just retries tomorrow, but
+      # one that kills it at 90% every night means the import never finishes.
+      activeDeadlineSeconds: 14400
+      ttlSecondsAfterFinished: 172800
+      template:
+        metadata:
+          labels:
+            app: drive-sync
+            app.kubernetes.io/component: google-drive-import
+            app.kubernetes.io/part-of: opencloud
+        spec:
+          restartPolicy: Never
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65534
+            runAsGroup: 65534
+            fsGroup: 65534
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: rclone
+              # 1.76.0, pinned by digest the same way apply/70-backup pins restic. A moving tag here
+              # means the thing that broke at 04:00 is not in git.
+              image: docker.io/rclone/rclone@sha256:075cf0e4e0f623996646cfb8a434c71cb4fcfe75bbbe27ccbb296ca04a7cd260
+              command: ["/bin/sh", "-c"]
+              args:
+                - |
+                  set -eu
+                  # Read-only Secret mount -> writable working copy. See the header.
+                  cp /rclone-config/rclone.conf /work/rclone.conf
+                  chmod 600 /work/rclone.conf
+
+                  if grep -q 'REPLACE_WITH' /work/rclone.conf; then
+                    echo "ABORT: drive-sync-secrets still holds the placeholder rclone.conf." >&2
+                    echo "ABORT: mint the Google token and the OpenCloud app token, re-encrypt," >&2
+                    echo "ABORT: and set spec.suspend=false. See docs/drive-sync.md." >&2
+                    exit 1
+                  fi
+
+                  # Preflight both sides separately, because "the sync failed" makes two unrelated
+                  # faults look like one. Mirrors the shape of apply/70-backup/preflight.yaml: fail
+                  # before transferring anything, and name the side that is broken.
+                  if ! rclone lsf gdrive: --max-depth 1 >/dev/null 2>&1; then
+                    echo "ABORT: Google Drive rejected the token -- expired consent or a revoked" >&2
+                    echo "ABORT: OAuth client. Re-run the auth flow; docs/drive-sync.md step 2." >&2
+                    exit 1
+                  fi
+                  if ! rclone lsf titan: --max-depth 1 >/dev/null 2>&1; then
+                    echo "ABORT: OpenCloud WebDAV rejected the app token. Either the token expired," >&2
+                    echo "ABORT: or PROXY_ENABLE_APP_AUTH / auth-app are not live, or the username is" >&2
+                    echo "ABORT: the wrong one for autoprovisioning. docs/drive-sync.md step 3." >&2
+                    exit 1
+                  fi
+                  echo "preflight: both remotes answered"
+
+                  # `copy`, never `sync` -- see the header. This command cannot delete anything at the
+                  # destination and that is the safety property the whole file is built around.
+                  exec rclone copy gdrive: titan:GoogleDrive \
+                    --fast-list \
+                    --transfers 4 \
+                    --checkers 8 \
+                    --drive-export-formats docx,xlsx,pptx,svg \
+                    --retries 3 \
+                    --low-level-retries 10 \
+                    --stats 60s \
+                    --stats-one-line \
+                    --log-level INFO
+              env:
+                - name: RCLONE_CONFIG
+                  value: /work/rclone.conf
+                - name: XDG_CACHE_HOME
+                  value: /work/cache
+                - name: TMPDIR
+                  value: /work/tmp
+                - name: HOME
+                  value: /work
+              volumeMounts:
+                - name: rclone-config
+                  mountPath: /rclone-config
+                  readOnly: true
+                - name: work
+                  mountPath: /work
+              resources:
+                requests:
+                  cpu: 100m
+                  memory: 256Mi
+                limits:
+                  cpu: "1"
+                  # --fast-list holds the Drive tree in memory. 31 GiB of content is irrelevant here;
+                  # what this bounds is file count. Raise it if the tree ever grows past a few
+                  # hundred thousand entries and the job starts being OOMKilled rather than slow.
+                  memory: 768Mi
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                seccompProfile:
+                  type: RuntimeDefault
+                capabilities:
+                  drop:
+                    - ALL
+          volumes:
+            - name: rclone-config
+              secret:
+                secretName: drive-sync-secrets
+                # 0440, not 0400: the file is owned by root and group-owned by fsGroup, so uid 65534
+                # reads it through the group bit. A 0400 mode denies the container its own credential
+                # and the failure is a read error on a file that plainly exists.
+                defaultMode: 0440
+            - name: work
+              emptyDir: {}

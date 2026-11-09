@@ -169,3 +169,14 @@ resources:
   # worker's reloader annotation; `make blueprint-mount-check` fails if either of those two links is
   # broken, which is the failure that otherwise reads as "my edit did nothing".
   - authentik-portfolio-prism-blueprint.yaml
+  # Google Drive -> OpenCloud import. One key, `rclone.conf`, holding a whole rclone config: the
+  # Google OAuth client id/secret and refresh token, and the OpenCloud app token used as a WebDAV
+  # password. One key rather than four env vars because rclone's own config file is the only place it
+  # takes all of them together, and because the job has to copy it to a writable location anyway (it
+  # rewrites the file on token refresh) -- see the header on apply/50-apps/opencloud/drive-sync.yaml.
+  # Consumed by a CronJob's secret volume in namespace `files`, not by a HelmRelease, so `make
+  # release-secrets` cannot vouch for this name; `make secret-refs` can and does. An unlisted file
+  # here would build green and be silently never applied, which is the lie `make secrets-placement`
+  # exists to catch. Ships holding a placeholder with the job suspended; docs/drive-sync.md is the
+  # procedure for putting real credentials in it.
+  - drive-sync-secrets.yaml
