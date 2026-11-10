@@ -85,6 +85,13 @@
 #     rclone keeps one and ignores the rest at NOTICE level with exit 0. There is no rclone flag for
 #     renaming on collision; a real fix means listing Drive by file ID and synthesising unique
 #     destination names, which is a feature and not an option.
+#   - A Drive shortcut whose target has been deleted can never be read: rclone reports "can't read
+#     dangling shortcut" and counts an error, so the exit code is non-zero forever and the nightly
+#     alert pages about a fault nobody can fix. Measured 2026-11-10: 5,927 shortcuts in the tree, 10
+#     of them dangling. `--drive-skip-dangling-shortcuts` skips exactly those. `--drive-skip-shortcuts`
+#     was the wrong tool -- it would have dropped the 5,917 valid shortcuts to work around 10 broken
+#     ones, silently losing whatever is only reachable through a shortcut. The dangling ones are
+#     unrecoverable either way; the flag stops them pretending to be an import failure.
 # The preflight below still catches a placeholder Secret, so a Secret emptied later reads as its own
 # message rather than as an auth failure.
 ---
@@ -196,6 +203,7 @@ spec:
                     --transfers 4 \
                     --checkers 8 \
                     --drive-export-formats docx,xlsx,pptx,svg \
+                    --drive-skip-dangling-shortcuts \
                     --retries 3 \
                     --low-level-retries 10 \
                     --stats 60s \
