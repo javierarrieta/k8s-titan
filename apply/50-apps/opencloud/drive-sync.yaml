@@ -115,6 +115,16 @@ spec:
               args:
                 - |
                   set -eu
+                  # mkdir BEFORE anything else, and this is not defensive padding: TMPDIR and
+                  # XDG_CACHE_HOME below point at /work/tmp and /work/cache, and rclone does NOT
+                  # create its own spool directory. Measured on the first real run (manual job,
+                  # 2026-11-10): 196 files copied cleanly and 11 died with
+                  # "failed to create temporary spool file: open /work/tmp/rclone-spoolNNN: no
+                  # such file or directory". Only files that need to buffer hit it, so a run can
+                  # look healthy while quietly dropping a fraction of the tree -- the exact shape
+                  # of partial failure that reads as success, and the reason the log tail is not
+                  # evidence. /work exists because it is the emptyDir mount; its children do not.
+                  mkdir -p /work/tmp /work/cache
                   # Read-only Secret mount -> writable working copy. See the header.
                   cp /rclone-config/rclone.conf /work/rclone.conf
                   chmod 600 /work/rclone.conf
