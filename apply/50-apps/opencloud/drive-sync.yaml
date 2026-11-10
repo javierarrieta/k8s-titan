@@ -70,13 +70,23 @@
 # restic did, but it loses its directory cache every run without this, which on a Drive tree of any
 # size means re-listing the whole tree nightly.
 #
-# WHY THE JOB STARTS SUSPENDED
-# Not because credentials are missing -- both remotes in drive-sync-secrets were confirmed
-# authenticating with a real rclone binary before this was committed. It is suspended because the
-# first run moves the whole tree into a bucket that has no backup, on a schedule, unwatched. Merge,
-# run one job by hand and watch it, then flip `suspend` to false in a commit so the nightly cadence
-# starts on something already known to work. The preflight below still catches a placeholder Secret,
-# so a Secret emptied later reads as its own message rather than as an auth failure.
+# WHY IT IS NO LONGER SUSPENDED
+# It shipped suspended so the first run -- the whole tree into a bucket that has no backup -- could
+# be watched by hand instead of discovered at 04:00. Two shakedown runs were watched on 2026-11-10
+# and both were stopped by hand before finishing; the first is what surfaced the missing spool
+# directory fixed in #271, which is exactly what the pause was for.
+#
+# WHAT A GREEN RUN STILL DOES NOT PROVE -- the honest caveat on turning this on:
+#   - rclone `copy` exits 0 having transferred nothing. The log tail is not evidence. Count ERROR
+#     lines, or read the transferred-bytes total, before believing a run.
+#   - Drive permits two files with the same name in the same folder; WebDAV does not. Measured on
+#     the live tree: 37 such paths out of 34,965 files, with distinct Drive file IDs and in at least
+#     one pair distinct sizes -- so they are different documents, not one object listed twice.
+#     rclone keeps one and ignores the rest at NOTICE level with exit 0. There is no rclone flag for
+#     renaming on collision; a real fix means listing Drive by file ID and synthesising unique
+#     destination names, which is a feature and not an option.
+# The preflight below still catches a placeholder Secret, so a Secret emptied later reads as its own
+# message rather than as an auth failure.
 ---
 apiVersion: batch/v1
 kind: CronJob
@@ -99,17 +109,21 @@ spec:
   concurrencyPolicy: Forbid
   successfulJobsHistoryLimit: 3
   failedJobsHistoryLimit: 3
-  # Flip to false in a commit once apply/10-secrets/drive-sync-secrets.yaml holds real credentials.
-  suspend: true
+    # Shipped suspended for the shakedown runs; see the header for why it is now on the schedule.
+  suspend: false
   jobTemplate:
     spec:
       backoffLimit: 1
-      # The first run moves the whole tree. At roughly 2 files/second out of Drive -- which is
-      # Google's rate limit and is nothing to do with this cluster's bandwidth -- a tree of tens of
-      # thousands of small files is hours, not minutes. 31 GiB of large files is under an hour.
-      # Generous on purpose: a deadline that kills a half-finished import just retries tomorrow, but
-      # one that kills it at 90% every night means the import never finishes.
-      activeDeadlineSeconds: 14400
+      # The first run moves the whole tree, and these numbers are measured rather than guessed.
+      # Observed on the 2026-11-10 shakedown: ~953 MiB in ~3.5 minutes into OpenCloud over WebDAV,
+      # about 4.5 GB/hour. The source is 43.4 GiB across 34,964 objects (rclone size gdrive:), plus
+      # 1,120 Google-native objects that have no size until exported. That is roughly 10 hours for a
+      # cold copy, so the previous 4h deadline would have killed every attempt -- and because `copy`
+      # skips what already exists, a deadline that fires at 40% every night means the import never
+      # finishes while paging each morning for a fault that is only the deadline.
+      # 12h is ~20% over the cold-copy estimate. Nightly incrementals are a fraction of this and will
+      # not approach it; the value only bites when a run has hung.
+      activeDeadlineSeconds: 43200
       ttlSecondsAfterFinished: 172800
       template:
         metadata:

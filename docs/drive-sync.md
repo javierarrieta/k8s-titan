@@ -167,18 +167,31 @@ sops matches creation rules against the *input* path, so it dies with `no matchi
 found` *after* the redirect has already truncated the destination to zero bytes. Encrypt to a temp
 file, confirm it is non-empty, then move it into place.
 
-## 6. Test it, then turn it on
+## 6. It is enabled — how to tell a run actually worked
 
-A suspended CronJob still allows a manual job, so test **before** flipping `suspend`:
+`spec.suspend` is `false`; the import runs nightly at 04:00 UTC. To run one on demand:
 
 ```
 kubectl -n files create job drive-sync-once --from=cronjob/drive-sync
 kubectl -n files logs -f job/drive-sync-once
 ```
 
-Watch the first one. It is moving the whole tree into a bucket with no backup, and a half-finished
-import that nobody read the log of is the worst outcome available. When it finishes clean, flip
-`spec.suspend: false` in a commit and let Flux sync.
+**Do not judge a run by its tail.** `rclone copy` exits 0 having transferred nothing, and the log is
+mostly INFO-level `Copied` lines, so a run that dropped files reads identically to one that did not.
+The two checks that mean something:
+
+```
+kubectl -n files logs job/drive-sync-once | grep -c ERROR      # must be 0
+kubectl -n files logs job/drive-sync-once | grep -E "ERROR|Duplicate" | head
+```
+
+`Failed to read metadata: object not found` at INFO level is noise — rclone probing the destination,
+one line per file. `Duplicate object found in source - ignoring` at NOTICE level is **not** noise: it
+means Drive held two different files at the same path and only one was written. See the manifest
+header for the measured count and why there is no flag that fixes it.
+
+A manual job is not owned by the CronJob, so it does not consume a history slot — and it is deleted
+by hand when you are done with it, not by the TTL.
 
 The preflight in the job names the failing side explicitly, so `Google Drive rejected the token` and
 `OpenCloud WebDAV rejected the app token` are different diagnoses and neither is a guess.
