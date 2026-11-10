@@ -109,17 +109,21 @@ spec:
   concurrencyPolicy: Forbid
   successfulJobsHistoryLimit: 3
   failedJobsHistoryLimit: 3
-  # Flip to false in a commit once apply/10-secrets/drive-sync-secrets.yaml holds real credentials.
+    # Shipped suspended for the shakedown runs; see the header for why it is now on the schedule.
   suspend: false
   jobTemplate:
     spec:
       backoffLimit: 1
-      # The first run moves the whole tree. At roughly 2 files/second out of Drive -- which is
-      # Google's rate limit and is nothing to do with this cluster's bandwidth -- a tree of tens of
-      # thousands of small files is hours, not minutes. 31 GiB of large files is under an hour.
-      # Generous on purpose: a deadline that kills a half-finished import just retries tomorrow, but
-      # one that kills it at 90% every night means the import never finishes.
-      activeDeadlineSeconds: 14400
+      # The first run moves the whole tree, and these numbers are measured rather than guessed.
+      # Observed on the 2026-11-10 shakedown: ~953 MiB in ~3.5 minutes into OpenCloud over WebDAV,
+      # about 4.5 GB/hour. The source is 43.4 GiB across 34,964 objects (rclone size gdrive:), plus
+      # 1,120 Google-native objects that have no size until exported. That is roughly 10 hours for a
+      # cold copy, so the previous 4h deadline would have killed every attempt -- and because `copy`
+      # skips what already exists, a deadline that fires at 40% every night means the import never
+      # finishes while paging each morning for a fault that is only the deadline.
+      # 12h is ~20% over the cold-copy estimate. Nightly incrementals are a fraction of this and will
+      # not approach it; the value only bites when a run has hung.
+      activeDeadlineSeconds: 43200
       ttlSecondsAfterFinished: 172800
       template:
         metadata:
