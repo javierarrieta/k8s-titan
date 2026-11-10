@@ -201,6 +201,7 @@ spec:
                   exec rclone copy gdrive: titan: \
                     --fast-list \
                     --transfers 4 \
+                    --buffer-size 0 \
                     --checkers 8 \
                     --drive-export-formats docx,xlsx,pptx,svg \
                     --drive-skip-dangling-shortcuts \
@@ -218,6 +219,17 @@ spec:
                   value: /work/tmp
                 - name: HOME
                   value: /work
+                # Go soft memory ceiling, at 0.75x the 8Gi container limit below. Not ~1.0x on purpose:
+                # the cgroup also counts goroutine stacks and page cache from rclone's spool writes to
+                # the emptyDir, none of which GOMEMLIMIT can see, so a soft limit set near the hard one
+                # gets the pod OOMKilled before Go ever decides to collect. Measured effect on a
+                # 600 MiB WebDAV copy: 2161 MiB peak without it, 1261 MiB with a 100Mi setting -- it
+                # reduces and smooths, it does not bound, because live transfer buffers are not
+                # garbage Go is allowed to reclaim. So this is a cushion against a GC-lag overshoot,
+                # not a fix for unbounded growth: if memory still climbs linearly to this ceiling the
+                # job needs batching, not a bigger number.
+                - name: GOMEMLIMIT
+                  value: 6GiB
               volumeMounts:
                 - name: rclone-config
                   mountPath: /rclone-config
@@ -230,16 +242,19 @@ spec:
                   memory: 2Gi
                 limits:
                   cpu: "1"
-                  # Generous on purpose, and the previous value was a measured failure. This ran at
-                  # 768Mi with a comment claiming that bound only mattered "past a few hundred
-                  # thousand entries" -- it was OOMKilled at 35,000, twice, on 2026-11-10, and the
-                  # Job reported Failed with nothing in the log to explain it. What bounds memory is
-                  # not bytes of content: --fast-list holds Drive's per-object metadata for the whole
-                  # tree, and 1,120 Google-native documents are exported to docx/xlsx in-process.
-                  # titan has 128 GiB of RAM and this is a nightly batch job, so the cheap answer is
-                  # to stop the runtime killing a run that was otherwise working. 8Gi is ~6% of the
-                  # node; a limit this far above observed use costs nothing and removes a whole class
-                  # of "the job fails and the log says nothing" debugging.
+                  # 768Mi was OOMKilled twice on 2026-11-10 and the Job reported Failed with nothing
+                  # in the rclone log to explain it -- an OOM is a container event, visible only in
+                  # pod status. The first guess here was that --fast-list held Drive's per-object
+                  # metadata for the whole tree, and that was wrong: measured on the live tree, a full
+                  # recursive listing peaks at 85 MiB with --fast-list and 84 MiB without it.
+                  # What does move memory is bytes in flight into the WebDAV destination: Drive->local
+                  # stays flat at 108 MiB, Drive->WebDAV and local->WebDAV both grow with throughput,
+                  # and 4 files x 150 MiB at --transfers 4 peaked at 2161 MiB. The tree also holds
+                  # seven 1.25 GiB Home Assistant backups, so four concurrent transfers can put ~5 GiB
+                  # in flight on their own. Whether that plateaus or accumulates is not settled yet --
+                  # every probe so far moved far less data than a real run does. 8Gi with GOMEMLIMIT
+                  # below is the cushion; if memory still reaches this ceiling the answer is batching
+                  # the copy, not a bigger number here.
                   memory: 8Gi
               securityContext:
                 allowPrivilegeEscalation: false
