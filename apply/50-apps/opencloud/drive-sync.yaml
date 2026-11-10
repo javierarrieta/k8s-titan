@@ -219,13 +219,20 @@ spec:
               resources:
                 requests:
                   cpu: 100m
-                  memory: 256Mi
+                  memory: 2Gi
                 limits:
                   cpu: "1"
-                  # --fast-list holds the Drive tree in memory. 31 GiB of content is irrelevant here;
-                  # what this bounds is file count. Raise it if the tree ever grows past a few
-                  # hundred thousand entries and the job starts being OOMKilled rather than slow.
-                  memory: 768Mi
+                  # Generous on purpose, and the previous value was a measured failure. This ran at
+                  # 768Mi with a comment claiming that bound only mattered "past a few hundred
+                  # thousand entries" -- it was OOMKilled at 35,000, twice, on 2026-11-10, and the
+                  # Job reported Failed with nothing in the log to explain it. What bounds memory is
+                  # not bytes of content: --fast-list holds Drive's per-object metadata for the whole
+                  # tree, and 1,120 Google-native documents are exported to docx/xlsx in-process.
+                  # titan has 128 GiB of RAM and this is a nightly batch job, so the cheap answer is
+                  # to stop the runtime killing a run that was otherwise working. 8Gi is ~6% of the
+                  # node; a limit this far above observed use costs nothing and removes a whole class
+                  # of "the job fails and the log says nothing" debugging.
+                  memory: 8Gi
               securityContext:
                 allowPrivilegeEscalation: false
                 readOnlyRootFilesystem: true
