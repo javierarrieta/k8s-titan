@@ -10,6 +10,35 @@ destination, and neither half of OpenCloud is backed up (spec 4 of
 `docs/superpowers/specs/2026-10-22-titan-restic-pv-backups-design.md`), so a sync that could delete
 would be a data-loss path with no net under it.
 
+## Where the files land, and why not Personal
+
+The import writes to a **project space** named `google-drive-archive`, not to the Personal space.
+
+The reason is the desktop client. It mirrors Personal, so an import landing there pulls ~31 GB onto
+every laptop that syncs it, and the only defence is the client's **Choose What to Sync** checkbox —
+per device, and one accidental re-tick away from being undone. A space the client does not sync has
+no such lever to get wrong.
+
+**The space id is not the bare UUID, and guessing wastes an hour.** Measured against live OpenCloud
+on 2026-11-10:
+
+| Path tried under `/remote.php/dav/spaces/` | Result |
+| --- | --- |
+| `<uuid>` | `directory not found` |
+| `google-drive-archive` (the slug) | `directory not found` |
+| `<uuid>!<nodeId>` | `directory not found` |
+| `<uuid>$<nodeId>` | **works** |
+| the collection root, no id | `405 Method Not Allowed` on PROPFIND |
+
+The working form is the one the web UI already shows you: open the space and read the **`fileId`
+query parameter** of `/files/spaces/project/<slug>` — it is
+`<spaceId>$<nodeId>!<nodeId>`, and you want the part before the `!`.
+
+Verified end to end with the app token before committing: listed the space root, wrote a probe file,
+read it back with mtime intact to sub-second precision, deleted it cleanly. The destination in the
+CronJob is the space **root**, so OpenCloud's own `.space/` metadata directory sits alongside the
+imported tree; `copy` walks the source only, so rclone never touches it.
+
 ## App tokens are already enabled — this was assumed otherwise once
 
 Two settings gate app tokens, and **both are already on** in this deployment:
@@ -91,13 +120,13 @@ rclone obscure '<app-token>'
 type = drive
 client_id = <from step 1>
 client_secret = <from step 1>
-scope = drive
+scope = drive.readonly
 token = <output of `rclone config get gdrive.token`>
 team_drive =
 
 [titan]
 type = webdav
-url = https://files.titan.arrieta.eu/remote.php/webdav/
+url = https://files.titan.arrieta.eu/remote.php/dav/spaces/<spaceId>$<nodeId>/
 vendor = infinitescale
 user = <username, or the UUID from step 3>
 pass = <output of `rclone obscure`>

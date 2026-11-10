@@ -21,6 +21,26 @@
 # persistent state directory, which means a PVC whose loss makes the next run treat both sides as
 # new -- a state volume that would itself be un-backed-up, sitting under a two-way sync.
 #
+# WHERE THE FILES LAND -- a dedicated project space, not Personal
+# The [titan] remote in drive-sync-secrets points at /remote.php/dav/spaces/<space-id> for the
+# "google-drive-archive" project space, NOT at /remote.php/webdav/ (which is the Personal space).
+# Not tidiness: the desktop client mirrors Personal, so an import landing there downloads ~31 GB onto
+# every laptop that syncs Personal, and the only lever is the client's "Choose What to Sync" checkbox
+# -- a thing someone can un-tick by accident, and a thing that must be remembered per device. Landing
+# in a space the client does not sync removes the failure mode instead of mitigating it.
+#
+# THE SPACE ID IS NOT THE BARE UUID. Measured against live OpenCloud on 2026-11-10: the bare space
+# UUID, the slug "google-drive-archive", and the `<uuid>!<node>` form all fail with "directory not
+# found", and the collection root /remote.php/dav/spaces/ answers 405 Method Not Allowed to PROPFIND.
+# What works is the full `<spaceId>$<nodeId>` form, which is what the web UI puts in the fileId query
+# parameter of /files/spaces/project/<slug>. Verified end to end with the app token before committing:
+# listed the space root, wrote a probe file, read it back with mtime intact to sub-second precision
+# (the infinitescale vendor quirks working), deleted it cleanly.
+#
+# The destination is the space ROOT, so OpenCloud's own `.space/` metadata directory sits alongside
+# the imported tree. `copy` walks the source only and never deletes, so rclone does not touch it; it
+# would collide only if Drive ever held a folder literally named `.space`.
+#
 # WHY AN APP TOKEN AND NOT A PASSWORD
 # authentik is the identity provider (OC_EXCLUDE_RUN_SERVICES=idp), so there is no OpenCloud password
 # to hand a client that cannot do OIDC. rclone is such a client: its webdav backend speaks
@@ -115,6 +135,16 @@ spec:
               args:
                 - |
                   set -eu
+                  # mkdir BEFORE anything else, and this is not defensive padding: TMPDIR and
+                  # XDG_CACHE_HOME below point at /work/tmp and /work/cache, and rclone does NOT
+                  # create its own spool directory. Measured on the first real run (manual job,
+                  # 2026-11-10): 196 files copied cleanly and 11 died with
+                  # "failed to create temporary spool file: open /work/tmp/rclone-spoolNNN: no
+                  # such file or directory". Only files that need to buffer hit it, so a run can
+                  # look healthy while quietly dropping a fraction of the tree -- the exact shape
+                  # of partial failure that reads as success, and the reason the log tail is not
+                  # evidence. /work exists because it is the emptyDir mount; its children do not.
+                  mkdir -p /work/tmp /work/cache
                   # Read-only Secret mount -> writable working copy. See the header.
                   cp /rclone-config/rclone.conf /work/rclone.conf
                   chmod 600 /work/rclone.conf
@@ -144,7 +174,10 @@ spec:
 
                   # `copy`, never `sync` -- see the header. This command cannot delete anything at the
                   # destination and that is the safety property the whole file is built around.
-                  exec rclone copy gdrive: titan:GoogleDrive \
+                  # Destination is the space ROOT: the [titan] url already points inside the
+                  # google-drive-archive space, so a path here would only nest the archive inside
+                  # itself. docs/drive-sync.md has the space-id form and how it was verified.
+                  exec rclone copy gdrive: titan: \
                     --fast-list \
                     --transfers 4 \
                     --checkers 8 \
