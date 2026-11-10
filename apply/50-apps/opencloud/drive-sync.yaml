@@ -198,18 +198,54 @@ spec:
                   # Destination is the space ROOT: the [titan] url already points inside the
                   # google-drive-archive space, so a path here would only nest the archive inside
                   # itself. docs/drive-sync.md has the space-id form and how it was verified.
-                  exec rclone copy gdrive: titan: \
-                    --fast-list \
-                    --transfers 4 \
-                    --buffer-size 0 \
-                    --checkers 8 \
-                    --drive-export-formats docx,xlsx,pptx,svg \
-                    --drive-skip-dangling-shortcuts \
-                    --retries 3 \
-                    --low-level-retries 10 \
-                    --stats 60s \
-                    --stats-one-line \
-                    --log-level INFO
+                  # Two passes, split by file size, because one pass cannot fit in any sane amount of
+                  # memory. This is the third diagnosis of the OOMs and the first one with a direct
+                  # observation behind it rather than an inference:
+                  #   --fast-list was blamed first and is innocent -- a full recursive listing of the
+                  #     live tree peaks at 85 MiB with it and 84 MiB without.
+                  #   a leak was blamed second and is not it. Both OOMKilled pods died ~89s in, at
+                  #     roughly 2 GiB transferred, and the last line before the kill was
+                  #     `Home Assistant/Automatic_backup_...tar` -- one of seven 1.25 GiB files.
+                  #     At --transfers 4 that is ~5 GiB of file data in flight, plus overhead,
+                  #     straight through an 8 Gi limit. Memory pinned at 6.1 GiB, exactly GOMEMLIMIT,
+                  #     and then went over the wall: live transfer buffers are not garbage Go may
+                  #     reclaim, which is why GOMEMLIMIT smoothed the peak and could not bound it.
+                  # So: small files keep the concurrency that makes them fast, and the handful of
+                  # huge ones go one at a time. Serialising the large pass costs nothing -- it is
+                  # seven files -- and 1.25 GiB in flight fits anywhere.
+                  # `copy`, never `sync` -- see the header. This command cannot delete anything at the
+                  # destination and that is the safety property the whole file is built around.
+                  # Destination is the space ROOT: the [titan] url already points inside the
+                  # google-drive-archive space, so a path here would only nest the archive inside
+                  # itself. docs/drive-sync.md has the space-id form and how it was verified.
+                  docopy() {
+                    rclone copy gdrive: titan: \
+                      --fast-list \
+                      --checkers 8 \
+                      --drive-export-formats docx,xlsx,pptx,svg \
+                      --drive-skip-dangling-shortcuts \
+                      --retries 3 \
+                      --low-level-retries 10 \
+                      --stats 60s \
+                      --stats-one-line \
+                      --log-level INFO \
+                      "$@"
+                  }
+
+                  # Both passes run even if the first fails, so one fault does not hide the other and
+                  # a partial night still moves as much of the tree as it can. The job still ends
+                  # non-zero if either failed, which is what the alert keys on.
+                  # A file of exactly 500 MiB matches both filters; harmless, `copy` is idempotent.
+                  rc_small=0
+                  docopy --transfers 4 --max-size 500M || rc_small=$?
+                  rc_large=0
+                  docopy --transfers 1 --min-size 500M || rc_large=$?
+
+                  if [ "$rc_small" -ne 0 ] || [ "$rc_large" -ne 0 ]; then
+                    echo "ABORT: a copy pass failed (small=$rc_small large=$rc_large)" >&2
+                    exit 1
+                  fi
+                  echo "both copy passes completed"
               env:
                 - name: RCLONE_CONFIG
                   value: /work/rclone.conf
@@ -219,15 +255,14 @@ spec:
                   value: /work/tmp
                 - name: HOME
                   value: /work
-                # Go soft memory ceiling, at 0.75x the 8Gi container limit below. Not ~1.0x on purpose:
-                # the cgroup also counts goroutine stacks and page cache from rclone's spool writes to
-                # the emptyDir, none of which GOMEMLIMIT can see, so a soft limit set near the hard one
-                # gets the pod OOMKilled before Go ever decides to collect. Measured effect on a
-                # 600 MiB WebDAV copy: 2161 MiB peak without it, 1261 MiB with a 100Mi setting -- it
-                # reduces and smooths, it does not bound, because live transfer buffers are not
-                # garbage Go is allowed to reclaim. So this is a cushion against a GC-lag overshoot,
-                # not a fix for unbounded growth: if memory still climbs linearly to this ceiling the
-                # job needs batching, not a bigger number.
+                # Go soft memory ceiling, at 0.75x the 8Gi container limit. Not ~1.0x on purpose: the
+                # cgroup also counts goroutine stacks and page cache from rclone's spool writes to the
+                # emptyDir, none of which GOMEMLIMIT can see, so a soft limit set near the hard one
+                # gets the pod OOMKilled before Go ever decides to collect. Kept as a cushion after
+                # the two-pass change, not as the fix: measured on a 600 MiB WebDAV copy it took the
+                # peak from 2161 MiB to 1261 MiB, and in the failing runs memory pinned at exactly this
+                # value and then went over the hard limit anyway, because live transfer buffers are
+                # not garbage Go is allowed to reclaim.
                 - name: GOMEMLIMIT
                   value: 6GiB
               volumeMounts:
@@ -250,11 +285,11 @@ spec:
                   # What does move memory is bytes in flight into the WebDAV destination: Drive->local
                   # stays flat at 108 MiB, Drive->WebDAV and local->WebDAV both grow with throughput,
                   # and 4 files x 150 MiB at --transfers 4 peaked at 2161 MiB. The tree also holds
-                  # seven 1.25 GiB Home Assistant backups, so four concurrent transfers can put ~5 GiB
-                  # in flight on their own. Whether that plateaus or accumulates is not settled yet --
-                  # every probe so far moved far less data than a real run does. 8Gi with GOMEMLIMIT
-                  # below is the cushion; if memory still reaches this ceiling the answer is batching
-                  # the copy, not a bigger number here.
+                  # 8Gi is now sized against a known cause rather than a guess: the large pass runs
+                  # --transfers 1, so the worst case in flight is one 1.25 GiB file plus overhead, and
+                  # the small pass caps each file at 500 MiB across four transfers. Earlier values
+                  # (768Mi, then 8Gi with everything at --transfers 4) were both OOMKilled; see the
+                  # two-pass comment above for what was actually happening.
                   memory: 8Gi
               securityContext:
                 allowPrivilegeEscalation: false
