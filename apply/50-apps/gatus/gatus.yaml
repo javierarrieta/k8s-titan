@@ -484,6 +484,14 @@ data:
       # WHEN THE BOX GOES: delete this whole group in one commit. It is kept contiguous for exactly that
       # reason, so decommissioning is a deletion rather than an archaeological dig.
       #
+      # FIVE PROBES WERE PULLED EARLY, on 2026-11-11, because their backends stopped existing rather
+      # than because the box went. `vps-auth`, `vps-trading-reports`, `vps-databasus`, `vps-grafana`
+      # and `vps-openwebui` all began answering 404 the moment k8s-techdelivery af9ef0d pruned them,
+      # and a `[STATUS] == 200` condition against a 404 is a permanent DOWN at `failure-threshold: 3`
+      # -- roughly 15 minutes of Telegram noise, indefinitely. `vps-auth` was to join them when the
+      # VPS authentik retired in the same sweep. What is left here is the part of the VPS that is
+      # genuinely still live: mail (SMTP/submission/IMAPS/SMTPS/POP3S/MX), SSH, and kanghuru.
+      #
       # NOT PROBED HERE: `hass.v.arrieta.eu` answers HTTP 400 today -- the third instance of the
       # `trusted_proxies` failure this file already documents twice. Probing it would be a permanent
       # DOWN; fix the box first. `llm.v` answers 401.
@@ -593,75 +601,9 @@ data:
             failure-threshold: 3
             send-on-resolved: true
 
-      - name: vps-auth
-        group: vps
-        url: https://auth.v.arrieta.eu/
-        interval: 5m
-        client:
-          timeout: 10s
-        conditions:
-          - "[STATUS] == 200"
-          - "[CERTIFICATE_EXPIRATION] > 120h"
-        alerts:
-          - type: telegram
-            failure-threshold: 3
-            send-on-resolved: true
-
-      - name: vps-trading-reports
-        group: vps
-        url: https://tr.v.arrieta.eu/
-        interval: 5m
-        client:
-          timeout: 10s
-        conditions:
-          - "[STATUS] == 200"
-        alerts:
-          - type: telegram
-            failure-threshold: 3
-            send-on-resolved: true
-
-      - name: vps-databasus
-        group: vps
-        url: https://databasus.v.arrieta.eu/
-        interval: 5m
-        client:
-          timeout: 10s
-        conditions:
-          - "[STATUS] == 200"
-        alerts:
-          - type: telegram
-            failure-threshold: 3
-            send-on-resolved: true
-
       - name: vps-kanghuru
         group: vps
         url: https://kanghuru.v.arrieta.eu/
-        interval: 5m
-        client:
-          timeout: 10s
-        conditions:
-          - "[STATUS] == 200"
-        alerts:
-          - type: telegram
-            failure-threshold: 3
-            send-on-resolved: true
-
-      - name: vps-grafana
-        group: vps
-        url: https://grafana.v.arrieta.eu/api/health
-        interval: 5m
-        client:
-          timeout: 10s
-        conditions:
-          - "[STATUS] == 200"
-        alerts:
-          - type: telegram
-            failure-threshold: 3
-            send-on-resolved: true
-
-      - name: vps-openwebui
-        group: vps
-        url: https://openwebui.v.arrieta.eu/health
         interval: 5m
         client:
           timeout: 10s
