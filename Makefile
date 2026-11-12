@@ -18,7 +18,7 @@ SECRET_FIND := find apply/10-secrets \( -name '*.yaml' -o -name '*.yml' \) ! -na
 # leak-check runs FIRST: make has no -k, so it stops at the first failing prerequisite.
 # validate needs the age key, so an operator who forgot SOPS_AGE_KEY_FILE would never
 # reach a leak gate placed behind it.
-check: py-deps leak-check kustomize-check kustomize-listing validate secrets-placement release-secrets secret-refs ingress-auth tls-reflection-check blueprint-mount-check outpost-binding-check backup-coverage db-url-check oidc-check grafana-oidc-check observability-oidc-check open-webui-oidc-check mealie-check sure-check crd-check namespace-check chart-values-check traefik-exposure-check tesla-forwarder-test
+check: py-deps leak-check kustomize-check kustomize-listing validate secrets-placement release-secrets secret-refs ingress-auth tls-reflection-check blueprint-mount-check outpost-binding-check backup-coverage db-url-check oidc-check grafana-oidc-check observability-oidc-check open-webui-oidc-check mealie-check portfolio-prism-check sure-check crd-check namespace-check chart-values-check traefik-exposure-check tesla-forwarder-test
 	@echo "check: all offline gates passed"
 
 # The subset provable from the tree alone - no age key, no cluster, no network.
@@ -809,3 +809,18 @@ mealie-check:
 # Reads Secrets, so a local gate, not a CI one.
 sure-check:
 	@python3 tools/sure-check.py --root apply
+
+# portfolio-prism-check: prove Portfolio Prism's OIDC client, its mount, the app's env and the
+# rendered blueprint Secret have not been edited apart.
+#
+# This gate exists because the app served zero requests for its first three days with every gate in
+# this repo green. Two causes, both invisible offline: the blueprint identified its provider with
+# `identifiers: slug:`, a field OAuth2Provider does not have, so authentik failed the whole
+# BlueprintInstance and nothing in the file ever applied; and the deployment never set
+# ROCKET_ADDRESS, so Rocket bound 127.0.0.1, the kubelet probes got connection refused, and the pod
+# was never Ready. Neither is a schema violation, so crd-check, kustomize-check and dry-run all pass
+# on both. What caught them was reading files no gate was reading - which is what this now does.
+#
+# Reads Secrets, so a local gate, not a CI one.
+portfolio-prism-check:
+	@python3 tools/portfolio-prism-check.py --root apply
