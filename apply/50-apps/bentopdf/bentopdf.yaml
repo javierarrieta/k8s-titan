@@ -12,9 +12,9 @@
 # MIGRATION NOTE THAT MATTERS — THE SOURCE REPO'S IMAGE PIN IS STALE AND WAS NEVER THE LIVE ONE.
 # The source file pins `bentopdf/bentopdf:sha-fb8c8c0`. The live VPS pod runs
 # `bentopdf/bentopdf:v1.15.3` (measured 2026-11-06, `apps/deploy/bentopdf`, revision 4). That is not
-# the automated updater: ../k8s-techdelivery SECURITY-FOLLOWUP.md:149 records that the updater
-# deliberately could not bump this image ("repo deprecated, no versioned tags available on Docker
-# Hub"), so a person changed it out of band and never committed it. Copying the git pin here would
+# the automated updater: the upstream image repository is deprecated and publishes no versioned tags
+# on Docker Hub, so the updater could not bump this image by design, not by accident. A person changed
+# it out of band and never committed it. Copying the git pin here would
 # have been a silent downgrade of an unknown number of releases. **Take the live tag, not the source
 # repo's.** Everything else about the pod is undrifted — resources, probes and the absence of env vars
 # all match git.
