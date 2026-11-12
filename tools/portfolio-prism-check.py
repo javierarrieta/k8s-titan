@@ -55,6 +55,15 @@ ORIGIN = f"https://{HOST}"
 ISSUER_URL = f"https://auth.titan.arrieta.eu/application/o/{APP}/"
 ISSUER_DISCOVERY = ISSUER_URL + ".well-known/openid-configuration"
 REDIRECT = f"{ORIGIN}/auth/callback"
+# The blueprint registers six: the production callback, two development callbacks (so a login can be
+# tested without port-forwarding into the cluster), and the three logout callbacks the app always
+# sends as post_logout_redirect_uri - derived as the ORIGIN of OIDC_REDIRECT_URI, no trailing slash.
+# Anything beyond this set is unexplained, so it is a failure rather than a surprise.
+ALLOWED_REDIRECTS = {
+    REDIRECT, ORIGIN,
+    "http://localhost:8000/auth/callback", "http://localhost:5173/auth/callback",
+    "http://localhost:8000", "http://localhost:5173",
+}
 PLACEHOLDERS = ("${PORTFOLIO_OIDC_CLIENT_ID}", "${PORTFOLIO_OIDC_CLIENT_SECRET}")
 BP_SECRET_NAME = "authentik-portfolio-prism-blueprint"
 BP_KEY = "portfolio-prism.yaml"
@@ -73,6 +82,12 @@ def provider_of(entries, want=APP):
     return None
 
 
+def attrs_of(entry):
+    """The attrs block of a blueprint entry, or {}. `identifiers` and `attrs` are siblings; a check
+    that reads `redirect_uris` off the entry itself silently reads nothing."""
+    return (entry or {}).get("attrs") or {}
+
+
 def application_of(entries, want=APP):
     for e in entries or []:
         if e.get("model", "").endswith("authentik_core.application") or \
@@ -81,20 +96,23 @@ def application_of(entries, want=APP):
     return None
 
 
-def check_identifier(entry, where, failures):
-    """`slug` is not a field on OAuth2Provider; naming it fails the whole blueprint instance."""
+def identifier_problems(entry, where):
+    """Problems with a provider entry's identifiers. Returns messages rather than printing them, so
+    every finding reaches the caller's fail() and gets both printed and counted."""
+    out = []
     if entry is None:
-        return
+        return out
     ident = entry.get("identifiers") or {}
     if "slug" in ident:
-        failures.append(
+        out.append(
             f"{where}: oauth2provider is identified by `slug: {ident['slug']}`. OAuth2Provider has no "
             "`slug` field - authentik rejects the entry with \"Cannot resolve keyword 'slug' into "
             "field\", which fails the WHOLE BlueprintInstance, so nothing in the file applies. The "
             "issuer path is built from the provider's `name`; identify on `name`.")
     elif ident.get("name") != APP:
-        failures.append(f"{where}: oauth2provider identifiers are {ident}, expected name: {APP} - "
-                        "the issuer path /application/o/<name>/ is built from this value")
+        out.append(f"{where}: oauth2provider identifiers are {ident}, expected name: {APP} - "
+                   "the issuer path /application/o/<name>/ is built from this value")
+    return out
 
 
 def env_of(deploy, name):
@@ -125,7 +143,9 @@ def main():
         fail(f"no reviewed template at {tpl_path}")
     else:
         tpl = load_tolerating_tags(open(tpl_path).read())
-        check_identifier(provider_of(tpl.get("entries")), "blueprints-portfolio-prism.yaml", failures)
+        for msg in identifier_problems(provider_of(tpl.get("entries")),
+                                       "blueprints-portfolio-prism.yaml"):
+            fail(msg)
         app_entry = application_of(tpl.get("entries"))
         if app_entry is None:
             fail("blueprints-portfolio-prism.yaml declares no authentik_core.application - the provider "
@@ -148,7 +168,9 @@ def main():
     rprov = None
     if rendered is not None:
         rprov = provider_of(load_tolerating_tags(rendered).get("entries"))
-        check_identifier(rprov, f"rendered {BP_SECRET_NAME}", failures)
+        attrs = attrs_of(rprov)
+        for msg in identifier_problems(rprov, f"rendered {BP_SECRET_NAME}"):
+            fail(msg)
         for ph in PLACEHOLDERS:
             if ph in rendered:
                 fail(f"the rendered blueprint still carries {ph} - it was committed before the client "
@@ -158,19 +180,31 @@ def main():
             # the check that catches a template fix that never made it into the Secret - landing one
             # without the other fixes nothing while looking fixed.
             want = open(tpl_path).read()
-            want = want.replace(PLACEHOLDERS[0], rprov.get("client_id") or "")
-            want = want.replace(PLACEHOLDERS[1], rprov.get("client_secret") or "")
+            want = want.replace(PLACEHOLDERS[0], attrs.get("client_id") or "")
+            want = want.replace(PLACEHOLDERS[1], attrs.get("client_secret") or "")
             if want != rendered:
                 fail(f"the rendered blueprint is not the reviewed template plus the credentials - "
                      f"{tpl_path} and Secret {BP_SECRET_NAME} have been edited apart. Run "
                      f"scripts/rerender-authentik-blueprint.sh {APP}")
-        attrs = rprov or {}
-        uris = sorted(u.get("url") for u in (attrs.get("redirect_uris") or []))
-        if uris != [REDIRECT]:
-            fail(f"redirect_uris are {uris}, expected ['{REDIRECT}'] - a mismatch is refused by "
+        entries = attrs.get("redirect_uris") or []
+        urls = sorted(u.get("url") for u in entries)
+        login = sorted(u.get("url") for u in entries
+                       if (u.get("redirect_uri_type") or "login") != "logout")
+        logout = sorted(u.get("url") for u in entries
+                        if (u.get("redirect_uri_type") or "") == "logout")
+        if REDIRECT not in login:
+            fail(f"{REDIRECT} is not a login redirect_uri (have {login}) - a mismatch is refused by "
                  "authentik with an error the app never sees")
-        if any((u.get("matching_mode") or "strict") != "strict"
-               for u in (attrs.get("redirect_uris") or [])):
+        if ORIGIN not in logout:
+            fail(f"{ORIGIN} is not registered as a logout redirect_uri (have {logout}). The app always "
+                 "sends post_logout_redirect_uri, derived as the origin of OIDC_REDIRECT_URI with no "
+                 "trailing slash; unregistered, logout lands on an authentik error page instead of the "
+                 "app.")
+        extra = [u for u in urls if u not in ALLOWED_REDIRECTS]
+        if extra:
+            fail(f"unexpected redirect_uris {extra} - the reviewed set is the production callback, the "
+                 f"two localhost dev callbacks, and their logout origins: {sorted(ALLOWED_REDIRECTS)}")
+        if any((u.get("matching_mode") or "strict") != "strict" for u in entries):
             fail("a redirect_uri is not matching_mode: strict - a prefix match is a redirect bypass")
         if attrs.get("issuer_mode") != "per_provider":
             fail(f"issuer_mode is {attrs.get('issuer_mode')!r}, expected per_provider - the app's "
@@ -239,7 +273,7 @@ def main():
             app_val, _ = secret_key(docs, APP_SECRET_NAME, "apps", key)
             if app_val is None:
                 fail(f"{APP_SECRET_NAME} has no {key}")
-            elif rprov and app_val != rprov.get(bp_key):
+            elif rprov and app_val != attrs_of(rprov).get(bp_key):
                 fail(f"{APP_SECRET_NAME} {key} does not match the blueprint's {bp_key} - sign-in fails "
                      "with authentik's \"client identifier is missing or invalid\" while both files "
                      "look fine. Re-render with scripts/rerender-authentik-blueprint.sh "
