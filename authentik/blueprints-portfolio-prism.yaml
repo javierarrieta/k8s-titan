@@ -7,14 +7,26 @@
 # Same argument as blueprints-mealie.yaml and blueprints-coder.yaml;
 # docs/authentik-runbook.md §5 is the record of what a blueprint that is never mounted looks like.
 #
-# IT MATCHES BY SLUG, NOT BY NAME — and that is not a style choice
+# IT MATCHES BY `name`, AND `slug` IS NOT A FIELD ON THIS MODEL
 # `identifiers` decides whether a blueprint entry updates an existing object or creates a second one.
-# The UI-created provider's *name* is whatever was typed into the form; its *slug* is what the issuer
-# path is built from, and `https://auth.titan.arrieta.eu/application/o/portfolio-prism/.well-known/
-# openid-configuration` answering 200 is the proof of the slug. Identifying on `name` would have
-# created a second provider with a different slug and left the app pointing at the old one, with every
-# gate in this repo green — authentik's rows are not in this tree. Slug is the field the app actually
-# depends on, so slug is the field the identity is keyed on.
+# `OAuth2Provider` has NO `slug` field. authentik's own rejection of this file, read from the failed
+# BlueprintInstance on 2026-11-12, is the proof:
+#
+#   Entry invalid: Invalid identifier field: Cannot resolve keyword 'slug' into field.
+#   Choices are: ... name, ...
+#
+# The issuer path `/application/o/<x>/` is built from the provider's `name`, which is why every working
+# blueprint here identifies on `name` — coder, tesla-boards, mealie, observability, open-webui — and
+# why `.../application/o/mealie/.well-known/openid-configuration` answers 200. An earlier revision of
+# this header claimed the path was built from a separate slug and that keying on `name` would strand
+# the app on the old provider. That was backwards, and it cost the app its entire OIDC client: with an
+# unresolvable identifier the WHOLE instance fails, so nothing in this file ever applied — not the
+# provider, not the application, not the group binding. The failure is silent in the worker log
+# (apply_blueprint finishes in 51 ms with exc=null, then clear_failed_blueprints retries it forever);
+# the only place it is written is the BlueprintInstance row.
+#
+# `authentik_core.application` DOES have a `slug`, so the application entry below keeps `slug`.
+# Only the provider entry was wrong.
 #
 # HOW THIS FILE BECOMES A SECRET
 # Nothing here is applied directly. scripts/setup-portfolio-prism-secrets.sh substitutes the two
@@ -49,15 +61,16 @@ entries:
   - model: authentik_providers_oauth2.oauth2provider
     id: portfolio-prism-provider
     identifiers:
-      slug: portfolio-prism
+      name: portfolio-prism
     state: present
     attrs:
       name: portfolio-prism
-      # NOTE ON WRITING `name`: this provider already exists, created in the admin UI, and its name is
-      # whatever was typed into that form. Because the entry is identified by slug, applying this
-      # RENAMES that object to `portfolio-prism` on first apply. That is intended and harmless — the
-      # slug, not the name, is what the issuer path and every consumer use — but it is what writing
-      # this field does, and it is why `name` is not in `identifiers`.
+      # NOTE ON WRITING `name`: it appears in `identifiers` AND in `attrs`, and for this model that is
+      # the same column — `name` is both the identity and the issuer path segment. Writing it in `attrs`
+      # is therefore a no-op when the identifier matched, and harmless. If a UI-created provider with a
+      # DIFFERENT name still exists, this entry creates a second provider rather than renaming that
+      # one; the app points at `name: portfolio-prism`, so the new one is the one that works and the old
+      # one must be deleted by hand. Blueprints do not delete. See "NOTHING HERE IS REVERTIBLE BY GIT".
       # confidential. The backend is a server-side app holding a secret and it speaks Authorization
       # Code + PKCE; the `openidconnect` crate refuses to build a confidential client without a
       # secret, which is why the app refuses to start when OIDC_CLIENT_SECRET is unset rather than
