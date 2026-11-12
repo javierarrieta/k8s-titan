@@ -79,7 +79,7 @@ spec:
           type: RuntimeDefault
       containers:
       - name: fleet-telemetry
-        image: tesla/fleet-telemetry:v0.9.5@sha256:7cb5f429210128b8edc5aac1e403589315893106f4c5a3ff85cb32213e2f8e37
+        image: tesla/fleet-telemetry:v0.10.0@sha256:5b84420d8c18fe1379f79a4ca7aef59a9096c9ff9f18a0a9519b4bdb6989cdc1
         # No command: the image's Cmd is already
         # ["/fleet-telemetry", "-config", "/etc/fleet-telemetry/config.json"], which is exactly
         # where the ConfigMap below lands. Restating it would only create a second place to be wrong.
