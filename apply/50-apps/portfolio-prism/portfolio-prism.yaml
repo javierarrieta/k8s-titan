@@ -132,12 +132,12 @@ spec:
         fsGroupChangePolicy: OnRootMismatch
       containers:
         - name: frontend
-          # Pinned by digest, not by tag, and the digest is the one the v0.0.6-M4 release published.
+          # Pinned by digest, not by tag, and the digest is the one the v0.0.6-M5 release published.
           # The rollback story for an auth change is "roll back the image revision": AUTH_MODE=disabled
           # is not compiled into a release build, so no environment variable can undo a bad auth
           # deploy, and `kubectl rollout undo` against `:latest` is a no-op because the pod template is
           # byte-identical.
-          image: ghcr.io/javierarrieta/portfolio-prism/frontend@sha256:87c7f33647838f6c97c6bbea3f1cecb2ce2e728febcabb8905c750356fa5f173
+          image: ghcr.io/javierarrieta/portfolio-prism/frontend@sha256:c977532483091e07d061fafdb6da1e183f24ed75fe94bc1c673d4f88f8c14514
           ports:
             - name: http
               containerPort: 80
@@ -173,7 +173,10 @@ spec:
             periodSeconds: 20
 
         - name: backend
-          image: ghcr.io/javierarrieta/portfolio-prism/backend@sha256:2941c247e8f608af2f4907aedc63cbc9be1765d1b94b64c7f98a83236381d2a1
+          # v0.0.6-M5. M5 runs a decimal-column migration, a duplicate-row collapse and a unique
+          # index creation inside `init_db`, i.e. before Rocket binds the port. The startup probe below
+          # (60 x 5s) is what keeps the kubelet from killing the container mid-migration.
+          image: ghcr.io/javierarrieta/portfolio-prism/backend@sha256:35e2d2fa232f36ad5a22acc2d26c63117cc138659415b9cf5ad8cd15de6573a4
           ports:
             # NOT named `http`. Named ports must be unique within a pod, and the Service below
             # resolves `targetPort: http`; two containers both calling their port `http` (8000 here,
@@ -183,6 +186,14 @@ spec:
             - name: api
               containerPort: 8000
           env:
+            # Rocket binds 127.0.0.1 unless told otherwise, and a pod-local bind is unreachable from
+            # the kubelet: every probe arrives from the node and gets `connection refused`. Measured on
+            # the live pod 2026-11-12 — 1021 restarts, `Startup probe failed: Get
+            # "http://10.62.0.238:8000/": ... connection refused` x37734 over 2d4h, while the container
+            # log read `Rocket has launched from http://127.0.0.1:8000`. Upstream's own k8s manifest
+            # omits this variable; the casa deployment has set it since M3 and never showed the symptom.
+            - name: ROCKET_ADDRESS
+              value: "0.0.0.0"
             # `oidc` and nothing else. `disabled` is compiled out of a release build on purpose — the
             # binary refuses to start with it, which CI proves by running the binary rather than by
             # grepping for a cfg!. There is no env-only escape hatch out of authentication here, and
