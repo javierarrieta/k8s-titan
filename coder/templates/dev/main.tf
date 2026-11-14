@@ -68,15 +68,17 @@ resource "kubernetes_persistent_volume_claim_v1" "home" {
 
 # The image is a parameter rather than a literal because the whole point of a baked workspace image
 # is that software ships by rebuilding it; pinning it in source would mean a git commit per image bump
-# and a template push is already that. Default is 0.0.11, read from the GHCR tag list
+# and a template push is already that. Default is 0.0.12, read from the GHCR tag list
 # (`/v2/.../tags/list`, highest semver) rather than copied from coder-templates, which still pins
 # 0.0.7. The repo is public-readable — verified with an anonymous pull token — so no imagePullSecret.
+# 0.0.12 is the first image carrying rootless podman, which is what lets a workspace run its own
+# postgres:18 for tests instead of testing against a different engine than production.
 data "coder_parameter" "workspace_image" {
   name         = "workspace_image"
   display_name = "Workspace image"
   description  = "Workspace container image (registry/repo:tag)"
   type         = "string"
-  default      = "ghcr.io/javierarrieta/coder-workspaces-nix:0.0.11"
+  default      = "ghcr.io/javierarrieta/coder-workspaces-nix:0.0.12"
   mutable      = true
 }
 
