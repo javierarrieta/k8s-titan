@@ -179,6 +179,10 @@ metadata:
   namespace: site
 spec:
   redirectRegex:
+    # permanent: true -> 301. redirectScheme above needed no such line because permanent is its
+    # explicit option; redirectRegex DEFAULTS to 302, and a canonical-host redirect that search
+    # engines should treat as final must be 301. Measured 2026-11-14: apex hop answered 302.
+    permanent: true
     regex: ^https://techdelivery\.es(:[0-9]+)?(/.*)?$
     replacement: https://www.techdelivery.es${2}
 ---
