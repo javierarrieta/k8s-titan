@@ -60,7 +60,7 @@ spec:
         runAsGroup: 101
       containers:
         - name: site
-          image: ghcr.io/techdelivery/techdelivery-site@sha256:db6b51e4ad371c0ebbaa67ae0055e08d1f3d961676f460b77e22cc3b99f8de87
+          image: ghcr.io/techdelivery/techdelivery-site@sha256:c644a54e20c74d60fa9b309a94baf3b192a9349f4eb71fb933490b6bbb0d3632
           ports:
             - name: http
               containerPort: 8080
