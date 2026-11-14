@@ -8,24 +8,26 @@
 # backup annotation: the image IS the state, and the state is in git.
 #
 # PUBLIC BY DECISION, NOT BY OMISSION. This is a marketing site; it is meant to be readable by
-# everyone on the internet. Its Ingress carries no `router.middlewares`, and it pins websecure so
-# https is the only answer. Note that tools/ingress-auth-check.py does NOT see this host: that gate
-# is scoped to APEX=titan.arrieta.eu and treats off-domain hosts as out of scope, so this header is
-# the record of the decision, not a NOT_PROXY_GATED row. What is deliberately NOT here: forwardAuth
-# (nothing to gate) and analytics. HSTS IS set — one year, no includeSubDomains — but it lives in the
-# image (security-headers.conf in the site repo), not here; the header of that file states why the
-# assertion is scoped to this host and not the apex.
+# everyone on the internet. Its Ingress carries no AUTH middleware; the only Middlewares are the two
+# redirects below (cleartext->HTTPS, apex->www). Note that tools/ingress-auth-check.py does NOT see
+# this host: that gate is scoped to APEX=titan.arrieta.eu and treats off-domain hosts as out of
+# scope, so this header is the record of the decision, not a NOT_PROXY_GATED row. What is
+# deliberately NOT here: forwardAuth (nothing to gate) and analytics. HSTS IS set — one year, no
+# includeSubDomains — but it lives in the image (security-headers.conf in the site repo), not here;
+# the header of that file states why the assertion is scoped to this host and not the apex.
 #
-# THE TWO EXTERNAL DEPENDENCIES THIS MANIFEST CANNOT PROVE:
-#   1. DNS. `www.techdelivery.es` must be an A record for 37.187.159.156 (titan). It is NOT yet:
-#      the name is currently held by an OVH web-redirect product (see the unmanaged-records list in
-#      ../public-dns-tf/records_techdelivery.tf). The redirect must be cancelled in the OVH console
-#      and the record declared in ../public-dns-tf BEFORE the certificate can issue or the host
-#      resolves here. Until then this app reconciles and serves nothing to the outside world.
-#   2. IMAGE PULL. ghcr.io/techdelivery/techdelivery-site must be pullable by the cluster. The
-#      package defaults to private on first push; it has to be flipped to public (package settings)
-#      or a pull secret added here. Public is the chosen shape: the image is three public files in
-#      nginx, and the private thing is the source repo, not the artifact.
+# CANONICAL HOST: www.techdelivery.es. The apex also resolves here (the A record was moved off the
+# mail host in November 2026; ../public-dns-tf still declares the old target and needs a drift PR)
+# and serves nothing but a 301 to www — one host answers content, the other only points. The apex
+# therefore needs its own SAN on the Certificate: an apex request that gets Traefik's fallback
+# default cert reads as "invalid certificate" to the browser before any redirect can run.
+#
+# STATUS OF THE TWO EXTERNAL DEPENDENCIES (both resolved 2026-11-14, kept as the record):
+#   1. DNS: `www` and the apex both answer 37.187.159.156 (titan). The OVH redirect product was
+#      cancelled and the records moved; the public-dns-tf declarations are the open follow-up.
+#   2. IMAGE PULL: the ghcr package was flipped to public; anonymous pull returns a token. Public
+#      is the chosen shape: the image is public files in nginx, and the private thing is the source
+#      repo, not the artifact.
 #
 # IMAGE PINNED BY DIGEST, per the house rule: `kubectl rollout undo` against a mutable tag is a
 # no-op, and a digest is the only thing that makes rollback real. The digest is the one
@@ -39,9 +41,11 @@ metadata:
     app: techdelivery-site
   namespace: site
 spec:
-  # Two replicas on one node buys the rolling-update property (a new pod serves before the old one
-  # exits) at the cost of one idle nginx. Static content; the idle cost is ~10 MiB.
-  replicas: 2
+  # One replica: single-node cluster, so a second copy guards against nothing — a dead node takes
+  # both. Updates stay zero-downtime anyway: the default RollingUpdate (maxSurge 25% -> 1) starts
+  # the new pod before the old one exits, which is the only property the second replica was ever
+  # buying.
+  replicas: 1
   selector:
     matchLabels:
       app: techdelivery-site
@@ -56,7 +60,7 @@ spec:
         runAsGroup: 101
       containers:
         - name: site
-          image: ghcr.io/techdelivery/techdelivery-site@sha256:895a4197ed8ac3b27564255ce2d8cdd7b24c94bae1583e1f5569fac7547a44ae
+          image: ghcr.io/techdelivery/techdelivery-site@sha256:802441534bba78bfc63b78b829b186b1a9a4b2d9e37cc27761c32390ff04dff3
           ports:
             - name: http
               containerPort: 8080
@@ -119,14 +123,16 @@ kind: Ingress
 metadata:
   name: techdelivery-site
   namespace: site
-  # The websecure pin, same reason as every PIN_REQUIRED host here: this cluster's Traefik runs no
-  # global HTTP->HTTPS redirect, so an unpinned router also serves the host on cleartext :80. For a
-  # public site that is not a session leak, it is a canonical-host problem — visitors and crawlers
-  # indexing http:// — and the pin makes https the only answer. Verified after apply with:
-  #   curl -o /dev/null -w '%{http_code}\n' http://www.techdelivery.es/   -> expect 404
+  # Cleartext is not served, it is ANSWERED: `web` is on the router so http:// reaches Traefik and
+  # the redirect-to-https Middleware 301s it to https. This is per-host on purpose — a global
+  # HTTP->HTTPS redirect on the Traefik install would change behaviour for every other host here,
+  # several of which answer on :80 by decision (see the PIN_REQUIRED comment in
+  # tools/ingress-auth-check.py). Verified after apply with:
+  #   curl -o /dev/null -w '%{http_code}\n' http://www.techdelivery.es/   -> expect 301
   annotations:
-    traefik.ingress.kubernetes.io/router.entrypoints: websecure
-  # NO `router.middlewares`: the site is public on purpose; see the header. The ingress-auth gate
+    traefik.ingress.kubernetes.io/router.entrypoints: web,websecure
+    traefik.ingress.kubernetes.io/router.middlewares: site-redirect-to-https@kubernetescrd
+  # No AUTH middleware: the site is public on purpose; see the header. The ingress-auth gate
   # is scoped to the titan apex and does not read this host, so the header carries the decision.
 spec:
   ingressClassName: traefik
@@ -146,4 +152,67 @@ spec:
   # allow-lists there, which is what tls-reflection-check enforces.
   - hosts:
     - www.techdelivery.es
+    secretName: techdelivery-es-tls
+---
+# Cleartext -> HTTPS, permanent. Applied to both routers here; Traefik runs it as a no-op on
+# requests that already arrive on https, so one Middleware serves both jobs.
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: redirect-to-https
+  namespace: site
+spec:
+  redirectScheme:
+    scheme: https
+    permanent: true
+---
+# Apex -> www, permanent. Runs only on the apex router. The port group is matched so a request that
+# arrives with an explicit port still redirects cleanly (the port is dropped; no router here listens
+# on anything but 80/443). Traefik chains a router's middlewares in NAME ORDER, and
+# `redirect-to-https` sorts before `redirect-to-www`: an http://apex request is first sent to
+# https (one hop), and the https request that comes back is then sent to www (second hop). Two
+# hops for the rare http://apex visitor, one hop for https://apex and for http://www.
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: redirect-to-www
+  namespace: site
+spec:
+  redirectRegex:
+    regex: ^https://techdelivery\.es(:[0-9]+)?(/.*)?$
+    replacement: https://www.techdelivery.es${2}
+---
+# The apex router: it exists ONLY so the two redirects have somewhere to attach for
+# techdelivery.es. No visitor ever reaches the backend through it — both middlewares short-circuit
+# with a 301 — but an Ingress needs a backend, and pointing it at the site Service is the honest
+# answer: if a middleware is ever deleted, the failure is "apex serves the site" (wrong canonical
+# host, visible immediately), not a 404 that hides the missing redirect.
+#
+# The tls block is the other half of the fix: without the apex SAN on the Certificate, an
+# https://techdelivery.es request gets Traefik's fallback default cert — the browser's
+# "your connection is not private" wall appears BEFORE any redirect could run.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: techdelivery-apex
+  namespace: site
+  annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: web,websecure
+    traefik.ingress.kubernetes.io/router.middlewares: site-redirect-to-https@kubernetescrd,site-redirect-to-www@kubernetescrd
+spec:
+  ingressClassName: traefik
+  rules:
+  - host: techdelivery.es
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: techdelivery-site
+            port:
+              number: 80
+  tls:
+  - hosts:
+    - techdelivery.es
     secretName: techdelivery-es-tls
