@@ -189,3 +189,9 @@ resources:
   # carries no proxy-side gate at all, the decision `make ingress-auth` enforces through
   # NOT_PROXY_GATED. The blueprint is mounted by the authentik HelmRelease below, not here.
   - portfolio-prism/portfolio-prism.yaml
+  # techdelivery-site: the public marketing site at www.techdelivery.es. Static nginx, own
+  # namespace (own Certificate + own DNS per §3.1), shared stage per §3.2. The two live
+  # dependencies git cannot prove — the DNS cutover off the OVH redirect product and the ghcr
+  # package visibility flip — are stated in the manifest header; neither blocks apply, both
+  # block "the world can reach the site".
+  - techdelivery-site/techdelivery-site.yaml

@@ -6,3 +6,6 @@ resources:
   # Not redundant with titan-wildcard: TeslaMate's Erlang stream client rejects wildcard SANs.
   # The header of the file says why in full; do not collapse this into the wildcard.
   - tesla-streaming.yaml
+  # www.techdelivery.es: the first certificate outside arrieta.eu; header states the OVH-
+  # scope assumption and why the apex is not on it.
+  - techdelivery-es.yaml

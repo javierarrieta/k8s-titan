@@ -1,0 +1,148 @@
+# techdelivery-site — the public marketing site at https://www.techdelivery.es.
+#
+# WHAT THIS IS: a bilingual (EN/ES) static HTML/CSS/JS page built in
+# github.com/Techdelivery/techdelivery_site, containerised there as
+# nginxinc/nginx-unprivileged serving three files. No database, no volume, no credentials, no
+# server-side logic — the closest relative in this tree is vert-sh: nginx serving a static build.
+# That shape is why this app needs nothing from 30-databases, nothing from 10-secrets, and no
+# backup annotation: the image IS the state, and the state is in git.
+#
+# PUBLIC BY DECISION, NOT BY OMISSION. This is a marketing site; it is meant to be readable by
+# everyone on the internet. Its Ingress carries no `router.middlewares`, and it pins websecure so
+# https is the only answer. Note that tools/ingress-auth-check.py does NOT see this host: that gate
+# is scoped to APEX=titan.arrieta.eu and treats off-domain hosts as out of scope, so this header is
+# the record of the decision, not a NOT_PROXY_GATED row. What is deliberately NOT here: forwardAuth
+# (nothing to gate), HSTS (a sticky host-wide decision deferred until the domain has settled here),
+# and analytics.
+#
+# THE TWO EXTERNAL DEPENDENCIES THIS MANIFEST CANNOT PROVE:
+#   1. DNS. `www.techdelivery.es` must be an A record for 37.187.159.156 (titan). It is NOT yet:
+#      the name is currently held by an OVH web-redirect product (see the unmanaged-records list in
+#      ../public-dns-tf/records_techdelivery.tf). The redirect must be cancelled in the OVH console
+#      and the record declared in ../public-dns-tf BEFORE the certificate can issue or the host
+#      resolves here. Until then this app reconciles and serves nothing to the outside world.
+#   2. IMAGE PULL. ghcr.io/techdelivery/techdelivery-site must be pullable by the cluster. The
+#      package defaults to private on first push; it has to be flipped to public (package settings)
+#      or a pull secret added here. Public is the chosen shape: the image is three public files in
+#      nginx, and the private thing is the source repo, not the artifact.
+#
+# IMAGE PINNED BY DIGEST, per the house rule: `kubectl rollout undo` against a mutable tag is a
+# no-op, and a digest is the only thing that makes rollback real. The digest is the one
+# `Publish image` run of techdelivery_site publishes; the release flow is: push site repo -> read
+# digest from the workflow log -> one-line digest bump PR here.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: techdelivery-site
+  labels:
+    app: techdelivery-site
+  namespace: site
+spec:
+  # Two replicas on one node buys the rolling-update property (a new pod serves before the old one
+  # exits) at the cost of one idle nginx. Static content; the idle cost is ~10 MiB.
+  replicas: 2
+  selector:
+    matchLabels:
+      app: techdelivery-site
+  template:
+    metadata:
+      labels:
+        app: techdelivery-site
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 101   # the nginx user inside nginxinc/nginx-unprivileged
+        runAsGroup: 101
+      containers:
+        - name: site
+          image: ghcr.io/techdelivery/techdelivery-site@sha256:14c03621f8099d5a32ed78b38edf501a92c271c5dbe732737d6026d364c58dc1
+          ports:
+            - name: http
+              containerPort: 8080
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 200m
+              memory: 64Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+            seccompProfile:
+              type: RuntimeDefault
+          # The two paths nginx-unprivileged writes: its pid file (/tmp/nginx.pid) and its proxy
+          # temp/cache tree. With a read-only rootfs these emptyDirs are what make it boot; without
+          # them the failure is at startup, not somewhere interesting.
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            - name: cache
+              mountPath: /var/cache/nginx
+          readinessProbe:
+            httpGet: {path: /, port: http}
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: {path: /, port: http}
+            periodSeconds: 20
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 16Mi
+        - name: cache
+          emptyDir:
+            sizeLimit: 32Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: techdelivery-site
+  labels:
+    app: techdelivery-site
+  namespace: site
+spec:
+  type: ClusterIP
+  selector:
+    app: techdelivery-site
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      protocol: TCP
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: techdelivery-site
+  namespace: site
+  # The websecure pin, same reason as every PIN_REQUIRED host here: this cluster's Traefik runs no
+  # global HTTP->HTTPS redirect, so an unpinned router also serves the host on cleartext :80. For a
+  # public site that is not a session leak, it is a canonical-host problem — visitors and crawlers
+  # indexing http:// — and the pin makes https the only answer. Verified after apply with:
+  #   curl -o /dev/null -w '%{http_code}\n' http://www.techdelivery.es/   -> expect 404
+  annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+  # NO `router.middlewares`: the site is public on purpose; see the header. The ingress-auth gate
+  # is scoped to the titan apex and does not read this host, so the header carries the decision.
+spec:
+  ingressClassName: traefik
+  rules:
+  - host: www.techdelivery.es
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: techdelivery-site
+            port:
+              number: 80
+  tls:
+  # Issued in `certificates` as techdelivery-es and mirrored by Reflector; `site` is on both
+  # allow-lists there, which is what tls-reflection-check enforces.
+  - hosts:
+    - www.techdelivery.es
+    secretName: techdelivery-es-tls
