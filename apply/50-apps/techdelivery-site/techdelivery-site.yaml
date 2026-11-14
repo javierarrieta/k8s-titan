@@ -12,8 +12,9 @@
 # https is the only answer. Note that tools/ingress-auth-check.py does NOT see this host: that gate
 # is scoped to APEX=titan.arrieta.eu and treats off-domain hosts as out of scope, so this header is
 # the record of the decision, not a NOT_PROXY_GATED row. What is deliberately NOT here: forwardAuth
-# (nothing to gate), HSTS (a sticky host-wide decision deferred until the domain has settled here),
-# and analytics.
+# (nothing to gate) and analytics. HSTS IS set — one year, no includeSubDomains — but it lives in the
+# image (security-headers.conf in the site repo), not here; the header of that file states why the
+# assertion is scoped to this host and not the apex.
 #
 # THE TWO EXTERNAL DEPENDENCIES THIS MANIFEST CANNOT PROVE:
 #   1. DNS. `www.techdelivery.es` must be an A record for 37.187.159.156 (titan). It is NOT yet:
@@ -55,7 +56,7 @@ spec:
         runAsGroup: 101
       containers:
         - name: site
-          image: ghcr.io/techdelivery/techdelivery-site@sha256:14c03621f8099d5a32ed78b38edf501a92c271c5dbe732737d6026d364c58dc1
+          image: ghcr.io/techdelivery/techdelivery-site@sha256:494d1ea819038e91ea20803939f42059ddd9cb0bfcaaee2c69455ed307749131
           ports:
             - name: http
               containerPort: 8080
