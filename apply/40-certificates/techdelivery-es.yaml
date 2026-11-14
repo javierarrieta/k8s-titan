@@ -1,0 +1,35 @@
+# www.techdelivery.es — the first certificate outside arrieta.eu on this cluster.
+#
+# WHY A NEW CERTIFICATE AT ALL: `*.titan.arrieta.eu` cannot sign a name in another domain, and
+# DNS-01 via the OVH webhook (le-prod-titan) is already the issuance path here, so this costs one
+# ACME order and nothing new in solvers. ASSUMPTION, UNVERIFIED FROM GIT: the OVH account behind
+# the webhook's credentials holds DNS for techdelivery.es (records_techdelivery.tf in
+# ../public-dns-tf says the zone lives on OVH). If the webhook's OVH application is scoped to
+# arrieta.eu only, issuance will fail at the challenge and the fix is a credential scope change,
+# not a manifest change.
+#
+# www ONLY, no apex SAN. The apex A and the OVH redirect-product markers at `www` are deliberately
+# outside Terraform (see the header of ../public-dns-tf/records_techdelivery.tf); signing the apex
+# here would imply the cluster serves it, and it does not.
+#
+# The allow-list is `site` alone, in BOTH annotations — the pair is what tls-reflection-check
+# demands, and `site` is the only consumer (its Ingress is the sole reader of this Secret).
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: techdelivery-es
+  namespace: certificates
+spec:
+  secretName: techdelivery-es-tls
+  issuerRef:
+    kind: ClusterIssuer
+    name: le-prod-titan
+  commonName: www.techdelivery.es
+  dnsNames:
+    - www.techdelivery.es
+  secretTemplate:
+    annotations:
+      reflector.v1.k8s.emberstack.com/reflection-allowed: "true"
+      reflector.v1.k8s.emberstack.com/reflection-allowed-namespaces: "site"
+      reflector.v1.k8s.emberstack.com/reflection-auto-enabled: "true"
+      reflector.v1.k8s.emberstack.com/reflection-auto-namespaces: "site"
