@@ -235,7 +235,6 @@ def main():
             "OIDC_ISSUER": ISSUER_URL,
             "OIDC_REDIRECT_URI": REDIRECT,
             "ALLOWED_ORIGINS": ORIGIN,
-            "DATABASE_URL": "sqlite:///app/data/portfolio.db?mode=rwc",
             # Rocket binds 127.0.0.1 without this, the kubelet probes from the node, and the pod never
             # becomes Ready. Upstream's own manifest omits it; the probes are upstream's too.
             "ROCKET_ADDRESS": "0.0.0.0",
@@ -244,6 +243,16 @@ def main():
             got = env_of(dep, k)
             if got != v:
                 fail(f"{APP} env {k} is {got!r}, expected {v!r}")
+        # DATABASE_URL must NOT be an inline env entry. Kubernetes gives `env:` precedence over
+        # `envFrom:`, so an inline value silently shadows the one in portfolio-prism-secrets — the app
+        # would come up healthy against the wrong engine and nothing would report it. That is exactly
+        # the shape the sqlite URL had here until the Postgres move, which is why this is asserted
+        # rather than left to review: the failure it prevents is invisible from the outside.
+        shadow = env_of(dep, "DATABASE_URL")
+        if shadow is not None:
+            fail(f"{APP} carries an inline DATABASE_URL ({shadow!r}). It shadows the Secret's value "
+                 "through envFrom. Remove it and let portfolio-prism-secrets supply the URL; "
+                 "make db-url-check is the gate that proves that Secret agrees with the CNPG role.")
         if env_of(dep, "BOOTSTRAP_OWNER_SUBJ") is not None:
             fail("BOOTSTRAP_OWNER_SUBJ is set. It is a ONE-WAY transfer with no admin undo and it "
                  "cannot be repeated; leaving it set means anyone who can present that sub can claim "
@@ -255,9 +264,9 @@ def main():
                      "story for an auth change is `kubectl rollout undo`, which is a no-op on a tag "
                      "because the pod template is byte-identical.")
             if c.get("name") == "backend" and not c.get("startupProbe"):
-                fail("the backend has no startupProbe. init_db runs a decimal migration, a duplicate-row "
-                     "collapse and a unique index before Rocket binds the port; without a startup probe "
-                     "the kubelet kills the container mid-migration and it restarts into the same work.")
+                fail("the backend has no startupProbe. sqlx::migrate! applies backend_rust/migrations/ "
+                     "before Rocket binds the port; without a startup probe the kubelet kills the "
+                     "container mid-migration and it restarts into the same work.")
         names = [s.get("secretRef", {}).get("name")
                  for c in dep["spec"]["template"]["spec"]["containers"]
                  for s in (c.get("envFrom") or [])]

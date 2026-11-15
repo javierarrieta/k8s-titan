@@ -75,6 +75,70 @@ own preamble and it is the first thing to retire.
 Rollback for this change is clean and total: delete the `Database`, the `DatabaseRole`, the
 credential Secret and the `DATABASE_URL` key. Nothing that holds user data is touched.
 
+## The flip — the change that actually moves the app
+
+The section above describes what landed first (the database and the credential). **This is the
+change that starts the clock.**
+
+Merging it begins the cutover window. The deployment is `Recreate` with one replica, so the moment
+this applies the SQLite pod goes away and the Postgres build comes up against an empty database. The
+app is not usable again until the app repo's `docs/postgres-cutover.md` restore step has completed.
+Do not merge before that runbook's steps 1 and 2 have actually been run against the live SQLite app
+— **including the pre-cutover audit against a copy of the real `portfolio.db`, which has never been
+done.** Every audit so far ran against synthetic files, and the runbook says so in its own preamble.
+
+What changes here:
+
+- backend digest → `sha256:4811d37249cf94d7b68112ea7bb5f5560b3ca8d085aa089f9662b7821fdf14d5`,
+  frontend digest → `sha256:a6cc45eb9a2f4b16fef52700ad4597f187ee4c9de20323890ede321df36552af`. Both
+  are the `v0.1.0-M1` manifest-list digests, read from the registry rather than derived from the tag.
+- the inline `DATABASE_URL` is **deleted**, which is what lets the Secret's value take effect.
+- `tools/portfolio-prism-check.py` no longer expects the SQLite URL and now **fails if any inline
+  `DATABASE_URL` reappears**. That is not tidiness: an inline entry shadows the Secret's value
+  through `envFrom`, so the app would come up healthy against the wrong engine and nothing would
+  report it. The failure this guards is invisible from outside the pod.
+- the header rationale (`no own database server`) and the startup-probe wording (`init_db`) are
+  corrected, and the PVC is labelled as what it now is — the rollback path, not the database.
+
+Deliberately unchanged:
+
+- **The PVC, its mount and its restic annotation stay.** The SQLite file on it is the only copy of
+  anything written before the cutover, until Postgres has survived a backup cycle of its own
+  (runbook step 7). Retiring it is a decision with a date on it, not a cleanup.
+- **`BOOTSTRAP_OWNER_SUBJ` stays absent.** A restored bundle carries the owner it was exported for,
+  so a fresh database has no unowned rows. If the audit reports portfolios with a NULL owner, that
+  is a one-way handover to read up on first, not a value to guess.
+- **`DATABASE_URL` lives in exactly one place** — `portfolio-prism-secrets` — and `make db-url-check`
+  proves it agrees with the CNPG role's credential.
+
+After this merges, a green pod is not by itself the proof. The runbook's step 6 compares row counts
+against the bundle, and `psql` against the new URL should show
+`select version, description from _sqlx_migrations order by version` populated.
+
+### The one check worth running before merging this
+
+The open question is whether the role can create its own schema — `sqlx::migrate!` needs `CREATE`,
+and on PostgreSQL 15+ `CREATE` on `public` is not granted to everyone by default. It can be answered
+read-only, in seconds, with an **admin** context:
+
+```sh
+kubectl -n databases port-forward svc/postgres-rw 55433:5432 &
+PGPASSWORD=$(sops -d apply/10-secrets/portfolio-prism-db-credentials.yaml \
+  | python3 -c 'import sys,yaml;print(yaml.safe_load(sys.stdin)["stringData"]["password"])') \
+psql -h 127.0.0.1 -p 55433 -U portfolio_prism -d portfolio_prism -c \
+  "select has_database_privilege('portfolio_prism','portfolio_prism','CREATE') as db_create,
+          has_schema_privilege('portfolio_prism','public','CREATE') as public_create;"
+```
+
+Both `t` means the migrations will run. `db_create=t, public_create=f` means the app will fail at the
+first `CREATE TABLE` and the fix is a deliberate grant or `superuser: true`, decided on purpose
+rather than discovered mid-outage.
+
+**This was not run here.** The kubeconfig in the authoring workspace is the read-only `k8s-reader`
+service account, which cannot `pods/portforward` — the attempt fails with
+`cannot create resource "pods/portforward" in API group "" in the namespace "databases"`. So the
+question above is still open, and it is the one thing in this change that a merge should not skip.
+
 ## What is not proven here
 
 * **Nothing has been applied.** No `Database` exists on the cluster yet, so `status.applied` is
