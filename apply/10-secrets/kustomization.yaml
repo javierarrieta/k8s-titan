@@ -160,10 +160,18 @@ resources:
   # them through envFrom. Three values, minted together by scripts/setup-portfolio-prism-secrets.sh so
   # the client the app presents and the client authentik was told about are the same by construction.
   #
+  # It now also carries DATABASE_URL, which duplicates the DB password held in
+  # portfolio-prism-db-credentials below. Two Secrets holding one password is exactly what
+  # `make db-url-check` proves agree, and it walks this Deployment's envFrom to find the pair.
+  #
   # Consumed by a Deployment's secretRef, not a HelmRelease, so `make release-secrets` cannot vouch for
   # the name; `make secret-refs` is the gate that can, and an unlisted file here would build green and
   # be silently never applied.
   - portfolio-prism-secrets.yaml
+  # Portfolio Prism's CNPG role credential (namespace `databases`), the other half of the duplicated
+  # DB password named above. `cnpg.io/reload` is on THIS Secret, not on the DatabaseRole, because
+  # that is where CNPG looks for it — see the note in apply/50-apps/portfolio-prism/portfolio-prism-db.yaml.
+  - portfolio-prism-db-credentials.yaml
   # The rendered authentik blueprint for the same app — a Secret rather than a ConfigMap because it
   # carries the client_secret. Mounted by the authentik HelmRelease in 50-apps and listed in the
   # worker's reloader annotation; `make blueprint-mount-check` fails if either of those two links is
