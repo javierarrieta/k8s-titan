@@ -238,6 +238,11 @@ def main():
             # Rocket binds 127.0.0.1 without this, the kubelet probes from the node, and the pod never
             # becomes Ready. Upstream's own manifest omits it; the probes are upstream's too.
             "ROCKET_ADDRESS": "0.0.0.0",
+            # Pinned so the temporary price-restore window is visible in a gate rather than
+            # invisible in a manifest. Delete this line together with the env entry when the casa
+            # import is done; leaving one without the other is exactly the drift this gate exists
+            # to catch.
+            "BACKUP_ALLOW_PRICE_RESTORE": "true",
         }
         for k, v in want_env.items():
             got = env_of(dep, k)

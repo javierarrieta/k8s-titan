@@ -237,6 +237,16 @@ spec:
             # `tools/portfolio-prism-check.py` fails if a DATABASE_URL ever reappears in this list.
             - name: RUST_LOG
               value: "info"
+            # TEMPORARY, for the casa import, and it should be deleted once that import has run.
+            # Without it the server refuses any bundle carrying a price section (`PricesDisabled`)
+            # rather than quietly skipping it — which is the right default, because historical
+            # prices are shared market data and a restore writing them is not scoped to the caller.
+            # The casa database holds price history back to 2004-08-19 (GOOG) and 2010-11-22
+            # (BBVA.MC) that the pricing provider may not serve again, so it is being carried over
+            # once instead of re-fetched. Flip this back off afterwards; `tools/portfolio-prism-
+            # check.py` pins its presence while it is here, so the removal is a two-file change.
+            - name: BACKUP_ALLOW_PRICE_RESTORE
+              value: "true"
             # BOOTSTRAP_OWNER_SUBJ is deliberately absent. It names who inherits pre-existing unowned
             # rows, and on a fresh database there are none: the cutover restores bundles, and a bundle
             # carries the owner it was exported for. Setting it is a ONE-WAY transfer with no admin
