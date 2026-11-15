@@ -1,0 +1,75 @@
+# Portfolio Prism's database and role, authored beside the app that owns them and living in
+# `databases`, because a CNPG Database must share a namespace with its Cluster. Read
+# auth/authentik-db.yaml, coder/coder-db.yaml and open-webui/open-webui-db.yaml first; everything
+# they record about DatabaseRole applies here verbatim — `login: true` is required and silent when
+# missing, `passwordSecret` must be a kubernetes.io/basic-auth Secret whose `username` equals the
+# role name, and the `cnpg.io/reload` label belongs on that Secret, not on this DatabaseRole.
+#
+# THE NAMING, BECAUSE IT WILL BE ASKED
+# Kubernetes object names carry the hyphen (`portfolio-prism`) like every other object in this repo.
+# The Postgres identifiers inside them are `portfolio_prism` with an underscore: a hyphenated
+# identifier is a QUOTED identifier in Postgres, so every place that interpolates it — psql, pg_dump,
+# a WHERE clause during an incident — becomes a quoting bug. open-webui made the same choice for the
+# same reason.
+#
+# THE PASSWORD IS NOT HERE
+# It lives in apply/10-secrets/portfolio-prism-db-credentials.yaml, encrypted, and is referenced by
+# name. The app's own copy of the same credential — the assembled `DATABASE_URL` — lives in
+# apply/10-secrets/portfolio-prism-secrets.yaml. Two copies of one password is exactly what
+# `make db-url-check` exists to catch, and it walks this app's `envFrom` to prove the pair agrees.
+#
+# WHY THIS LANDS BEFORE THE APP MOVES
+# The Postgres build of Portfolio Prism refuses to start without a `DATABASE_URL` it can connect to,
+# and the live deployment is `Recreate` with one replica (measured on the cluster 2026-11-15:
+# `kubectl -n apps get deploy portfolio-prism -o jsonpath='{.spec.strategy.type}'` → `Recreate`).
+# So the old pod is torn down before the new one is created, and a new pod that cannot reach its
+# database is downtime, not a degraded rollout. The database and its credential therefore have to
+# exist and be `Ready` first — which is this change. The image roll and the removal of the inline
+# `sqlite:` `DATABASE_URL` are a separate, later change, and the app runs its own migrations
+# (`sqlx::migrate!`) on that first boot, so the schema arrives with the app, not here.
+apiVersion: postgresql.cnpg.io/v1
+kind: Database
+metadata:
+  name: portfolio-prism
+  namespace: databases
+spec:
+  name: portfolio_prism
+  owner: portfolio_prism
+  cluster:
+    name: postgres
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: DatabaseRole
+metadata:
+  name: portfolio-prism
+  namespace: databases
+spec:
+  name: portfolio_prism
+  cluster:
+    name: postgres
+  # Required and silent when missing: CNPG creates the role NOLOGIN by default, so without this the
+  # Database reports Ready and every connection fails with a message pointing somewhere else.
+  # Observed live with the authentik role before it was understood.
+  login: true
+  # `comment` is the only DatabaseRole field the CRD does not default, so it is the only one that
+  # changes the stored spec and bumps `metadata.generation` — the lever that makes the instance
+  # manager re-apply this role and clear a stale `status.message` it may carry alongside
+  # `applied: true` (#154). `connectionLimit: -1` does nothing, because the API server already
+  # writes that default in.
+  comment: managed by k8s-titan apply/50-apps/portfolio-prism/portfolio-prism-db.yaml
+  passwordSecret:
+    name: portfolio-prism-db-credentials
+  # NOT superuser, and this app does not need it. The role must be able to create its own schema —
+  # the app runs `sqlx::migrate!` at startup and the migrations ARE the schema — and owning the
+  # database is what grants that: `CREATE` on the database belongs to the owner, and every object
+  # the migrations create is created by this role. Nothing in `backend_rust/migrations/` creates an
+  # extension or touches another database's objects. open-webui's note about the first startup being
+  # the proof applies here too: if a migration turns out to need more, that is a deliberate
+  # `superuser: true` with its own note, not a silent widening.
+  #
+  # Pool sizing, because the number is small and deliberate: the app opens at most 5 connections
+  # (`max_connections(5)`, `acquire_timeout` 5s, `min_connections 0`) and sets
+  # `statement_timeout = 30s` per connection. CNPG's default `max_connections=100` leaves room for
+  # this app, coder, authentik, mealie, open-webui, sure and teslamate on one instance with no
+  # pooler. If a pooler is ever added, note that transaction-mode pooling and this app's
+  # `SERIALIZABLE` restore transaction are a combination that needs its own measurement.
