@@ -47,16 +47,20 @@ sweeps cannot see the opposite mistake either: `env:` beats `envFrom` in Kuberne
 three Secret-owned keys pinned inline in `env:` silently overrides the real value, and the unknown-key
 sweep passes it because those names are known by definition. That is asserted too.
 
-Two facts are asserted on the blueprint body rather than on Vikunja's own copy, because the app's copy
-cannot see them. The application's `slug` is what `issuer_mode: per_provider` turns into the issuer
-URL, so comparing the Deployment's AUTHURL against ISSUER_URL proves nothing until something pins the
-blueprint's slug to the slug ISSUER_URL is built from — move the slug and the live issuer moves while
-the constant still matches. And the `titan-family` policybinding on that application is the entire
-authorization story for this host: it is in NOT_PROXY_GATED, so there is no forwardAuth in front of
-it, VIKUNJA_AUTH_LOCAL_ENABLED=false closes the local-password door and registration is off, so who
-may sign in at all is exactly the set of groups bound to that application. `blueprint-mount-check`
-cannot cover it: it only proves that a *present* binding names a declared group, absence is not a
-failure there, and it never reads the rendered Secret.
+Three facts are asserted on the blueprint body rather than on Vikunja's own copy, because the app's
+copy cannot see them. The application's `slug` is what `issuer_mode: per_provider` turns into the
+issuer URL, so comparing the Deployment's AUTHURL against ISSUER_URL proves nothing until something
+pins the blueprint's slug to the slug ISSUER_URL is built from — move the slug and the live issuer
+moves while the constant still matches. And the mode itself is pinned too, from the other side:
+`issuer_mode` lives on the oauth2provider, not on the application, and it is authentik's own switch
+for whether the slug appears in the issuer at all, so under the other value the issuer moves to a
+slugless path while both the constant and the slug assertion still pass. Neither half catches the
+other, and authentik builds the real issuer out of both. And the `titan-family` policybinding on that
+application is the entire authorization story for this host: it is in NOT_PROXY_GATED, so there is no
+forwardAuth in front of it, VIKUNJA_AUTH_LOCAL_ENABLED=false closes the local-password door and
+registration is off, so who may sign in at all is exactly the set of groups bound to that application.
+`blueprint-mount-check` cannot cover it: it only proves that a *present* binding names a declared
+group, absence is not a failure there, and it never reads the rendered Secret.
 
 There is deliberately NO email_verified check here, which will read as an omission to anyone who has
 seen coder or mealie. Vikunja keys identity on (issuer, sub) and reads email_verified only in the
@@ -100,8 +104,14 @@ REDIRECT = f"https://{HOST}/auth/openid/{PROVIDER}"
 # The application slug, and the issuer it produces. Under `issuer_mode: per_provider` authentik
 # publishes the issuer at /application/o/<slug>/, so this constant and the blueprint's slug are one
 # fact: ISSUER_URL is BUILT from APP_SLUG so that the AUTHURL comparison below and the blueprint slug
-# assertion below cannot drift apart, and the assertion is what ties both to the real object.
+# assertion below cannot drift apart, and the assertions on slug AND mode are what tie both to the
+# real object. ISSUER_MODE is asserted alongside it because the constant is the live issuer only while
+# BOTH hold, and the mode is not on this object: authentik's Provider model owns `issuer_mode`, so the
+# blueprint carries it on the oauth2provider entry and the assertion reads it there. Authentik's own
+# default is `default`, which publishes the issuer at the slugless /application/o/ and would leave
+# APP_SLUG, ISSUER_URL and the slug assertion all still matching a URL nothing serves.
 APP_SLUG = "vikunja"
+ISSUER_MODE = "per_provider"
 ISSUER_URL = f"https://auth.titan.arrieta.eu/application/o/{APP_SLUG}/"
 # The reviewed admission set, in the gate rather than read from the blueprint: a decision about who may
 # reach a public host with no proxy-side gate has to be written down twice to be reviewed twice.
@@ -332,16 +342,34 @@ def main():
     prov = provider_of(tpl_entries)
     if prov is None:
         fail("blueprints-vikunja.yaml declares no oauth2provider named vikunja")
+    else:
+        # The issuer the Deployment is configured with is built from TWO entries: the application's
+        # `slug` (asserted below, in the application block) and this provider's `issuer_mode`. Both are
+        # needed and neither catches the other, so both are asserted — here and there, each on the object
+        # that actually carries it, because authentik's Provider model owns `issuer_mode` and the
+        # application model owns `slug`. Flip the mode to authentik's own default (`default`) and the
+        # issuer moves to the slugless /application/o/ while APP_SLUG, ISSUER_URL and the slug assertion
+        # all stay exactly as they were, so the AUTHURL comparison keeps matching a URL nothing serves.
+        # Echoed rather than withheld: it is a small enum, and which value it became is the diagnostic.
+        if prov.get("issuer_mode") != ISSUER_MODE:
+            fail(f"blueprints-vikunja.yaml's vikunja provider issuer_mode is "
+                 f"{prov.get('issuer_mode')!r}, expected {ISSUER_MODE!r}. This mode is what puts the "
+                 f"issuer at {ISSUER_URL}; changing it moves the issuer the Deployment is configured "
+                 f"with ({PREFIX}AUTHURL) while the application's slug assertion and the {ISSUER_URL} "
+                 "constant both still pass. Every login then fails on a token whose `iss` Vikunja never "
+                 "configured, and the error names neither file. Move the mode and this constant "
+                 "together, or leave the mode alone.")
 
     # --- the application, and who is admitted to it ----------------------------------------------
     # Both of these are on the reviewed template, which is the artifact a human edits and the one that
     # wins the argument with the generated Secret (the byte-rebuild below is what makes the rendered
-    # artifact obey it). Neither was read at all before the whole-branch review.
+    # artifact obey it). Neither was read at all before the whole-branch review. The third blueprint fact,
+    # `issuer_mode`, is asserted just above, on the entry that carries it.
     app = app_of(tpl_entries)
     if app is None:
         fail("blueprints-vikunja.yaml declares no authentik_core.application entry - the application is "
              "what fixes the issuer under issuer_mode: per_provider and what the admission binding "
-             "attaches to, so with none in the blueprint neither can be checked")
+             "attaches to, so with none in the blueprint neither of those can be checked")
     else:
         app_attrs = app.get("attrs") or {}
         if app_attrs.get("slug") != APP_SLUG:
@@ -352,6 +380,8 @@ def main():
                  f"publishes no longer matches the {ISSUER_URL} the Deployment is configured with: "
                  "every login fails on a token from an issuer Vikunja never configured, and the error "
                  "names neither file. Move the slug and this constant together, or leave the slug alone.")
+        # The other half of this fact — `issuer_mode` — is asserted above, on the oauth2provider that
+        # carries it. Read the two together.
         # The whole authorization story, in the literal sense: this host is in NOT_PROXY_GATED, so no
         # forwardAuth refuses anyone first, VIKUNJA_AUTH_LOCAL_ENABLED=false closes the local-password
         # door and registration is off. Whoever this binding names is who may sign in.
