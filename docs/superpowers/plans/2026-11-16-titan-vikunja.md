@@ -94,6 +94,14 @@ spec:
   # extension. That is an argument from absence, so the first startup is the proof: if a migration
   # needs more, the pod fails loudly and the fix is a deliberate `superuser: true` with its own note,
   # not a silent widening. Same reasoning as mealie's and open-webui's roles.
+  # `comment` is the only DatabaseRole field the CRD does not default, so it is the only one that
+  # changes the stored spec and bumps `metadata.generation` — the lever that makes the instance
+  # manager re-apply this role and clear a stale `status.message` it may carry alongside
+  # `applied: true` (#154). `connectionLimit: -1` does nothing, because the API server already
+  # writes that default in. It matters more here than elsewhere: `vikunja-db-credentials` arrives in
+  # a later task, so this role is expected to fail on a missing Secret first and that denial has to
+  # be clearable once the Secret lands.
+  comment: managed by k8s-titan apply/50-apps/vikunja/vikunja-db.yaml
   passwordSecret:
     name: vikunja-db-credentials
 ```
