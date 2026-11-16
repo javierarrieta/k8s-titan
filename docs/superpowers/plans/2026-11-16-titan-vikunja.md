@@ -1169,6 +1169,15 @@ Append to `apply/00-bootstrap/namespaces.yaml`, following the mealie block's sha
 
 ```yaml
 ---
+# Vikunja, the task manager. Fails the admission test in
+# docs/superpowers/specs/2026-10-19-titan-app-scale-out-design.md §3.1 on the same three counts mealie
+# does — own public hostname, own Secret set, and a database of its own — so it gets a namespace, and it
+# stays in the shared `apps` stage per §3.2: two hand-written manifests, no bulk authored here, so
+# freezing its neighbours on a malformed field is the accepted cost rather than a new one.
+#
+# The hostname count is the one the 2026-10-27 amendment actually decides, and it bites here:
+# tasks.titan.arrieta.eu needs no Certificate and no DNS record of its own, but it does need its own line
+# on the titan-wildcard Reflector allow-list — a new cluster object, which is what that clause is for.
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -1259,6 +1268,12 @@ spec:
         envFrom:
         # Every key here is named exactly as Vikunja reads it, so there is no aliasing between the
         # Secret and the Deployment and no typo'd mapping to find during an incident.
+        #
+        # THE LINE THAT KEEPS EVERYONE LOGGED IN. Unset, generateServiceSecretIfEmpty() in
+        # pkg/config/config.go mints a random secret per boot and every already-issued token dies
+        # with the process — with strategy: Recreate above, that is every deploy logging every
+        # session out, with no error anywhere. service.JWTSecret is the deprecated alias; do not
+        # "simplify" it back.
         - secretRef:
             name: vikunja-secrets
         env:
@@ -1269,11 +1284,6 @@ spec:
         # one. `make vikunja-check` ties the two together.
         - name: VIKUNJA_SERVICE_PUBLICURL
           value: https://tasks.titan.arrieta.eu/
-        # THE LINE THAT KEEPS EVERYONE LOGGED IN. Unset, generateServiceSecretIfEmpty() in
-        # pkg/config/config.go mints a random secret per boot and every already-issued token dies
-        # with the process — with strategy: Recreate above, that is every deploy logging every
-        # session out, with no error anywhere. service.JWTSecret is the deprecated alias; do not
-        # "simplify" it back.
         - name: VIKUNJA_SERVICE_TIMEZONE
           # GMT is already the default (ServiceTimeZone.setDefault("GMT")). This line is a PIN that
           # documents intent and survives a future default change; it moves no behaviour by itself.

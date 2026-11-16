@@ -72,6 +72,12 @@ spec:
         envFrom:
         # Every key here is named exactly as Vikunja reads it, so there is no aliasing between the
         # Secret and the Deployment and no typo'd mapping to find during an incident.
+        #
+        # THE LINE THAT KEEPS EVERYONE LOGGED IN. Unset, generateServiceSecretIfEmpty() in
+        # pkg/config/config.go mints a random secret per boot and every already-issued token dies
+        # with the process — with strategy: Recreate above, that is every deploy logging every
+        # session out, with no error anywhere. service.JWTSecret is the deprecated alias; do not
+        # "simplify" it back.
         - secretRef:
             name: vikunja-secrets
         env:
@@ -82,11 +88,6 @@ spec:
         # one. `make vikunja-check` ties the two together.
         - name: VIKUNJA_SERVICE_PUBLICURL
           value: https://tasks.titan.arrieta.eu/
-        # THE LINE THAT KEEPS EVERYONE LOGGED IN. Unset, generateServiceSecretIfEmpty() in
-        # pkg/config/config.go mints a random secret per boot and every already-issued token dies
-        # with the process — with strategy: Recreate above, that is every deploy logging every
-        # session out, with no error anywhere. service.JWTSecret is the deprecated alias; do not
-        # "simplify" it back.
         - name: VIKUNJA_SERVICE_TIMEZONE
           # GMT is already the default (ServiceTimeZone.setDefault("GMT")). This line is a PIN that
           # documents intent and survives a future default change; it moves no behaviour by itself.
