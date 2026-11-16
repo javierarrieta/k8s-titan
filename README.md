@@ -46,18 +46,22 @@ A new small app is **one subdirectory under `apply/50-apps/` and one line in tha
 namespace is decided by the admission test in the scale-out spec §3.1; whether it earns its
 own *stage* is a different question and the test says so explicitly.
 
-Namespaces are declared centrally in `apply/00-bootstrap/namespaces.yaml` — all seventeen of
+Namespaces are declared centrally in `apply/00-bootstrap/namespaces.yaml` — all nineteen of
 them: `apps`, `auth`, `cert-manager`, `certificates`, `cnpg-system`, `coder`,
-`coder-workspaces`, `databases`, `files`, `gatus`, `llm`, `mealie`, `monitoring`,
-`observability`, `open-webui`, `sure`, `traefik-system`. `k8s-reader` is the one exception:
+`coder-workspaces`, `databases`, `files`, `gatus`, `llm`, `mealie`, `monitoring`, `observability`,
+`open-webui`, `site`, `sure`, `traefik-system`, `vikunja`. `k8s-reader` is the one exception:
 its own manifest under `20-infra` creates it, because the identity and the namespace are one
 thing.
 
 ## What runs here
 
-Sixteen public hostnames, seventeen `Ingress` objects. "Gated" means a Traefik `forwardAuth`
-`Middleware` in the Ingress's own namespace; "open" means deliberately not proxy-gated and
-named with a citation in `tools/ingress-auth-check.py`'s `NOT_PROXY_GATED`.
+Twenty-three public hostnames across twenty-four `Ingress` objects: twenty-two built by this tree,
+plus the two the charts render themselves (below), and `tesla.titan…` is served by two of the
+built ones. The table is not that inventory — `bentopdf`, `vert`, `portfolio`, `uptime` and the two
+`techdelivery.es` hosts have no row here, and `kubectl get ingress -A` is the authority. "Gated"
+means a Traefik `forwardAuth` `Middleware` in the Ingress's own namespace; "open" means
+deliberately not proxy-gated and named with a citation in `tools/ingress-auth-check.py`'s
+`NOT_PROXY_GATED`.
 
 | host | namespace | own CNPG DB | PVC in backup scope | edge |
 |---|---|---|---|---|
@@ -66,6 +70,7 @@ named with a citation in `tools/ingress-auth-check.py`'s `NOT_PROXY_GATED`.
 | `open-webui.titan…` | `open-webui` | yes | yes | open (OIDC, login form off) |
 | `meals.titan…` mealie | `mealie` | yes | yes | open (OIDC-only) |
 | `sure.titan…` | `sure` | yes | yes | chart-rendered Ingress, see the gate note |
+| `tasks.titan…` vikunja | `vikunja` | yes | yes | open (OIDC-only, pinned to `websecure`) |
 | `files.titan…` opencloud | `files` | no | **no — deliberate, see Backups** | open (OIDC proxy) |
 | `collabora.titan…` | `files` | no | no | open (no login of its own) |
 | `grafana.titan…` | `observability` | no | no (rebuilds from git) | open (OIDC in-app) |
@@ -82,8 +87,8 @@ out of `HelmRelease.values`, so **no tree-only gate can see them**: `ingress-aut
 opaque to kustomize. That is a real hole, not an oversight, and it is why `chart-values-check`
 exists.
 
-`make backup-coverage` is the authority on the backup column: it currently reports 4 opted-in
-PVCs across 4 namespaces and proves the runner, the Reflector mirror lists and the RBAC agree
+`make backup-coverage` is the authority on the backup column: it currently reports 6 opted-in
+PVCs across 5 namespaces and proves the runner, the Reflector mirror lists and the RBAC agree
 with the annotation.
 
 ## Certificates and Reflector
@@ -91,8 +96,8 @@ with the annotation.
 `titan-tls` comes from the wildcard `Certificate` in `apply/40-certificates/titan-wildcard.yaml`
 (`titan.arrieta.eu` + `*.titan.arrieta.eu`) and is mirrored into consuming namespaces by
 Reflector. **The allow-list is the mechanism**: the `secretTemplate` annotations on that file,
-currently `apps,auth,open-webui,observability,files,mealie,llm,sure`. A new consuming namespace
-means editing that file — never copying the Secret by hand. A `Certificate` can be `Ready`
+currently `apps,auth,open-webui,observability,files,mealie,llm,sure,gatus,vikunja`. A new consuming
+namespace means editing that file — never copying the Secret by hand. A `Certificate` can be `Ready`
 while a namespace missing from its allow-list silently has no Secret, and the Ingress then
 fails on a missing Secret rather than on a broken certificate.
 

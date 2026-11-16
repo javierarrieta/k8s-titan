@@ -1,0 +1,52 @@
+# Vikunja's database and role, authored beside the app that owns them and living in `databases`,
+# because a CNPG Database must share a namespace with its Cluster. Read mealie-db.yaml first;
+# everything it records about DatabaseRole applies here verbatim.
+#
+# THE NAMING
+# Kubernetes object names and the Postgres identifiers are all `vikunja`. open-webui had to translate
+# `open-webui` to `open_webui` because a hyphenated identifier is a QUOTED identifier in Postgres, so
+# every place that interpolates it becomes a quoting bug waiting to be found during an incident.
+# Vikunja has no such translation to get wrong.
+#
+# WHAT IS IN HERE AND WHAT IS ON THE PVC, because it decides what a backup covers.
+# Postgres holds users and their OIDC identities (issuer + subject), projects, tasks, checklists,
+# labels, comments, shares, webhooks and the attachment ROWS. The PVC holds the attachment BYTES and
+# avatars. Both are backed up, on two independent schedules with no shared point in time, so a restore
+# can return a row whose bytes are not in the snapshot. Spec §4.
+apiVersion: postgresql.cnpg.io/v1
+kind: Database
+metadata:
+  name: vikunja
+  namespace: databases
+spec:
+  name: vikunja
+  owner: vikunja
+  cluster:
+    name: postgres
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: DatabaseRole
+metadata:
+  name: vikunja
+  namespace: databases
+spec:
+  name: vikunja
+  cluster:
+    name: postgres
+  # Required and silent when missing: CNPG creates the role NOLOGIN by default, so without this the
+  # Database reports Ready and every connection fails with a message pointing somewhere else.
+  login: true
+  # NOT superuser. Vikunja's migrations are ordinary DDL against its own schema and it creates no
+  # extension. That is an argument from absence, so the first startup is the proof: if a migration
+  # needs more, the pod fails loudly and the fix is a deliberate `superuser: true` with its own note,
+  # not a silent widening. Same reasoning as mealie's and open-webui's roles.
+  # `comment` is the only DatabaseRole field the CRD does not default, so it is the only one that
+  # changes the stored spec and bumps `metadata.generation` — the lever that makes the instance
+  # manager re-apply this role and clear a stale `status.message` it may carry alongside
+  # `applied: true` (#154). `connectionLimit: -1` does nothing, because the API server already
+  # writes that default in. It matters more here than elsewhere: `vikunja-db-credentials` arrives in
+  # a later task, so this role is expected to fail on a missing Secret first and that denial has to
+  # be clearable once the Secret lands.
+  comment: managed by k8s-titan apply/50-apps/vikunja/vikunja-db.yaml
+  passwordSecret:
+    name: vikunja-db-credentials

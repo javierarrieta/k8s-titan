@@ -284,3 +284,24 @@ metadata:
   annotations:
     kubernetes.io/metadata.name: traefik-system
     kubernetes.io/description: "Flux-managed Traefik, the cluster's ingress path (issue #209)"
+---
+# Vikunja, the task manager. Fails the admission test in
+# docs/superpowers/specs/2026-10-19-titan-app-scale-out-design.md §3.1 on the same three counts mealie
+# does — own public hostname, own Secret set, and a database of its own — so it gets a namespace, and it
+# stays in the shared `apps` stage per §3.2: two hand-written manifests, no bulk authored here, so
+# freezing its neighbours on a malformed field is the accepted cost rather than a new one.
+#
+# The hostname count is the one the 2026-10-27 amendment actually decides, and it bites here:
+# tasks.titan.arrieta.eu needs no Certificate and no DNS record of its own, but it does need its own line
+# on the titan-wildcard Reflector allow-list. That line is an annotation edit on an existing Certificate,
+# not a new object; the new cluster object is the mirrored Secret Reflector creates in this namespace
+# from it, and that is what the amendment's "new cluster objects" clause is counting.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: vikunja
+  labels:
+    name: vikunja
+  annotations:
+    kubernetes.io/metadata.name: vikunja
+    kubernetes.io/description: "Vikunja task manager, authenticated by authentik, data in the shared CNPG cluster"

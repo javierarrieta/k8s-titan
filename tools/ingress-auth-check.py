@@ -108,6 +108,14 @@ NOT_PROXY_GATED = {
                                   "ENABLE_LOGIN_FORM=false and group-mapped roles",
     ("mealie", "mealie"): "Mealie is OIDC-only with ALLOW_PASSWORD_LOGIN=false "
                           "(apply/50-apps/mealie/mealie.yaml)",
+    ("vikunja", "vikunja"): "Vikunja is OIDC-only with VIKUNJA_AUTH_LOCAL_ENABLED=false and "
+                            "VIKUNJA_SERVICE_ENABLEREGISTRATION=false "
+                            "(apply/50-apps/vikunja/vikunja.yaml). WHO may sign in is a policy "
+                            "binding to titan-family on the vikunja Application "
+                            "(authentik/blueprints-vikunja.yaml); this repo cannot see that binding "
+                            "applied. A forwardAuth here would add a second IdP round trip per "
+                            "session and put the outpost cookie's refresh behaviour (issue #243) in "
+                            "the path of a host that does not need it.",
     ("apps", "portfolio-prism"): "the app authenticates itself against authentik — OIDC Authorization "
                                  "Code + PKCE with its own session cookie (AUTH_MODE=oidc on the "
                                  "Deployment, apply/50-apps/portfolio-prism/portfolio-prism.yaml). A "
@@ -174,17 +182,18 @@ NOT_PROXY_GATED = {
 # produces, and an unpinned Ingress produces one router per entrypoint. This cluster runs no
 # HTTP->HTTPS redirect (the ports.web.http.redirections.entryPoint note in
 # apply/20-infra/traefik/traefik.yaml) and port 80 is published, so an unpinned host answers in
-# cleartext. For the ten hosts below that is not untidiness. Four of them (both Grafanas, both Home
-# Assistant passthroughs) are allowed to have no proxy-side gate ONLY because the application behind
-# them authenticates on its own, and an application that authenticates over cleartext hands the session
-# - the Grafana session, the Home Assistant long-lived token - to anyone on the path. The other six
-# (llm, investing-agent, teslamate, bentopdf, vert-sh, gatus) do carry a forwardAuth, and an unpinned
+# cleartext. For the twelve hosts below that is not untidiness. Six of them (both Grafanas, both Home
+# Assistant passthroughs, portfolio-prism and vikunja) are allowed to have no proxy-side gate ONLY
+# because the application behind them authenticates on its own, and an application that authenticates
+# over cleartext hands the session - the Grafana session, the Home Assistant long-lived token,
+# Vikunja's `tk_` CalDAV token - to anyone on the path. The other six (llm, investing-agent,
+# teslamate, bentopdf, vert-sh, gatus) do carry a forwardAuth, and an unpinned
 # Ingress runs that gate on :80 as well, so the outpost cookie, the hermes session, the TeslaMate
 # session and the llm bearer token travel in the clear beside the HTTPS router. Either way, delete the
 # pin and the row above stops being a true statement while this gate still prints clean, which is the
 # exact defect this file exists to close.
 #
-# WHY ONLY TEN. The other apex hosts are unpinned today (coder, open-webui, opencloud, collabora,
+# WHY ONLY TWELVE. The other apex hosts are unpinned today (coder, open-webui, opencloud, collabora,
 # mealie, and the two tesla protocol hosts whose paths have to answer for Tesla's own fetches) and each
 # needs its own cleartext decision, made on its own evidence. Demanding the pin everywhere would either
 # fail on all of them or get widened into a skip list, and either outcome teaches the next person to
@@ -227,6 +236,16 @@ PIN_REQUIRED = {
                          "other credential (apply/50-apps/vert-sh/vert-sh.yaml)",
     ("gatus", "gatus"): "same shape again, and what it protects is a rendered map of the internal "
                         "network, so its session is worth having (apply/50-apps/gatus/gatus.yaml)",
+    ("vikunja", "vikunja"): "no proxy-side gate, so what an unpinned router would carry in the clear "
+                            "is the app's own credential: its CalDAV path authenticates with HTTP "
+                            "Basic carrying a long-lived `tk_` API token, and with local auth off "
+                            "these users have no password to use instead "
+                            "(docs/superpowers/specs/2026-11-16-titan-vikunja-design.md D7, D18). "
+                            "There is no cluster-wide HTTP->HTTPS redirect to rescue a cleartext "
+                            "router (apply/20-infra/traefik/traefik.yaml:250), so this repeats the "
+                            "llm decision above: a long-lived bearer credential must not be offerable "
+                            "on :80 (apply/50-apps/vikunja/vikunja.yaml). Same stated limit as llm - "
+                            "pinning makes an `http://` client 404 rather than safe.",
 }
 
 # The canonical outpost forwardAuth, and the rule for every other one in the build.

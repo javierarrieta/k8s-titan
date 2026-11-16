@@ -53,10 +53,10 @@ somewhere: a manifest in a directory no `kustomization.yaml` names is a manifest
 and `make kustomize-listing` is what catches it.
 
 Namespaces are declared centrally rather than inside the charts that need them:
-`apply/00-bootstrap/namespaces.yaml` holds all seventeen of them — `apps`, `auth`,
+`apply/00-bootstrap/namespaces.yaml` holds all nineteen of them — `apps`, `auth`,
 `cert-manager`, `certificates`, `cnpg-system`, `coder`, `coder-workspaces`, `databases`,
-`files`, `gatus`, `llm`, `mealie`, `monitoring`, `observability`, `open-webui`, `sure` and
-`traefik-system`. `k8s-reader` is the one exception — its own manifest under `20-infra`
+`files`, `gatus`, `llm`, `mealie`, `monitoring`, `observability`, `open-webui`, `site`, `sure`,
+`traefik-system` and `vikunja`. `k8s-reader` is the one exception — its own manifest under `20-infra`
 creates it, because the identity and the namespace are one thing. Nothing else may declare a
 namespace twice. `traefik-system` used to be declared in `apply/20-infra/traefik/traefik.yaml` as
 well, and that was a live trap, not untidiness: two stages applying one object means each reconcile
@@ -104,9 +104,10 @@ measured. **The gap that survives all of it:** a volume whose `backup.titan.arri
 annotation was removed produces no Job, so it has no series and therefore cannot be stale. Nothing on
 the metrics side can see that; only `make backup-coverage`, on the tree side, can. **One restic volume has been restored and verified** —
 `mealie/mealie-data`, 2026-11-03, `DRILL_RESULT … match=yes`, recorded in
-[`pv-restore-drill.md`](pv-restore-drill.md). The other three opted-in volumes
-(`apps/investing-agent-pv-claim`, `open-webui/open-webui-data`, `sure/sure-storage`) have
-**not** been restored, so "the restic backups are drilled" is still false; what is proven is
+[`pv-restore-drill.md`](pv-restore-drill.md). The other five opted-in volumes
+(`apps/investing-agent-pv-claim`, `apps/portfolio-prism-data`, `open-webui/open-webui-data`,
+`sure/sure-storage`, `vikunja/vikunja-data`) have **not** been restored, so "the restic backups
+are drilled" is still false; what is proven is
 the mechanism — repository, mirrored credentials, tag lookup, `--target` layout, byte-for-byte
 content. Two things that drill found belong here, because both would otherwise be discovered
 during a real restore: **a restore needs more privilege than a backup** (the nightly jobs'
@@ -192,7 +193,7 @@ the stream is rejected per-pod, silently, with promtail reporting healthy.
   `Certificate` and reflected into consuming namespaces by Reflector; reference it as
   `secretName: titan-tls` from the namespace your Ingress lives in. Nothing else
   receives it — the allow-list is the `secretTemplate` annotations on
-  `apply/40-certificates/titan-wildcard.yaml`, today `apps,auth,open-webui,observability,files,mealie,llm,sure,gatus`,
+  `apply/40-certificates/titan-wildcard.yaml`, today `apps,auth,open-webui,observability,files,mealie,llm,sure,gatus,vikunja`,
   so a new consuming namespace means editing that file, never copying the Secret by hand — and
   `make tls-reflection-check` fails if a namespace consumes `titan-tls` without being on that list, or if
   the copy of the list in this file drifts from the annotation it quotes. **The one deliberate exception is
@@ -278,10 +279,10 @@ because neither stage depends on the other and a cold restore can leave that ref
 unresolvable. Its honest limits: it proves a gate resolves, never that the policy behind it is the
 policy you meant — an authentik provider with `access_group` unset gates a host open to every
 authenticated account, and that is a row in authentik's database, not in this tree — and it reads
-`router.entrypoints` only for the hosts named in `PIN_REQUIRED`: the four whose allow-list justification
-is "the app authenticates in-app" and the six whose `forwardAuth` would otherwise also run on cleartext
-`:80` (both Grafanas, both Home Assistant passthroughs, llm, investing-agent, teslamate, bentopdf,
-vert-sh, gatus). The other apex
+`router.entrypoints` only for the hosts named in `PIN_REQUIRED`: the six whose allow-list justification
+is "the app authenticates in-app" (both Grafanas, both Home Assistant passthroughs, portfolio-prism,
+vikunja) and the six whose `forwardAuth` would otherwise also run on cleartext
+`:80` (llm, investing-agent, teslamate, bentopdf, vert-sh, gatus). The other apex
 hosts are still free to answer on `:80`, and `http://meals.titan.arrieta.eu/` does. It was written
 because PR #192 gated a public host with an annotation, and that same file said, twice, that no gate
 reads Traefik annotations. `tls-reflection-check` is that gate for the half of TLS that this tree cannot

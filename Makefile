@@ -13,12 +13,12 @@ KUSTOMIZE_DIRS := $(shell find apply -name kustomization.yaml 2>/dev/null | sed 
 # not be able to slip between the encryption rule and the validation glob.
 SECRET_FIND := find apply/10-secrets \( -name '*.yaml' -o -name '*.yml' \) ! -name kustomization.yaml
 
-.PHONY: check check-ci kustomize-check kustomize-listing dry-run py-deps validate update-keys scan leak-check secrets-placement secrets-list secrets-present release-secrets secret-refs ingress-auth tls-reflection-check outpost-binding-check backup-coverage db-url-check oidc-check grafana-oidc-check observability-oidc-check open-webui-oidc-check mealie-check sure-check crd-check namespace-check tesla-forwarder-test chart-values-check traefik-exposure-check update-cnpg-crds update-crds blueprint-mount-check
+.PHONY: check check-ci kustomize-check kustomize-listing dry-run py-deps validate update-keys scan leak-check secrets-placement secrets-list secrets-present release-secrets secret-refs ingress-auth tls-reflection-check outpost-binding-check backup-coverage db-url-check oidc-check grafana-oidc-check observability-oidc-check open-webui-oidc-check mealie-check sure-check vikunja-check crd-check namespace-check tesla-forwarder-test chart-values-check traefik-exposure-check update-cnpg-crds update-crds blueprint-mount-check
 
 # leak-check runs FIRST: make has no -k, so it stops at the first failing prerequisite.
 # validate needs the age key, so an operator who forgot SOPS_AGE_KEY_FILE would never
 # reach a leak gate placed behind it.
-check: py-deps leak-check kustomize-check kustomize-listing validate secrets-placement release-secrets secret-refs ingress-auth tls-reflection-check blueprint-mount-check outpost-binding-check backup-coverage db-url-check oidc-check grafana-oidc-check observability-oidc-check open-webui-oidc-check mealie-check portfolio-prism-check sure-check crd-check namespace-check chart-values-check traefik-exposure-check tesla-forwarder-test
+check: py-deps leak-check kustomize-check kustomize-listing validate secrets-placement release-secrets secret-refs ingress-auth tls-reflection-check blueprint-mount-check outpost-binding-check backup-coverage db-url-check oidc-check grafana-oidc-check observability-oidc-check open-webui-oidc-check mealie-check portfolio-prism-check sure-check vikunja-check crd-check namespace-check chart-values-check traefik-exposure-check tesla-forwarder-test
 	@echo "check: all offline gates passed"
 
 # The subset provable from the tree alone - no age key, no cluster, no network.
@@ -809,6 +809,16 @@ mealie-check:
 # Reads Secrets, so a local gate, not a CI one.
 sure-check:
 	@python3 tools/sure-check.py --root apply
+
+# vikunja-check: Vikunja's OIDC client lives in the reviewed template, the rendered blueprint and the
+# app's own Secret, and the mount is a fourth place nothing else reads. It also compares the database
+# password across two namespaces, which no existing gate does: `db-url-check` is reference-driven on
+# DATABASE_URL / *PG_CONNECTION_URL and Vikunja takes split VIKUNJA_DATABASE_* keys, so the generic
+# gate reports zero references and passes vacuously on this app. And it is the only place that knows
+# the mail FROM must equal the mailbox, because SPOOF_PROTECTION on the relay makes that structural.
+# Reads sops-encrypted values, so it is in `check` and not `check-ci` — same rule as `validate`.
+vikunja-check:
+	@python3 tools/vikunja-check.py --root apply
 
 # portfolio-prism-check: prove Portfolio Prism's OIDC client, its mount, the app's env and the
 # rendered blueprint Secret have not been edited apart.

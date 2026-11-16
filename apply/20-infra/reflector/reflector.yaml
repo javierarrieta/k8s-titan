@@ -1,13 +1,15 @@
 # Reflector replicates TLS material across namespaces, plus exactly one credential and one
 # ConfigMap: the restic backup Secret and the backup scripts, both declared in `apps` and mirrored
-# to the six namespaces that run backup jobs (apply/70-backup/). The database credential is still
-# authored instead (spec 4 A4).
+# to the four other namespaces that run backup jobs (apply/70-backup/) - five namespaces run backup
+# jobs in total. The database credential is still authored instead (spec 4 A4).
 #
 # That is a reversal of this file's original rule - "TLS material and nothing else" - made in the
-# restic backup spec section 7b, and the reason is arithmetic rather than preference: six
-# namespaces times a credential and a 150-line script is either twelve copies in git that can
-# drift or one copy mirrored. Both mirror lists are explicit namespace lists, never "all
-# namespaces", and `make backup-coverage` fails when the two disagree with each other or with the
+# restic backup spec section 7b, and the reason is arithmetic rather than preference: four
+# namespaces ran backup jobs at the time of the reversal, and four namespaces times a credential and
+# a 150-line script is either eight copies in git that can drift or one copy mirrored. Today it is
+# five namespaces and ten copies - the same arithmetic with a bigger number, which is why it is
+# written as arithmetic. Both mirror lists are explicit namespace lists, never "all namespaces", and
+# `make backup-coverage` fails when the two disagree with each other or with the
 # set of namespaces that has a runner.
 #
 # That scope is a convention, not a boundary. The chart's ClusterRole (rbac.enabled

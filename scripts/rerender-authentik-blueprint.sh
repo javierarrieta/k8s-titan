@@ -19,7 +19,7 @@
 # USAGE
 #   scripts/rerender-authentik-blueprint.sh <app>            # show the diff, write nothing
 #   scripts/rerender-authentik-blueprint.sh <app> --write    # re-encrypt in place
-#   apps: observability | tesla-boards | open-webui | mealie
+#   apps: observability | tesla-boards | open-webui | mealie | portfolio-prism | vikunja
 #
 # coder, google, opencloud and sure are deliberately absent: their setup scripts hold their
 # credentials in different shapes and none has needed a text-only edit yet. An unlisted app is a hard
@@ -32,7 +32,7 @@ cd "$REPO"
 
 usage() {
   echo "usage: $(basename "$0") <app> [--write]" >&2
-  echo "  apps: observability | tesla-boards | open-webui | mealie | portfolio-prism" >&2
+  echo "  apps: observability | tesla-boards | open-webui | mealie | portfolio-prism | vikunja" >&2
   exit 2
 }
 
@@ -74,6 +74,14 @@ case "$APP" in
     BP_SECRET=apply/10-secrets/authentik-portfolio-prism-blueprint.yaml
     CRED_SECRET=apply/10-secrets/portfolio-prism-secrets.yaml
     PH_ID='${PORTFOLIO_OIDC_CLIENT_ID}'; PH_SEC='${PORTFOLIO_OIDC_CLIENT_SECRET}' ;;
+  # Same reasoning as portfolio-prism above: without this branch, editing
+  # authentik/blueprints-vikunja.yaml has NO path back into the mounted Secret. The setup script
+  # refuses to re-run without FORCE=1, and FORCE=1 mints a new client pair to change a comment.
+  vikunja)
+    TEMPLATE=authentik/blueprints-vikunja.yaml
+    BP_SECRET=apply/10-secrets/authentik-vikunja-blueprint.yaml
+    CRED_SECRET=apply/10-secrets/vikunja-secrets.yaml
+    PH_ID='${VIKUNJA_OIDC_CLIENT_ID}'; PH_SEC='${VIKUNJA_OIDC_CLIENT_SECRET}' ;;
   *) echo "FAIL: unknown app '$APP' — see usage" >&2; usage ;;
 esac
 
@@ -97,12 +105,14 @@ trap cleanup EXIT INT TERM
 # Key names differ per app — Grafana uses its config keys, open-webui and Mealie theirs — so the pair
 # is found by suffix rather than hard-coded a second time next to the values themselves. portfolio-prism
 # uses OIDC_CLIENT_ID / OIDC_CLIENT_SECRET, which the suffix lookup below reads without special-casing.
+# Vikunja's keys are ..._AUTHENTIK_CLIENTID / ..._CLIENTSECRET, with no underscore before ID/SECRET,
+# because Vikunja's own config key is `clientid` — hence two suffix forms rather than a per-app name.
 PAIR=$(CRED="$CRED_SECRET" python3 -c '
 import os, subprocess, sys, yaml
 d = yaml.safe_load(subprocess.run(["sops", "-d", os.environ["CRED"]],
                                   capture_output=True, text=True, check=True).stdout)["stringData"]
-cid = next((k for k in d if k.endswith("CLIENT_ID")), None)
-csec = next((k for k in d if k.endswith("CLIENT_SECRET")), None)
+cid = next((k for k in d if k.endswith("CLIENT_ID") or k.endswith("CLIENTID")), None)
+csec = next((k for k in d if k.endswith("CLIENT_SECRET") or k.endswith("CLIENTSECRET")), None)
 if not cid or not csec:
     sys.exit("FAIL: no *CLIENT_ID / *CLIENT_SECRET pair in the app Secret")
 sys.stdout.write(d[cid] + "\n" + d[csec])')
