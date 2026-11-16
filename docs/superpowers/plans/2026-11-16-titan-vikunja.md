@@ -645,6 +645,11 @@ It also checks the settings whose ABSENCE is a silent failure:
     configured — the mailserver runbook's `DNS_SERVER: unbound.apps` is the precedent for how
     expensive that shape is.
 
+The dead-key and unknown-key sweeps cover the container's WHOLE environment: `env:` plus every key of
+every Secret named by `envFrom`. That is what the pod actually receives. A typo'd key added to
+vikunja-secrets — VIKUNJA_MAILER_FROMEAMIL, say — reaches the container as a dead variable in exactly
+the shape this file exists to catch, and a sweep that walked `env:` alone reports clean on it.
+
 There is deliberately NO email_verified check here, which will read as an omission to anyone who has
 seen coder or mealie. Vikunja keys identity on (issuer, sub) and reads email_verified only in the
 deprecated emailfallback path that auth.local.enabled=false makes unreachable. Spec D6 has the source
@@ -666,7 +671,11 @@ PROVIDER = "authentik"
 # the env-var segment lowercased — setConfigFromEnv() splits on "_" and lowercases every segment.
 REDIRECT = f"https://{HOST}/auth/openid/{PROVIDER}"
 ISSUER_URL = "https://auth.titan.arrieta.eu/application/o/vikunja/"
-PLACEHOLDERS = ("${VIKUNJA_OIDC_CLIENT_ID}", "${VIKUNJA_OIDC_CLIENT_SECRET}")
+# The two placeholders scripts/setup-vikunja-secrets.sh fills, each paired with the provider attribute
+# it stands for. Both the leftover-placeholder check and the byte-rebuild below are driven off this one
+# tuple, so adding a third placeholder cannot leave one of the two checks behind.
+PLACEHOLDERS = (("${VIKUNJA_OIDC_CLIENT_ID}", "client_id"),
+                ("${VIKUNJA_OIDC_CLIENT_SECRET}", "client_secret"))
 PREFIX = "VIKUNJA_AUTH_OPENID_PROVIDERS_AUTHENTIK_"
 # Config keys that exist, so a VIKUNJA_* env var naming nothing is caught rather than ignored.
 # Trimmed to what this app sets; extend it when a new key is introduced, do not let it rot.
@@ -694,8 +703,39 @@ def provider_of(entries, name="vikunja"):
     return None
 
 
+def entries_of(body):
+    """The top-level `entries` of a parsed blueprint body, or None.
+
+    A blueprint that parses to a mapping without `entries` — or to a scalar, or to a list — is
+    malformed, not a crash. Indexing it would raise KeyError/TypeError and print a traceback where a
+    FAIL: line belongs, and a gate that fails a correct tree gets worked around instead of fixed.
+    """
+    return body.get("entries") if isinstance(body, dict) else None
+
+
+def redirect_uris_of(provider):
+    """[(url, matching_mode)] for a provider's redirect_uris.
+
+    authentik accepts each entry as either a mapping ({url, matching_mode}) or a bare string, and a
+    bare string takes the default matching_mode of strict. Reading `.url` off every entry would raise
+    AttributeError on the shorter form — again, a traceback where a FAIL: line belongs.
+    """
+    out = []
+    for u in provider.get("redirect_uris") or []:
+        if isinstance(u, str):
+            out.append((u, "strict"))
+        else:
+            u = u or {}
+            out.append((u.get("url"), u.get("matching_mode") or "strict"))
+    return out
+
+
+def containers_of(dep):
+    return (((dep.get("spec") or {}).get("template") or {}).get("spec") or {}).get("containers") or []
+
+
 def env_of(deploy, name):
-    for c in (((deploy.get("spec") or {}).get("template") or {}).get("spec") or {}).get("containers", []):
+    for c in containers_of(deploy):
         for env in c.get("env") or []:
             if env.get("name") == name:
                 return env.get("value")
@@ -704,10 +744,30 @@ def env_of(deploy, name):
 
 def all_env_names(dep):
     names = set()
-    for c in (((dep.get("spec") or {}).get("template") or {}).get("spec") or {}).get("containers", []):
+    for c in containers_of(dep):
         for env in c.get("env") or []:
             names.add(env.get("name"))
     return names
+
+
+def env_from_names(dep):
+    """Every Secret name the pod's environment comes from, across every container.
+
+    Same scope as env_of and all_env_names, which walk every container: reading envFrom off
+    containers[0] alone would miss a Secret attached to a second container.
+    """
+    names = []
+    for c in containers_of(dep):
+        for ref in c.get("envFrom") or []:
+            n = (ref.get("secretRef") or {}).get("name")
+            if n:
+                names.append(n)
+    return names
+
+
+def secret_keys_of(docs, name, namespace):
+    """Every key in a Secret — the whole map secret_key() returns second, decoded if it is `data:`."""
+    return secret_key(docs, name, namespace, "")[1] or {}
 
 
 def main():
@@ -725,13 +785,16 @@ def main():
     # --- the blueprint: template, rendered artifact, and the mount ---------------------------
     tpl_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                             "authentik", "blueprints-vikunja.yaml")
+    tpl_text = None
+    tpl = None
     if not os.path.exists(tpl_path):
         fail(f"no reviewed template at {tpl_path}")
-        tpl = None
     else:
-        tpl = load_tolerating_tags(open(tpl_path).read())
+        with open(tpl_path) as fh:
+            tpl_text = fh.read()
+        tpl = load_tolerating_tags(tpl_text)
 
-    prov = provider_of(tpl["entries"]) if tpl else None
+    prov = provider_of(entries_of(tpl))
     if prov is None:
         fail("blueprints-vikunja.yaml declares no oauth2provider named vikunja")
 
@@ -747,32 +810,35 @@ def main():
 
     rprov = None
     if rendered is not None:
-        rprov = provider_of(load_tolerating_tags(rendered)["entries"])
+        rprov = provider_of(entries_of(load_tolerating_tags(rendered)))
         if rprov is None:
             fail("the rendered blueprint has no oauth2provider named vikunja")
         else:
-            for ph, key in (("${VIKUNJA_OIDC_CLIENT_ID}", "client_id"),
-                            ("${VIKUNJA_OIDC_CLIENT_SECRET}", "client_secret")):
+            for ph, _attr in PLACEHOLDERS:
                 if ph in rendered:
                     fail(f"the rendered blueprint still carries {ph} - it was committed before "
                          "scripts/setup-vikunja-secrets.sh substituted it")
-            if tpl is not None:
+            if tpl_text is not None:
                 # The rendered artifact must be the template with ONLY the two placeholders filled.
                 # Anything else means someone edited one file and not the other, and the template is
                 # the reviewed artifact — the Secret is generated, so the template wins the argument.
-                want = open(tpl_path).read()
-                want = want.replace("${VIKUNJA_OIDC_CLIENT_ID}", rprov.get("client_id") or "")
-                want = want.replace("${VIKUNJA_OIDC_CLIENT_SECRET}", rprov.get("client_secret") or "")
+                want = tpl_text
+                for ph, attr in PLACEHOLDERS:
+                    want = want.replace(ph, rprov.get(attr) or "")
                 if want != rendered:
                     fail("the rendered blueprint is not the reviewed template plus the credentials - "
                          "someone edited one file and not the other")
-            uris = sorted(u.get("url") for u in (rprov.get("redirect_uris") or []))
+            uris = sorted(url for url, _mode in redirect_uris_of(rprov))
             if uris != [REDIRECT]:
                 fail(f"redirect_uris are {uris}, expected ['{REDIRECT}'] - the path is "
                      "/auth/openid/<provider-id> and the provider id is the env-var segment lowercased")
-            if any((u.get("matching_mode") or "strict") != "strict" for u in (rprov.get("redirect_uris") or [])):
+            if any(mode != "strict" for _url, mode in redirect_uris_of(rprov)):
                 fail("a redirect_uri is not matching_mode: strict - a prefix match is a redirect bypass")
             mappings = " ".join(str(m) for m in (rprov.get("property_mappings") or []))
+            if "scope-openid" not in mappings:
+                fail("the provider's property_mappings do not include the openid scope. Without it the "
+                     "ID token carries no `sub`, and getOrCreateUser() looks a user up by "
+                     "(issuer, sub) and nothing else, so every login fails or mints a stranger")
             if "scope-profile" not in mappings:
                 fail("the provider's property_mappings do not include the profile scope, so "
                      "preferred_username is not in the token and Vikunja mints a pet-name username "
@@ -819,15 +885,23 @@ def main():
         if env_of(dep, PREFIX + "SCOPE") != "openid profile email":
             fail(f"{PREFIX}SCOPE must be 'openid profile email'. Adding `groups` switches on team "
                  "sync (spec D20); dropping `email` makes every login fail.")
-        dead = sorted(DEAD_KEYS & all_env_names(dep))
+        # The container's environment is `env:` PLUS every whole Secret named by `envFrom`, so both
+        # sweeps have to cover both. A typo'd key added to vikunja-secrets reaches the pod as a dead
+        # variable in exactly the shape this gate exists to catch, and an `env:`-only sweep reports
+        # clean on it.
+        configured = set(all_env_names(dep))
+        for n in env_from_names(dep):
+            configured |= set(secret_keys_of(docs, n, "vikunja"))
+        dead = sorted(DEAD_KEYS & configured)
         if dead:
             fail(f"{dead} is not a Vikunja config key - it reads as configured and does nothing. "
                  "The Postgres port belongs inside VIKUNJA_DATABASE_HOST (pkg/db/db.go "
                  "parsePostgreSQLHostPort).")
-        unknown = sorted(k for k in all_env_names(dep)
+        unknown = sorted(k for k in configured
                          if k.startswith("VIKUNJA_") and k not in KNOWN_KEYS)
         if unknown:
-            fail(f"VIKUNJA_* env vars that are not in this gate's known-key list: {unknown}. Either "
+            fail(f"VIKUNJA_* names that are not in this gate's known-key list, counting both the "
+                 f"Deployment's `env:` and every `envFrom` Secret: {unknown}. Either "
                  "the key is real and the list is stale, or it is a dead variable. Check which before "
                  "editing the list.")
 
@@ -861,16 +935,19 @@ def main():
                  "that documents intent (spec D13), so deleting it is a silent un-pinning.")
 
         # --- the Secret, and the two copies of one password ---
-        containers = (((dep.get("spec") or {}).get("template") or {}).get("spec") or {}).get("containers") or []
-        names = [s.get("secretRef", {}).get("name")
-                 for s in ((containers[0].get("envFrom") or []) if containers else [])]
+        # envFrom is read from every container, the same scope env_of and all_env_names use.
+        names = env_from_names(dep)
+        REQUIRED = (PREFIX + "CLIENTID", "VIKUNJA_DATABASE_PASSWORD", "VIKUNJA_SERVICE_SECRET")
+        # The predicate demands all three keys in ONE Secret, because that is what the message below
+        # claims and what scripts/setup-vikunja-secrets.sh writes. Accepting a Secret that carried any
+        # one of them — what this loop used to do — let a half-populated Secret through, and then every
+        # check under it reported on it as though it were the real one.
         sec_name = None
         for n in names:
-            cand = find(docs, "Secret", n, "vikunja")
-            if cand is not None:
-                for k in (PREFIX + "CLIENTID", "VIKUNJA_DATABASE_PASSWORD", "VIKUNJA_SERVICE_SECRET"):
-                    if (cand.get("stringData") or {}).get(k) is not None or (cand.get("data") or {}).get(k) is not None:
-                        sec_name = n
+            keys = secret_keys_of(docs, n, "vikunja")
+            if keys and all(k in keys for k in REQUIRED):
+                sec_name = n
+                break
         if sec_name is None:
             fail(f"no Secret reachable from vikunja/vikunja by envFrom carries the OIDC client, the "
                  f"DB password and the service secret (envFrom names: {names})")
@@ -878,8 +955,9 @@ def main():
             for key, bp_key in ((PREFIX + "CLIENTID", "client_id"),
                                 (PREFIX + "CLIENTSECRET", "client_secret")):
                 app_val, _ = secret_key(docs, sec_name, "vikunja", key)
-                if app_val is None:
-                    fail(f"{sec_name} has no {key}")
+                if app_val in (None, ""):
+                    fail(f"{sec_name} has no {key} (absent or empty) - an empty client credential is "
+                         "not a credential, and empty compared against empty would read as agreement")
                 elif rprov and app_val != rprov.get(bp_key):
                     fail(f"Vikunja's {key} does not match the blueprint's {bp_key} - the login will "
                          "fail with invalid_client, and the two files are edited apart")
@@ -888,13 +966,16 @@ def main():
                      "one per boot and every Recreate logs every session out, with no error anywhere.")
 
             pw, _ = secret_key(docs, sec_name, "vikunja", "VIKUNJA_DATABASE_PASSWORD")
-            if pw is None:
-                fail(f"{sec_name} has no VIKUNJA_DATABASE_PASSWORD")
+            # Absent is already the headline failure above — the envFrom predicate demands this key —
+            # so the case left to catch here is the empty one, which would otherwise compare equal to
+            # an empty copy on the CNPG side and pass.
+            if pw in (None, ""):
+                fail(f"{sec_name} has no VIKUNJA_DATABASE_PASSWORD (absent or empty)")
             dbsec = find(docs, "Secret", "vikunja-db-credentials", "databases")
             if dbsec is None:
                 fail("no Secret vikunja-db-credentials in namespace databases - CNPG's DatabaseRole "
                      "has no credential to install")
-            elif pw is not None:
+            elif pw not in (None, ""):
                 cnpg_pw, _ = secret_key(docs, "vikunja-db-credentials", "databases", "password")
                 cnpg_user, _ = secret_key(docs, "vikunja-db-credentials", "databases", "username")
                 if cnpg_pw is None:
@@ -944,6 +1025,15 @@ def main():
                  "blueprint redirect URI and the wildcard certificate all key off this host")
         if not spec.get("tls"):
             fail("Ingress vikunja/vikunja has no tls block - titan-tls has to terminate TLS for this host")
+        else:
+            # tls-reflection-check proves this namespace is *allowed* the mirrored Secret; it cannot see
+            # whether this Ingress asks for it. A tls block naming some other Secret, or none, applies
+            # cleanly, reports Accepted, and Traefik answers with its fallback certificate.
+            tls_names = sorted({(t or {}).get("secretName") or "<unset>" for t in (spec.get("tls") or [])})
+            if tls_names != ["titan-tls"]:
+                fail(f"Ingress vikunja/vikunja's tls blocks name {tls_names}, expected ['titan-tls'] - "
+                     "Reflector mirrors that one into this namespace, and anything else is Traefik's "
+                     "fallback certificate behind an Accepted Ingress")
 
     db = find(docs, "Database", "vikunja", "databases")
     if db is None:
@@ -958,6 +1048,11 @@ def main():
         if not (role.get("spec") or {}).get("login"):
             fail("DatabaseRole vikunja is not login: true - CNPG creates roles NOLOGIN by default, "
                  "the Database reports Ready and every connection fails pointing somewhere else")
+        if not (role.get("spec") or {}).get("comment"):
+            fail("DatabaseRole vikunja has no spec.comment - it is the only DatabaseRole field the CRD "
+                 "does not default, so it is the only one that bumps metadata.generation and makes the "
+                 "instance manager re-apply the role and clear a stale status.message (#154). Without "
+                 "it a false RBAC denial sits there forever alongside applied: true.")
         if ((role.get("spec") or {}).get("passwordSecret") or {}).get("name") != "vikunja-db-credentials":
             fail("DatabaseRole vikunja does not point at vikunja-db-credentials")
 
