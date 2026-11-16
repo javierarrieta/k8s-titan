@@ -356,7 +356,7 @@ metadata:
     app.kubernetes.io/component: pv-backup-discovery
     app.kubernetes.io/part-of: pv-backup
 spec:
-  schedule: "0 20 * * *"
+  schedule: "0 21 * * *"
   timeZone: "UTC"
   concurrencyPolicy: Forbid
   successfulJobsHistoryLimit: 3
