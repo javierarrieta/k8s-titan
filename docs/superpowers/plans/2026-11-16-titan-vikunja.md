@@ -1674,7 +1674,29 @@ Delete the `- authentik-vikunja-blueprint` line from `blueprints.secrets` in `ap
 
 - [ ] **Step 3: Drop the service secret**
 
-Remove the `VIKUNJA_SERVICE_SECRET` key from `vikunja-secrets` (sops edit), run the gate, expect the `VIKUNJA_SERVICE_SECRET` failure naming the per-boot regeneration, then restore.
+Remove the `VIKUNJA_SERVICE_SECRET` key from `vikunja-secrets`, run the gate, then restore.
+
+Use `sops unset`, not `sops del` — the latter does not exist in sops 3.13.3 and fails with a misleading `no matching creation rules found`:
+
+```bash
+sops unset apply/10-secrets/vikunja-secrets.yaml '["stringData"]["VIKUNJA_SERVICE_SECRET"]'
+make vikunja-check; git checkout apply/10-secrets/vikunja-secrets.yaml
+```
+
+Expected, measured 2026-11-17: the **three-key `envFrom` predicate** fires first, because removing the key also breaks the "one Secret carries the OIDC client, the DB password and the service secret" rule —
+
+```
+FAIL: no Secret reachable from vikunja/vikunja by envFrom carries the OIDC client, the DB password and the service secret (envFrom names: ['vikunja-secrets'])
+```
+
+The per-boot-regeneration message is still reachable, but on the **present-but-empty** path rather than the absent-key path:
+
+```bash
+printf '""' | sops set apply/10-secrets/vikunja-secrets.yaml '["stringData"]["VIKUNJA_SERVICE_SECRET"]' --value-stdin
+make vikunja-check; git checkout apply/10-secrets/vikunja-secrets.yaml
+```
+
+Both are correct behaviour; the gate simply has two doors to the same fault and checks the structural one first.
 
 - [ ] **Step 4: Split the mail FROM from the mailbox**
 
