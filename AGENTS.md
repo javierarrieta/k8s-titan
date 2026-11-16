@@ -53,10 +53,10 @@ somewhere: a manifest in a directory no `kustomization.yaml` names is a manifest
 and `make kustomize-listing` is what catches it.
 
 Namespaces are declared centrally rather than inside the charts that need them:
-`apply/00-bootstrap/namespaces.yaml` holds all seventeen of them — `apps`, `auth`,
+`apply/00-bootstrap/namespaces.yaml` holds all nineteen of them — `apps`, `auth`,
 `cert-manager`, `certificates`, `cnpg-system`, `coder`, `coder-workspaces`, `databases`,
-`files`, `gatus`, `llm`, `mealie`, `monitoring`, `observability`, `open-webui`, `sure` and
-`traefik-system`. `k8s-reader` is the one exception — its own manifest under `20-infra`
+`files`, `gatus`, `llm`, `mealie`, `monitoring`, `observability`, `open-webui`, `site`, `sure`,
+`traefik-system` and `vikunja`. `k8s-reader` is the one exception — its own manifest under `20-infra`
 creates it, because the identity and the namespace are one thing. Nothing else may declare a
 namespace twice. `traefik-system` used to be declared in `apply/20-infra/traefik/traefik.yaml` as
 well, and that was a live trap, not untidiness: two stages applying one object means each reconcile

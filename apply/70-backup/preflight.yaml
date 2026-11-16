@@ -19,10 +19,10 @@
 # namespace so the script text exists exactly once in git. That is a deliberate widening:
 # apply/20-infra/reflector/reflector.yaml records the earlier decision to keep Reflector
 # to TLS material, and the reason it gave was that duplicating one value was cheaper than
-# widening a cluster-wide syncer. Six namespaces changes that arithmetic, and the header
-# there says plainly that the TLS-only scope was a convention enforced by review rather
-# than by RBAC -- so what is being reversed here is the convention, and the review that
-# reverses it is this file.
+# widening a cluster-wide syncer. Four namespaces ran backup jobs when that was written and five do
+# now, and either number changes that arithmetic, so the header there says plainly that the
+# TLS-only scope was a convention enforced by review rather than by RBAC -- so what is being
+# reversed here is the convention, and the review that reverses it is this file.
 #
 # WHY A ConfigMap AND NOT AN IMAGE
 # The scripts are GitOps state: a schedule change or a retention change has to be a commit

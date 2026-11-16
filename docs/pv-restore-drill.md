@@ -172,8 +172,9 @@ live volume would pass whether or not the repository worked.
 - **Not that the app starts against the restored volume.** The drill stops at bytes. The
   next rung — mount the restored PVC at a scratch instance of the workload and see it
   come up — is a bigger, noisier drill and is not what this script does.
-- **Not the other three volumes.** One volume proves the mechanism (repository,
-  credentials, tags, restic version, restore path). It does not prove that
+- **Not the other five volumes** (`apps/investing-agent-pv-claim`, `apps/portfolio-prism-data`,
+  `open-webui/open-webui-data`, `sure/sure-storage`, `vikunja/vikunja-data`). One volume proves the
+  mechanism (repository, credentials, tags, restic version, restore path). It does not prove that
   `open-webui-data`'s snapshot is intact. Run it per volume if you want per-volume
   claims; the script takes `--namespace`/`--pvc` for exactly that.
 - **Not that a failure would be noticed.** Nothing alerts on a failed backup job — that is
@@ -304,8 +305,9 @@ Three things worth pointing at in that line:
 - **`files_expected=9` against `Restored 22 files/dirs`** is not a contradiction: 22 counts
   directories too, and the comparison is regular-files to regular-files on both sides.
 
-**What this run does not cover**, restated so nobody has to go looking: the other three
-opted-in volumes; application consistency (this is a cold snapshot into a scratch volume, not
+**What this run does not cover**, restated so nobody has to go looking: the other five opted-in
+volumes (`apps/investing-agent-pv-claim`, `apps/portfolio-prism-data`, `open-webui/open-webui-data`,
+`sure/sure-storage`, `vikunja/vikunja-data`); application consistency (this is a cold snapshot into a scratch volume, not
 a restore under load); whether an app starts against a restored volume; whether a failed
 backup would be noticed — **this drill did not test that, and it is no longer true that nothing
 alerts**: casa's `TitanBackup*` rules cover it and were seen firing on 2026-11-04, but by a different
