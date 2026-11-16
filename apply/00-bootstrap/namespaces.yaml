@@ -284,3 +284,13 @@ metadata:
   annotations:
     kubernetes.io/metadata.name: traefik-system
     kubernetes.io/description: "Flux-managed Traefik, the cluster's ingress path (issue #209)"
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: vikunja
+  labels:
+    name: vikunja
+  annotations:
+    kubernetes.io/metadata.name: vikunja
+    kubernetes.io/description: "Vikunja task manager, authenticated by authentik, data in the shared CNPG cluster"

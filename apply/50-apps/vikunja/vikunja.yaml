@@ -1,0 +1,275 @@
+# Vikunja on titan: fresh instance, data in the shared CNPG cluster, sign-in through authentik,
+# reminders by mail through the existing relay.
+# Design and evidence: docs/superpowers/specs/2026-11-16-titan-vikunja-design.md.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: vikunja-data
+  namespace: vikunja
+  annotations:
+    # Opted in to restic PV backup. This annotation IS the scope decision -- apply/70-backup/
+    # discovers annotated PVCs at runtime rather than enumerating them in git. Unlike the Grafana
+    # volumes, this one holds user-created bytes (attachments and avatars) that exist nowhere else,
+    # so the opt-in is not optional. What a restore returns is spec §4: the attachment ROWS are in
+    # Postgres and the BYTES are here, on two schedules with no shared point in time.
+    backup.titan.arrieta.eu/class: daily
+spec:
+  accessModes:
+  - ReadWriteOnce
+  # local-path-retain, not the default local-path: Retain is the only deletion mitigation this cluster
+  # has for a PVC. It is a deletion mitigation and NOT a backup.
+  storageClassName: local-path-retain
+  resources:
+    requests:
+      # 5Gi, thin-provisioned — local-path reserves a directory, not disk. Vikunja's own footprint is
+      # the attachment store, and files.maxsize defaults to 20MB per file.
+      storage: 5Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vikunja
+  namespace: vikunja
+  # Meaningless without the namespace also being in reloader.namespaces in
+  # apply/20-infra/reloader/reloader.yaml — watchGlobally is false, so Reloader does not look here at
+  # all. Both halves are in this change for exactly that reason: Vikunja takes its service secret, DB
+  # password, OIDC client and SMTP credential through envFrom, so a rotation would otherwise sit
+  # unread in a running pod.
+  annotations:
+    reloader.stakater.com/auto: "true"
+spec:
+  replicas: 1
+  # RWO PVC: a RollingUpdate schedules pod 2 while pod 1 still holds the volume and the new pod sits
+  # Pending on a volume conflict forever. Recreate also means only one pod ever runs migrations.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: vikunja
+  template:
+    metadata:
+      labels:
+        app: vikunja
+    spec:
+      securityContext:
+        # uid 1000 is the user the image is built with (upstream: "runs as user 1000 and no group",
+        # i.e. gid 0). Running the group as 1000 rather than 0 is a deliberate narrowing; fsGroup is
+        # what makes the mounted PVC writable by it. grafana is the live proof fsGroup is honoured
+        # against local-path-retain on this cluster and mealie the proof for a non-root uid, but this
+        # exact combination is first-boot-verified (spec §9.6).
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+      containers:
+      - name: vikunja
+        # Pinned to a specific release, never :latest (the fleet rule). 2.8.0 is current; it is also
+        # the release the `groups` claim team sync and the tk_-token CalDAV auth both landed by.
+        image: docker.io/vikunja/vikunja:2.8.0
+        ports:
+        - name: http
+          containerPort: 3456
+        envFrom:
+        # Every key here is named exactly as Vikunja reads it, so there is no aliasing between the
+        # Secret and the Deployment and no typo'd mapping to find during an incident.
+        - secretRef:
+            name: vikunja-secrets
+        env:
+        # --- the one URL everything else is derived from ---------------------------------------
+        # PUBLICURL is what Vikunja puts in generated links AND what it builds its OIDC redirect URI
+        # from. Change the host here and the URI stops matching the strict entry in
+        # authentik/blueprints-vikunja.yaml, which reads as an authentik error rather than a Vikunja
+        # one. `make vikunja-check` ties the two together.
+        - name: VIKUNJA_SERVICE_PUBLICURL
+          value: https://tasks.titan.arrieta.eu/
+        # THE LINE THAT KEEPS EVERYONE LOGGED IN. Unset, generateServiceSecretIfEmpty() in
+        # pkg/config/config.go mints a random secret per boot and every already-issued token dies
+        # with the process — with strategy: Recreate above, that is every deploy logging every
+        # session out, with no error anywhere. service.JWTSecret is the deprecated alias; do not
+        # "simplify" it back.
+        - name: VIKUNJA_SERVICE_TIMEZONE
+          # GMT is already the default (ServiceTimeZone.setDefault("GMT")). This line is a PIN that
+          # documents intent and survives a future default change; it moves no behaviour by itself.
+          # Spec D13, and §9.4 for what is still unverified about reminder timing.
+          value: GMT
+        # --- client IP, so the session list and the logs mean something -------------------------
+        # Default is `direct`, which reads the TCP peer: behind Traefik that is the Traefik pod, so
+        # every log line and every entry in a user's session list says the proxy instead of the
+        # client. 10.62.0.0/16 is the measured pod CIDR (2026-11-16).
+        #
+        # THE HONEST LIMIT: trusting the pod CIDR means any pod in the cluster can forge
+        # X-Forwarded-For. Acceptable today only because ratelimit.enabled and audit.enabled are both
+        # off, so the sole consumer of client address is attribution. If either is switched on this
+        # line stops being cosmetic and the forgeability becomes the finding. Spec D9.
+        - name: VIKUNJA_SERVICE_IPEXTRACTIONMETHOD
+          value: xff
+        - name: VIKUNJA_SERVICE_TRUSTEDPROXIES
+          value: 10.62.0.0/16
+        # Already the default. The Sentry DSN is compiled into the binary, so this is a pin against a
+        # future default flip, not a fix for anything (spec D19).
+        - name: VIKUNJA_SENTRY_ENABLED
+          value: "false"
+        # --- single sign-on: authentik decides who you are; there is no local password door ------
+        # The Vikunja equivalent of mealie's ALLOW_PASSWORD_LOGIN=false and open-webui's
+        # ENABLE_LOGIN_FORM=false: a local password form next to SSO is a second, unbacked door.
+        # auth.local.enabled defaults to true, so this line is load-bearing, not tidy-up.
+        - name: VIKUNJA_AUTH_LOCAL_ENABLED
+          value: "false"
+        - name: VIKUNJA_SERVICE_ENABLEREGISTRATION
+          value: "false"
+        - name: VIKUNJA_AUTH_OPENID_ENABLED
+          value: "true"
+        # The provider key is `authentik`. setConfigFromEnv() splits the env var on "_" and
+        # lowercases every segment, so AUTHENTIK here becomes the provider id `authentik`, which is
+        # also the last segment of the redirect URI registered in the blueprint. One fact, two files,
+        # and vikunja-check compares them.
+        - name: VIKUNJA_AUTH_OPENID_PROVIDERS_AUTHENTIK_NAME
+          value: authentik
+        - name: VIKUNJA_AUTH_OPENID_PROVIDERS_AUTHENTIK_AUTHURL
+          value: https://auth.titan.arrieta.eu/application/o/vikunja/
+        # openid + email + profile, and NOT `groups`. email is required — mergeClaims() returns
+        # ErrNoOpenIDEmailProvided without it — and profile is what carries preferred_username,
+        # without which Vikunja mints a pet-name username and the login still succeeds.
+        # Adding `groups` switches on team sync from 2.8.0 (spec D20).
+        - name: VIKUNJA_AUTH_OPENID_PROVIDERS_AUTHENTIK_SCOPE
+          value: openid profile email
+        # RP-Initiated Logout, so logging out of Vikunja does not leave the authentik session standing.
+        - name: VIKUNJA_AUTH_OPENID_PROVIDERS_AUTHENTIK_LOGOUTURL
+          value: https://auth.titan.arrieta.eu/application/o/vikunja/end-session/
+        # NO email_verified opt-out, deliberately, unlike coder and mealie. Read at 2.8.0,
+        # pkg/modules/auth/openid/openid.go keys identity on (issuer, sub) and consults
+        # email_verified only in the deprecated emailfallback path that auth.local.enabled=false
+        # makes unreachable. authentik's managed email mapping returns "email_verified": False and
+        # Vikunja ignores it here. Spec D6 has the evidence; do not "fix" this by copying mealie's
+        # OIDC_REQUIRES_EMAIL_VERIFICATION=false, which would be a dead variable here.
+        # --- database: the shared CNPG cluster, not a database of its own -----------------------
+        - name: VIKUNJA_DATABASE_TYPE
+          value: postgres
+        # THE PORT IS PART OF THIS VALUE. There is no database.port config key — pkg/db/db.go's
+        # parsePostgreSQLHostPort splits host:port out of database.host. A VIKUNJA_DATABASE_PORT would
+        # read as configured and do nothing; vikunja-check fails if one appears.
+        - name: VIKUNJA_DATABASE_HOST
+          value: postgres-rw.databases.svc.cluster.local:5432
+        - name: VIKUNJA_DATABASE_DATABASE
+          value: vikunja
+        - name: VIKUNJA_DATABASE_USER
+          value: vikunja
+        # sslmode is left at its default `disable`, matching mealie, open-webui and Sure on the same
+        # postgres-rw path; the connection never leaves the node. Not a regression to "fix".
+        # 10 open / 2 idle, against defaults of 100 / 50. Idle is the steady-state footprint; open is
+        # the bound on how many backends one Vikunja can pile onto the shared cluster if Postgres
+        # stalls. Not lower: an exhausted pool BLOCKS requests rather than erroring, so one slow
+        # query would queue everything behind it and read as a hang with nothing in the log. Spec D10.
+        - name: VIKUNJA_DATABASE_MAXOPENCONNECTIONS
+          value: "10"
+        - name: VIKUNJA_DATABASE_MAXIDLECONNECTIONS
+          value: "2"
+        # --- attachments and avatars ------------------------------------------------------------
+        # The default is relative to service.rootpath, which is the WORKDIR. Made absolute because
+        # that is what the PVC mounts, so there is no chance of the two disagreeing.
+        - name: VIKUNJA_FILES_BASEPATH
+          value: /app/vikunja/files
+        # --- outbound mail ----------------------------------------------------------------------
+        # Reminders are already switched on behind this (service.enableemailreminders and
+        # defaultsettings.overdue_tasks_reminders_enabled both default true), so the mailer is the
+        # only switch and leaving it off makes the feature decorative rather than absent.
+        - name: VIKUNJA_MAILER_ENABLED
+          value: "true"
+        - name: VIKUNJA_MAILER_HOST
+          value: mail.techdelivery.es
+        # 465 with implicit TLS: it refuses a downgrade instead of falling back to plaintext, and it is
+        # the port with a recorded end-to-end authenticated submission on this box.
+        - name: VIKUNJA_MAILER_PORT
+          value: "465"
+        - name: VIKUNJA_MAILER_FORCESSL
+          value: "true"
+        # MUST equal VIKUNJA_MAILER_USERNAME. The relay runs SPOOF_PROTECTION=1, which restricts an
+        # authenticated user to its own address and aliases; a FROM that does not match is refused at
+        # MAIL FROM while the pod reports healthy. techdelivery.es is also the one domain of the six
+        # this box signs where DMARC passes on SPF as well as DKIM, because SRS rewrites the envelope
+        # to that domain. Spec §6.
+        - name: VIKUNJA_MAILER_FROMEMAIL
+          value: tasks@techdelivery.es
+        # --- probes -----------------------------------------------------------------------------
+        # /health is registered at pkg/routes/routes.go:252 and is public unless health.username /
+        # health.password are set, which they are not. Budgeted as a startupProbe because migrations
+        # run against Postgres at boot and are unbounded on a slow node.
+        startupProbe:
+          httpGet:
+            path: /health
+            port: http
+          periodSeconds: 10
+          failureThreshold: 30
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: http
+          periodSeconds: 30
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: http
+          periodSeconds: 10
+        resources:
+          requests:
+            cpu: 50m
+            memory: 128Mi
+          limits:
+            cpu: "1"
+            memory: 512Mi
+        volumeMounts:
+        - name: data
+          mountPath: /app/vikunja/files
+      volumes:
+      - name: data
+        persistentVolumeClaim:
+          claimName: vikunja-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vikunja
+  namespace: vikunja
+spec:
+  type: ClusterIP
+  selector:
+    app: vikunja
+  ports:
+  - name: http
+    port: 80
+    targetPort: http
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: vikunja
+  namespace: vikunja
+  # No forward-auth middleware on this host: Vikunja decides who may in, through its own OIDC client.
+  # That is a real difference from a proxy-outposted app rather than an omission — Vikunja holds the
+  # client secret and needs the Authorization Code exchange to complete inside its own process, and
+  # putting a proxy provider in front would mean editing the Tesla-owned outpost blueprint that OWNS
+  # that provider list. The host is reachable from the public internet either way, exactly like coder,
+  # auth, open-webui and meals. Recorded in tools/ingress-auth-check.py's NOT_PROXY_GATED.
+  #
+  # Note the CalDAV path is on this host too and authenticates with HTTP Basic using a `tk_` API
+  # token carrying the caldav permission — these users have no password, so that is the only route.
+spec:
+  ingressClassName: traefik
+  rules:
+  - host: tasks.titan.arrieta.eu
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: vikunja
+            port:
+              number: 80
+  tls:
+  - hosts:
+    - tasks.titan.arrieta.eu
+    # Reflected from `certificates` by the wildcard. Reaching THIS namespace required adding `vikunja`
+    # to BOTH reflector annotations on apply/40-certificates/titan-wildcard.yaml; with only one of the
+    # two edited, the Certificate stays Ready and the Secret never appears.
+    secretName: titan-tls

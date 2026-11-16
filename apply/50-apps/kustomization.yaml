@@ -209,3 +209,8 @@ resources:
   # HelmRelease below because authentik applies blueprints and Vikunja does not. Design:
   # docs/superpowers/specs/2026-11-16-titan-vikunja-design.md.
   - vikunja/vikunja-db.yaml
+  # The app itself: PVC + Deployment + Service + Ingress in namespace `vikunja`. It reads
+  # vikunja-secrets (envFrom) and titan-tls (reflected in), and connects as the role above. A pod that
+  # starts before its Secret exists sits crash-looping, which reads like an app bug rather than a
+  # missing file — the ordering note at the top of this file applies.
+  - vikunja/vikunja.yaml
