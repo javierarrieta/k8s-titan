@@ -1482,11 +1482,78 @@ Expected: `vikunja-check: blueprint, mount, app config, OIDC client, DB credenti
 Run: `make kustomize-check && make kustomize-listing && make secret-refs && make crd-check`
 Expected: all pass. `secret-refs` is the one that proves `vikunja-secrets` actually exists in namespace `vikunja`.
 
+Run: `make check-ci` and read the whole list, do not stop at the first red.
+Expected reds at this commit, and nothing else: `blueprint-mount-check`, `ingress-auth` and `tls-reflection-check` (all three cleared by Task 6) and `backup-coverage` (cleared by Task 5b, which exists because the PVC opts in to `daily` here and nothing else in the plan wires the namespace into the backup stage). `namespace-check` must be GREEN after Step 1.
+
 - [ ] **Step 5: Commit**
 
 ```bash
 git add apply/50-apps/vikunja/vikunja.yaml apply/00-bootstrap/namespaces.yaml apply/50-apps/kustomization.yaml
 git commit -m "feat(vikunja): the app — PVC, Deployment, Service and Ingress"
+```
+
+---
+
+## Task 5b: Wire `vikunja` into the backup stage
+
+**Why this task exists.** Task 5 puts `backup.titan.arrieta.eu/class: daily` on the PVC, because spec D17 says the attachment bytes exist nowhere else. But the backup stage discovers volumes by annotation and then needs a runner that can reach that namespace. An opted-in volume with no runner is the silent failure mode `make backup-coverage` was written to catch — the annotation reads as "backed up" and nothing backs it up. Adding the annotation without this task is worse than not adding it.
+
+**Files:**
+- Modify: `apply/70-backup/runner.yaml` (one more `backup-discovery` CronJob)
+- Modify: `apply/70-backup/rbac.yaml` (the runner and job identities for `vikunja`)
+- Modify: `apply/70-backup/preflight.yaml` (both reflector annotations)
+- Modify: `apply/10-secrets/backup-minio-secrets.yaml` (both reflector annotations — sops-encrypted, so `sops set`, not an editor)
+
+**Interfaces:**
+- Consumes: the `vikunja` namespace and the annotated PVC from Task 5.
+- Produces: a green `make backup-coverage`, and a backup that actually runs.
+
+- [ ] **Step 1: Add the discovery CronJob**
+
+In `apply/70-backup/runner.yaml`, append a `backup-discovery` `CronJob` for namespace `vikunja`, copied from the `sure` block (the most recently added one, which is the current shape). Change only the namespace and any namespace-specific comment. Keep verbatim: the `app.kubernetes.io/component: pv-backup-discovery` label and its warning that it must NOT be `pv-backup-job` (runner.sh's overlap guard selects on that label and a runner matching its own guard would conclude there was nothing to do), `concurrencyPolicy: Forbid`, `activeDeadlineSeconds: 900`, the `alpine/k8s` runner image pinned by digest, the `RESTIC_IMAGE` env var pinned by digest, the `drop: ["ALL"]` runner securityContext, and the `backup-preflight` ConfigMap mount at `0555`.
+
+Add one line of comment saying why `vikunja` is here: the PVC carries the `daily` annotation and holds attachment bytes that exist in no other copy.
+
+- [ ] **Step 2: Add the RBAC the runner and its child jobs need**
+
+In `apply/70-backup/rbac.yaml`, replicate for namespace `vikunja` the full set of objects that exists for `sure` — the `backup-runner` ServiceAccount, the `backup-job` ServiceAccount, their Roles and RoleBindings. Copy the rules verbatim; do not narrow them. The gate may not check every one of these, but the child backup pods run as `backup-job` and a missing binding is a Job that creates and then does nothing, which reads as a successful backup that produced no snapshot.
+
+- [ ] **Step 3: Add `vikunja` to the preflight ConfigMap's reflector annotations**
+
+In `apply/70-backup/preflight.yaml`, append `,vikunja` to BOTH:
+
+```yaml
+    reflector.v1.k8s.emberstack.com/reflection-allowed-namespaces: "mealie,open-webui,sure,vikunja"
+    reflector.v1.k8s.emberstack.com/reflection-auto-namespaces: "mealie,open-webui,sure,vikunja"
+```
+
+Editing only one of the two is the half-edit this repo has been bitten by before; `make backup-coverage` checks the pair.
+
+- [ ] **Step 4: Add `vikunja` to the MinIO credential's reflector annotations**
+
+`apply/10-secrets/backup-minio-secrets.yaml` is sops-encrypted, so this is a `sops set`, not a text edit. The annotations currently read `mealie,open-webui,sure` on both keys. Read the file's own structure first (`sops -d apply/10-secrets/backup-minio-secrets.yaml | grep -n reflector`) to get the exact JSON path, then set each key with `--value-stdin` and a JSON-encoded value, e.g.:
+
+```sh
+printf '"mealie,open-webui,sure,vikunja"' | sops set apply/10-secrets/backup-minio-secrets.yaml \
+  '["metadata"]["annotations"]["reflector.v1.k8s.emberstack.com/reflection-allowed-namespaces"]' --value-stdin
+```
+
+Confirm afterwards with `sops -d apply/10-secrets/backup-minio-secrets.yaml | grep reflector` that both lines now end in `,vikunja` and that no credential value was printed. Never `cat` this file.
+
+- [ ] **Step 5: Verify**
+
+Run: `make backup-coverage`
+Expected: pass, with `vikunja`'s opted-in volume matched by a runner and a mirror.
+
+Run: `make kustomize-check && make check-ci`
+Expected: `backup-coverage` green. The only remaining `check-ci` reds are `blueprint-mount-check`, `ingress-auth` and `tls-reflection-check`, all cleared by Task 6.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add apply/70-backup/runner.yaml apply/70-backup/rbac.yaml apply/70-backup/preflight.yaml \
+        apply/10-secrets/backup-minio-secrets.yaml
+git commit -m "feat(vikunja): wire the namespace into the restic backup stage"
 ```
 
 ---
