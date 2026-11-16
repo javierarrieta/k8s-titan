@@ -238,11 +238,6 @@ def main():
             # Rocket binds 127.0.0.1 without this, the kubelet probes from the node, and the pod never
             # becomes Ready. Upstream's own manifest omits it; the probes are upstream's too.
             "ROCKET_ADDRESS": "0.0.0.0",
-            # Pinned so the temporary price-restore window is visible in a gate rather than
-            # invisible in a manifest. Delete this line together with the env entry when the casa
-            # import is done; leaving one without the other is exactly the drift this gate exists
-            # to catch.
-            "BACKUP_ALLOW_PRICE_RESTORE": "true",
         }
         for k, v in want_env.items():
             got = env_of(dep, k)
@@ -258,6 +253,16 @@ def main():
             fail(f"{APP} carries an inline DATABASE_URL ({shadow!r}). It shadows the Secret's value "
                  "through envFrom. Remove it and let portfolio-prism-secrets supply the URL; "
                  "make db-url-check is the gate that proves that Secret agrees with the CNPG role.")
+        # The price-restore window is closed, and "closed" is asserted rather than assumed. Same
+        # shape as BOOTSTRAP_OWNER_SUBJ below: an env entry nobody asks for is invisible to a
+        # want-list, so a want-list can only ever prove presence, never absence. Historical prices
+        # are shared market data and a restore that writes them is not scoped to the caller, so off
+        # is the standing state, and reopening it should cost a deliberate edit here.
+        if env_of(dep, "BACKUP_ALLOW_PRICE_RESTORE") is not None:
+            fail(f"{APP} sets BACKUP_ALLOW_PRICE_RESTORE. Price restore is a window, opened for one "
+                 "import and closed afterwards — see the note on the env list in the manifest. If it "
+                 "genuinely needs reopening, say why in the commit that reopens it and relax this "
+                 "assertion there.")
         if env_of(dep, "BOOTSTRAP_OWNER_SUBJ") is not None:
             fail("BOOTSTRAP_OWNER_SUBJ is set. It is a ONE-WAY transfer with no admin undo and it "
                  "cannot be repeated; leaving it set means anyone who can present that sub can claim "
