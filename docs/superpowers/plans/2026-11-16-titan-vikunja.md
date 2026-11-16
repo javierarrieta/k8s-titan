@@ -296,6 +296,7 @@ git commit -m "feat(vikunja): authentik OIDC blueprint template"
 - Create: `scripts/setup-vikunja-secrets.sh`
 - Create (by running it): `apply/10-secrets/authentik-vikunja-blueprint.yaml`, `apply/10-secrets/vikunja-db-credentials.yaml`, `apply/10-secrets/vikunja-secrets.yaml`
 - Modify: `apply/10-secrets/kustomization.yaml`
+- Modify: `scripts/rerender-authentik-blueprint.sh` (a `vikunja` branch — see Step 5)
 
 **Interfaces:**
 - Consumes: the blueprint template from Task 2; the age key (`SOPS_AGE_KEY_FILE`); the SMTP mailbox as a two-line file (address, then password).
@@ -513,7 +514,35 @@ print("ok: 6 keys, blueprint rendered")
 
 Expected: `ok: 6 keys, blueprint rendered`.
 
-- [ ] **Step 5: List the Secrets and commit**
+- [ ] **Step 5: Give the template a path back into the Secret**
+
+`scripts/rerender-authentik-blueprint.sh` is a hardcoded `case "$APP"` list and its `*` branch fails with `unknown app`. Without a `vikunja` branch, editing `authentik/blueprints-vikunja.yaml` later has no route into the mounted Secret except re-running the setup script with `FORCE=1` — which rotates the client pair to change a comment. The portfolio-prism branch in that same script carries this exact reasoning; copy its shape.
+
+Add to the `case "$APP"` list:
+
+```bash
+  # Same reasoning as portfolio-prism above: without this branch, editing
+  # authentik/blueprints-vikunja.yaml has NO path back into the mounted Secret. The setup script
+  # refuses to re-run without FORCE=1, and FORCE=1 mints a new client pair to change a comment.
+  vikunja)
+    TEMPLATE=authentik/blueprints-vikunja.yaml
+    BP_SECRET=apply/10-secrets/authentik-vikunja-blueprint.yaml
+    CRED_SECRET=apply/10-secrets/vikunja-secrets.yaml
+    PH_ID='${VIKUNJA_OIDC_CLIENT_ID}'; PH_SEC='${VIKUNJA_OIDC_CLIENT_SECRET}' ;;
+```
+
+**And the suffix lookup has to be widened, or this branch fails at runtime.** The script locates the app's copy of the client pair by key *suffix* (`k.endswith("CLIENT_ID")` / `k.endswith("CLIENT_SECRET")`) precisely so it does not hard-code a fourth set of key names. Vikunja's keys are `VIKUNJA_AUTH_OPENID_PROVIDERS_AUTHENTIK_CLIENTID` and `..._CLIENTSECRET` — no underscore before `ID`/`SECRET`, because Vikunja's own config key is `clientid`. So the lookup must accept both spellings:
+
+```python
+cid = next((k for k in d if k.endswith("CLIENT_ID") or k.endswith("CLIENTID")), None)
+csec = next((k for k in d if k.endswith("CLIENT_SECRET") or k.endswith("CLIENTSECRET")), None)
+```
+
+Extend that block's existing comment with one line naming Vikunja's `clientid`/`clientsecret` spelling as the reason the suffix has two forms. Do not add a per-app key-name variable — the suffix lookup exists so key names are not written down twice.
+
+Verify: `bash -n scripts/rerender-authentik-blueprint.sh && scripts/rerender-authentik-blueprint.sh vikunja` — the dry run (no `--write`) must get past `unknown app` and past the client-pair lookup. Before this task's Secrets exist it will stop at `FAIL: apply/10-secrets/authentik-vikunja-blueprint.yaml missing — that is a first-time mint`, which is the correct answer; `unknown app` or `no *CLIENT_ID / *CLIENT_SECRET pair` means the branch or the suffix is wrong.
+
+- [ ] **Step 6: List the Secrets and commit**
 
 Append to `apply/10-secrets/kustomization.yaml`:
 
@@ -527,9 +556,9 @@ Append to `apply/10-secrets/kustomization.yaml`:
 ```
 
 ```bash
-git add scripts/setup-vikunja-secrets.sh apply/10-secrets/vikunja-secrets.yaml \
-        apply/10-secrets/vikunja-db-credentials.yaml apply/10-secrets/authentik-vikunja-blueprint.yaml \
-        apply/10-secrets/kustomization.yaml
+git add scripts/setup-vikunja-secrets.sh scripts/rerender-authentik-blueprint.sh \
+        apply/10-secrets/vikunja-secrets.yaml apply/10-secrets/vikunja-db-credentials.yaml \
+        apply/10-secrets/authentik-vikunja-blueprint.yaml apply/10-secrets/kustomization.yaml
 git commit -m "feat(vikunja): mint OIDC client, DB password, service secret and SMTP credential"
 ```
 
