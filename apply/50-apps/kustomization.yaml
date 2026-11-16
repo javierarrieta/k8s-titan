@@ -202,3 +202,10 @@ resources:
   # package visibility flip — are stated in the manifest header; neither blocks apply, both
   # block "the world can reach the site".
   - techdelivery-site/techdelivery-site.yaml
+  # Vikunja, the task manager at tasks.titan.arrieta.eu. Two files and the same split mealie and Sure
+  # have: the CNPG Database and DatabaseRole live in `databases` beside their Cluster while the app
+  # lives in `vikunja`. The third and fourth artifacts are not here — the OIDC blueprint and the app's
+  # own Secrets are sops files in 10-secrets, and the blueprint is mounted by the authentik
+  # HelmRelease below because authentik applies blueprints and Vikunja does not. Design:
+  # docs/superpowers/specs/2026-11-16-titan-vikunja-design.md.
+  - vikunja/vikunja-db.yaml
