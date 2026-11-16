@@ -254,6 +254,25 @@ metadata:
   #
   # Note the CalDAV path is on this host too and authenticates with HTTP Basic using a `tk_` API
   # token carrying the caldav permission — these users have no password, so that is the only route.
+  annotations:
+    # THE LINE THAT KEEPS A LONG-LIVED CREDENTIAL OFF CLEARTEXT. Traefik builds one router per
+    # entry point when an Ingress does not pin one, and this cluster runs no HTTP->HTTPS redirect —
+    # apply/20-infra/traefik/traefik.yaml:250 says so, and the same fact is measured in
+    # apply/50-apps/llm/llm.yaml:302: an unpinned host answers in cleartext. So without this line
+    # `http://tasks.titan.arrieta.eu/` serves the app, and the CalDAV path above accepts a `tk_`
+    # token over HTTP Basic on `:80`. These users have no password (spec D7), so that token IS the
+    # credential on this host, and a long-lived bearer credential must not be offerable in the
+    # clear. Same decision, same reasoning, as llm (apply/50-apps/llm/llm.yaml) and investing-agent
+    # (apply/50-apps/investing-agent/investing-agent.yaml).
+    #
+    # What the pin cannot do, stated because llm.yaml:312 states it first: a client configured with
+    # `http://` has already put the token on the wire before anything can judge the request.
+    # Pinning makes that request unserved (404) rather than safe — the point is that the
+    # misconfiguration surfaces instead of quietly working.
+    #
+    # Unlike those two, this line is enforced and not merely commented: PIN_REQUIRED in
+    # tools/ingress-auth-check.py fails when it is missing.
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
 spec:
   ingressClassName: traefik
   rules:
