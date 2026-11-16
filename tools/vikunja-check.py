@@ -51,6 +51,15 @@ evidence. If a future Vikunja changes that, the fix is a check here, not a guess
 
 Fixtures may be plaintext; real secrets are sops-encrypted. A file that looks encrypted but does not
 decrypt is reported, never silently skipped.
+
+Nothing here prints a secret value or a line of a blueprint body. That rules out the obvious way to
+report an unparseable blueprint: a YAML error quotes the offending source line, and a blueprint line
+is exactly where a client_secret lives, so an unparseable blueprint is named by file or by Secret key
+and the parser's own message is dropped.
+
+Malformed input is a FAIL: line, never a traceback. Every field this file reads out of a manifest or a
+blueprint may be absent, null, or the wrong type entirely, and a gate that dies is a gate that gets
+skipped; the helpers below absorb the shapes and the assertions still run on what comes back.
 """
 import argparse
 import os
@@ -58,6 +67,8 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from sopsload import find, load_docs, load_tolerating_tags, secret_key  # noqa: E402
+
+import yaml  # noqa: E402
 
 HOST = "tasks.titan.arrieta.eu"
 PROVIDER = "authentik"
@@ -113,15 +124,43 @@ def redirect_uris_of(provider):
     authentik accepts each entry as either a mapping ({url, matching_mode}) or a bare string, and a
     bare string takes the default matching_mode of strict. Reading `.url` off every entry would raise
     AttributeError on the shorter form — again, a traceback where a FAIL: line belongs.
+
+    An entry that declares no url yields the placeholder `<unset>` rather than None, and an entry that
+    is neither a mapping nor a string yields the same. Both keep the caller's `sorted` over strings:
+    one None among the URIs is a TypeError in the sort, which is a crash on a blueprint the gate is
+    supposed to be reporting on. The placeholder still fails the comparison against the one URI this
+    gate demands, so absorbing the shape is not the same as accepting it.
     """
     out = []
     for u in provider.get("redirect_uris") or []:
         if isinstance(u, str):
             out.append((u, "strict"))
+        elif isinstance(u, dict):
+            out.append((u.get("url") or "<unset>", u.get("matching_mode") or "strict"))
         else:
-            u = u or {}
-            out.append((u.get("url"), u.get("matching_mode") or "strict"))
+            out.append(("<unset>", "strict"))
     return out
+
+
+def tls_secret_names_of(ing_spec):
+    """The Secret name each `tls` entry asks for, `<unset>` where it names none. Sorted and unique.
+
+    The same shape problem as redirect_uris_of, one object type later: a tls entry is a mapping in a
+    correct manifest, but `.get` off a bare string or a scalar is an AttributeError where a FAIL:
+    belongs. A string is read as the name it stands for and anything else as `<unset>`, so a malformed
+    entry still reaches the assertion instead of vanishing from it. Whether a tls entry is *shaped*
+    correctly is a core-type question and belongs to `make dry-run`, as the comment at the call site
+    already says; what this gate owns is which Secret the Ingress asks for.
+    """
+    names = []
+    for t in ing_spec.get("tls") or []:
+        if isinstance(t, str):
+            names.append(t)
+        elif isinstance(t, dict):
+            names.append(t.get("secretName") or "<unset>")
+        else:
+            names.append("<unset>")
+    return sorted(set(names))
 
 
 def containers_of(dep):
@@ -186,7 +225,14 @@ def main():
     else:
         with open(tpl_path) as fh:
             tpl_text = fh.read()
-        tpl = load_tolerating_tags(tpl_text)
+        try:
+            tpl = load_tolerating_tags(tpl_text)
+        except yaml.YAMLError as exc:
+            # The template lives outside --root, so load_docs' own YAML guard never saw it. The
+            # parser's message is named by class only: it quotes the offending line and this file
+            # never prints blueprint text.
+            fail(f"{tpl_path} is not valid YAML ({type(exc).__name__}) - the reviewed template cannot "
+                 "be read, so nothing below it can be compared")
 
     prov = provider_of(entries_of(tpl))
     if prov is None:
@@ -204,7 +250,16 @@ def main():
 
     rprov = None
     if rendered is not None:
-        rprov = provider_of(entries_of(load_tolerating_tags(rendered)))
+        try:
+            body = load_tolerating_tags(rendered)
+        except yaml.YAMLError as exc:
+            # The body is a string *inside* a Secret, so load_docs parsing the Secret says nothing
+            # about parsing this. Same rule as the template: name the key, never the body.
+            fail("the vikunja.yaml key of Secret auth/authentik-vikunja-blueprint is not valid YAML "
+                 f"({type(exc).__name__}) - the blueprint body cannot be read, so nothing in it can be "
+                 "compared")
+            body = None
+        rprov = provider_of(entries_of(body))
         if rprov is None:
             fail("the rendered blueprint has no oauth2provider named vikunja")
         else:
@@ -423,7 +478,7 @@ def main():
             # tls-reflection-check proves this namespace is *allowed* the mirrored Secret; it cannot see
             # whether this Ingress asks for it. A tls block naming some other Secret, or none, applies
             # cleanly, reports Accepted, and Traefik answers with its fallback certificate.
-            tls_names = sorted({(t or {}).get("secretName") or "<unset>" for t in (spec.get("tls") or [])})
+            tls_names = tls_secret_names_of(spec)
             if tls_names != ["titan-tls"]:
                 fail(f"Ingress vikunja/vikunja's tls blocks name {tls_names}, expected ['titan-tls'] - "
                      "Reflector mirrors that one into this namespace, and anything else is Traefik's "
