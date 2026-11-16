@@ -150,7 +150,7 @@ spec:
           # byte-identical across releases; a version tag does not. `tools/portfolio-prism-
           # check.py` enforces both halves: it refuses `:latest` and refuses two containers on
           # different tags, so this is a gate rather than a habit.
-          image: ghcr.io/javierarrieta/portfolio-prism/frontend:v0.1.0-M2
+          image: ghcr.io/javierarrieta/portfolio-prism/frontend:v0.1.0-M3
           ports:
             - name: http
               containerPort: 80
@@ -186,7 +186,7 @@ spec:
             periodSeconds: 20
 
         - name: backend
-          # v0.1.0-M2, kept aligned with the frontend above. The Postgres-only change arrived in
+          # v0.1.0-M3, kept aligned with the frontend above. The Postgres-only change arrived in
           # v0.1.0-M1: the engine is no longer SQLite, and what runs before Rocket binds the port
           # is `sqlx::migrate!` applying backend_rust/migrations/ rather than M5's in-process
           # decimal migration, duplicate-row collapse and unique index. The startup probe below
@@ -195,11 +195,13 @@ spec:
           # local-file work they replaced. Tagged by release, not by digest — see the frontend
           # pin above for why, and for what that gives up.
           #
-          # Worth saying plainly: no backend source changed between v0.1.0-M1 and v0.1.0-M2, so
-          # this is a rebuild of the same code. A backend restart is therefore not evidence of a
-          # backend change — if a backend pod rolls and nothing else did, check the release tag
-          # before looking for a regression.
-          image: ghcr.io/javierarrieta/portfolio-prism/backend:v0.1.0-M2
+          # Unlike M1 -> M2, where this image was a rebuild of identical code, v0.1.0-M3 changes
+          # what this container returns, and the pairing above is load-bearing rather than tidy:
+          # its backup-plan response carries a shape the previous frontend refuses, and a frontend
+          # that refuses it leaves Restore disabled with no error message at all. Backend ahead of
+          # frontend is a dead button that reads like a UI bug, not like a version mismatch — that
+          # is the concrete case behind the gate refusing two containers on different tags.
+          image: ghcr.io/javierarrieta/portfolio-prism/backend:v0.1.0-M3
           ports:
             # NOT named `http`. Named ports must be unique within a pod, and the Service below
             # resolves `targetPort: http`; two containers both calling their port `http` (8000 here,
