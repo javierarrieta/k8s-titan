@@ -169,9 +169,12 @@ PY
 for f in "$STAGE_BP" "$STAGE_DB" "$STAGE_APP"; do
   sops --encrypt --in-place "$f"
   # sops can exit 0 without having encrypted anything — a creation-rule or `encrypted_regex` mismatch in
-  # .sops.yaml is enough — and this is the last moment at which plaintext can be stopped short of
-  # apply/10-secrets/. `make secrets-placement` would catch it later, but a writer that emits plaintext
-  # and relies on a later gate to notice is the wrong order of defence.
+  # .sops.yaml is enough — so the exit code is not the evidence, the marker is. What the marker proves is
+  # narrow and worth stating exactly: `ENC[` somewhere in the file means sops encrypted *something*, not
+  # that every value in it is. Proving the stronger claim means grepping for the plaintext itself, which
+  # scripts/setup-google-blueprint.sh does and this script deliberately does not — a behavioural change
+  # here is not worth the churn on a script that has already minted real credentials once. `make
+  # secrets-placement` stays the coarser net behind this one.
   grep -q "ENC\[" "$f" || { echo "FAIL: $f carries no ENC[ - sops did not encrypt; nothing moved into place"; exit 1; }
   if [ "$f" = "$STAGE_BP" ]; then dest=$BP_SECRET
   elif [ "$f" = "$STAGE_DB" ]; then dest=$DB_SECRET

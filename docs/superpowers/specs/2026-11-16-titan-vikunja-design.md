@@ -43,7 +43,7 @@ and authentik's *updates*, not coder.
 | D14 | probes on `/health` | `pkg/routes/routes.go:252` registers `GET /health` and it is public unless `health.username`/`health.password` are set, which they are not. Budgeted as a `startupProbe` because migrations run against Postgres at boot and are unbounded on a slow node. |
 | D15 | `runAsUser: 1000`, `runAsGroup: 1000`, `fsGroup: 1000` | The image's own user is uid 1000 (upstream: "runs as user 1000 and no group", gid 0). Running the group as 1000 rather than 0 is a deliberate narrowing; `fsGroup` is what makes the mounted PVC writable by it, and grafana and mealie are the live proof that fsGroup is honoured against `local-path-retain` on this cluster. First boot is the proof for uid 1000 specifically (§9). |
 | D16 | `strategy: Recreate` | RWO PVC: a RollingUpdate schedules pod 2 while pod 1 still holds the volume and it sits Pending on a volume conflict forever. |
-| D17 | PVC 5Gi `local-path-retain`, opted in to restic with `backup.titan.arrieta.eu/class: daily` | Attachments and avatars are user-created and exist nowhere else, so unlike the Grafana volumes there is a real loss here. `local-path-retain` is a deletion mitigation, not a backup. What a restore actually returns is §4. |
+| D17 | PVC 5Gi `local-path-retain`, opted in to restic with `backup.titan.arrieta.eu/class: daily` | Attachments and avatars are user-created and exist nowhere else, so unlike the Grafana volumes there is a real loss here. `local-path-retain` is a deletion mitigation, not a backup. What a restore actually returns is §4. **The annotation is one line and the wiring is four coordinated edits**: a discovery CronJob in `apply/70-backup/runner.yaml`, the runner and job RBAC in `apply/70-backup/rbac.yaml`, and **both** mirror keys — `reflection-allowed-namespaces` and `reflection-auto-namespaces` — on **two** objects, the `apply/70-backup/preflight.yaml` ConfigMap and the sops-encrypted `apply/10-secrets/backup-minio-secrets.yaml`. `make backup-coverage` is what proves the annotation, the runners, the mirrors and the RBAC agree, and it was red for exactly this reason when the annotation landed ahead of the wiring. |
 | D18 | CalDAV left at its default (enabled) | `service.enablecaldav` defaults true. With D7 there is no password to use, but since 2026-03-30 CalDAV also accepts `tk_` API tokens carrying the `caldav` permission, which is the path these users have. Untested (§9). |
 | D19 | `VIKUNJA_SENTRY_ENABLED=false`, explicit | Already the default. The Sentry DSN is compiled into the binary, so this is a pin against a future default flip, not a fix for anything. |
 | D20 | no team sync — `scope: openid profile email`, no `groups` | Team sync from the `groups` claim exists from 2.8.0 but every group name becomes a team, and nothing here needs Vikunja teams to mirror authentik groups. YAGNI. Recorded so that adding `groups` to that scope is understood as a behaviour change rather than a scope tidy-up: it switches the sync on. |
@@ -73,6 +73,9 @@ Edited:
 - `AGENTS.md` — the prose copy of that allow-list. `tls-reflection-check` fails when the file's copy drifts from the annotation it quotes.
 - `tools/ingress-auth-check.py` — `("vikunja","vikunja")` in `NOT_PROXY_GATED` with the citation.
 - `Makefile` — the `vikunja-check` target, in `check` (it reads sops) and not in `check-ci`.
+- `apply/70-backup/runner.yaml`, `apply/70-backup/rbac.yaml`, `apply/70-backup/preflight.yaml` and
+  `apply/10-secrets/backup-minio-secrets.yaml` — the restic wiring D17's annotation depends on. Four
+  files, four edits, one gate: see D17 and `make backup-coverage`.
 
 ## 4. What is in Postgres, what is on the PVC, and what a restore returns
 
@@ -90,10 +93,10 @@ database, and it is stated here rather than discovered during an incident.
 ## 5. The OIDC contract
 
 - Application and provider slug `vikunja`, `issuer_mode: per_provider`, so the issuer — and therefore `VIKUNJA_AUTH_OPENID_PROVIDERS_AUTHENTIK_AUTHURL` — is `https://auth.titan.arrieta.eu/application/o/vikunja/`.
-- Confidential client, Authorization Code, `redirect_uris` = `https://tasks.titan.arrieta.eu/auth/openid/authentik` with `matching_mode: strict`. The path is `/auth/openid/<provider-id>`, where the provider id is the YAML key `authentik`; it is uppercased to `AUTHENTIK` only in the env var name, because `setConfigFromEnv` lowercases every segment it splits on `_`. So `VIKUNJA_AUTH_OPENID_PROVIDERS_AUTHENTIK_CLIENTID` and that URI are one fact kept in two files, which is what `vikunja-check` compares. A provider key containing an underscore would not survive that split at all; `authentik` does.
+- Confidential client, Authorization Code, `redirect_uris` = `https://tasks.titan.arrieta.eu/auth/openid/authentik` with `matching_mode: strict`. The path is `/auth/openid/<provider-id>`, where the provider id is the YAML key `authentik`; it is uppercased to `AUTHENTIK` only in the env var name, because `setConfigFromEnv` lowercases every segment it splits on `_`. So `VIKUNJA_AUTH_OPENID_PROVIDERS_AUTHENTIK_CLIENTID` and that URI are one fact kept in two files, which is what `vikunja-check` compares. A provider key containing an underscore would not survive that split at all; `authentik` does. That the path is `/auth/openid/…` at all is asserted here and never measured (§9).
 - Property mappings `openid`, `email`, `profile`. `profile` is what carries `preferred_username`; without it Vikunja falls back to `nickname` and then to a generated pet-name, so a login that "works" produces a user with a nonsense username and no error anywhere.
 - RP-Initiated Logout: `…_AUTHENTIK_LOGOUTURL` = `…/o/vikunja/end-session/`, so logging out of Vikunja does not leave the authentik session standing.
-- The Application carries a `policy_engine_mode: any` binding to `titan-family`, the same gate mealie and Portfolio Prism use. A binding naming a group that does not exist **denies**.
+- The Application carries a `policy_engine_mode: any` binding to `titan-family`, the same gate mechanism mealie and Portfolio Prism use — mechanism, not set: mealie binds `titan-family` **and** `titan-mealie-admins`, this binds `titan-family` alone. A binding naming a group that does not exist **denies**.
 - No `groups` scope (D20).
 
 ## 6. Outbound mail
@@ -200,7 +203,21 @@ Written down because every one of these would otherwise be discovered during an 
    `blueprint-mount-check` proves only the wiring.
 9. **CalDAV with a `tk_` token for an OIDC-only user.** Upstream documents the token path; it is
    untested here, and the older "account is not local" failure is a known shape for exactly this
-   configuration.
+   configuration. D22 narrows it further: the host answers on `websecure` only, so whether a real
+   CalDAV client configured against a `websecure`-only host behaves as expected with a `tk_` token
+   is part of what this item has not measured.
 10. **Mobile-app OIDC.** Upstream documents webview cookie quirks and a "State does not match"
     failure class for OIDC in the mobile clients. Out of scope, recorded so it is not mistaken for
     a titan bug.
+11. **The redirect URI path itself.** §5 states `/auth/openid/<provider-id>` flatly and
+    `vikunja-check` compares two constants rather than computing that concatenation, so nothing has
+    ever proven what Vikunja actually sends. The gate proves the two files agree with each other,
+    which is not the same claim. What makes this a footnote rather than a blocker is that a wrong
+    path fails **loudly** — authentik refuses an unregistered `redirect_uri` at the first real login
+    — not silently.
+12. **The backup chain, end to end.** No restic backup of `vikunja-data` has ever run, the `vikunja`
+    discovery CronJob has never fired, and the MinIO credential mirrored into `vikunja` has never
+    been used. That is a whole dependency chain added late — Reflector mirror → ServiceAccount/Role
+    → CronJob → restic → casa's MinIO — and nothing has exercised any link of it. `make
+    backup-coverage` proves the tree agrees; it cannot prove a Job would run. Item 7 is the restore
+    side of the same unproven path.

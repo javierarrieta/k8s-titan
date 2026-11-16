@@ -92,7 +92,8 @@ entries:
       policy_engine_mode: any
 
   # --- who may reach Vikunja at all ---------------------------------------------------------------
-  # The same shape as the gate in blueprints-mealie.yaml. Short version: the IdP refuses before a
+  # The same mechanism as the gate in blueprints-mealie.yaml — same policybinding predicate, not the
+  # same set: mealie binds two groups there, this one binds one. Short version: the IdP refuses before a
   # token exists, and a binding naming a group that does not exist DENIES rather than allows.
   #
   # Nothing here maps an IdP group into a Vikunja team, so this binding is the whole authorization

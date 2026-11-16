@@ -293,7 +293,9 @@ metadata:
 #
 # The hostname count is the one the 2026-10-27 amendment actually decides, and it bites here:
 # tasks.titan.arrieta.eu needs no Certificate and no DNS record of its own, but it does need its own line
-# on the titan-wildcard Reflector allow-list — a new cluster object, which is what that clause is for.
+# on the titan-wildcard Reflector allow-list. That line is an annotation edit on an existing Certificate,
+# not a new object; the new cluster object is the mirrored Secret Reflector creates in this namespace
+# from it, and that is what the amendment's "new cluster objects" clause is counting.
 apiVersion: v1
 kind: Namespace
 metadata:

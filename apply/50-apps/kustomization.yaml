@@ -102,7 +102,7 @@ resources:
   # and applies concurrently, and the pod retries until the role exists.
   #
   # The third Mealie artifact is not here: authentik/blueprints-mealie.yaml becomes a Secret in
-  # 10-secrets and is mounted by the authentik HelmRelease below, because authentik applies blueprints
+  # 10-secrets and is mounted by the authentik HelmRelease above, because authentik applies blueprints
   # and Mealie does not.
   - mealie/mealie-db.yaml
   - mealie/mealie.yaml
@@ -187,7 +187,7 @@ resources:
   # Several apps here already authenticate in-app (coder, open-webui, mealie, both Grafanas). What is
   # new about this one is the combination: its OIDC client is declared in this repo AND its Ingress
   # carries no proxy-side gate at all, the decision `make ingress-auth` enforces through
-  # NOT_PROXY_GATED. The blueprint is mounted by the authentik HelmRelease below, not here.
+  # NOT_PROXY_GATED. The blueprint is mounted by the authentik HelmRelease above, not here.
   #
   # Its CNPG Database and DatabaseRole, in `databases` for the same reason as the three above.
   # This lands BEFORE the app moves: the Postgres build refuses to start without a DATABASE_URL it
@@ -206,7 +206,7 @@ resources:
   # have: the CNPG Database and DatabaseRole live in `databases` beside their Cluster while the app
   # lives in `vikunja`. The third and fourth artifacts are not here — the OIDC blueprint and the app's
   # own Secrets are sops files in 10-secrets, and the blueprint is mounted by the authentik
-  # HelmRelease below because authentik applies blueprints and Vikunja does not. Design:
+  # HelmRelease above because authentik applies blueprints and Vikunja does not. Design:
   # docs/superpowers/specs/2026-11-16-titan-vikunja-design.md.
   - vikunja/vikunja-db.yaml
   # The app itself: PVC + Deployment + Service + Ingress in namespace `vikunja`. It reads

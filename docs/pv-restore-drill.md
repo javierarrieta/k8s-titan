@@ -177,9 +177,14 @@ live volume would pass whether or not the repository worked.
   mechanism (repository, credentials, tags, restic version, restore path). It does not prove that
   `open-webui-data`'s snapshot is intact. Run it per volume if you want per-volume
   claims; the script takes `--namespace`/`--pvc` for exactly that.
-- **Not that a failure would be noticed.** Nothing alerts on a failed backup job — that is
-  the other half of #101, and the same shape of gap is #231 for CNPG objects. A drill you
-  ran once and an alert that would have caught the problem are different things.
+- **Not that a failure would be noticed.** This drill tested no alerting, and the claim this
+  bullet used to make — that nothing alerts on a failed backup job — is no longer true: casa's
+  `TitanBackup*` rules cover a failed Job and a stale volume, and `TitanBackupJobFailed` was
+  seen firing in production on 2026-11-04. `AGENTS.md` names the rule file, why the rules live
+  in `../k8s-casa` rather than here, and the gap that survives them. (#231 is the sibling gap on
+  the CNPG side — a `DatabaseRole` that genuinely fails to apply being invisible.) What the bullet
+  still correctly refuses is the conflation: a drill you ran once and an alert that would have
+  caught the problem are different things, and nothing in this run exercised the alerting path.
 - **Not that the restore is fast enough to be useful.** No RTO has been measured here.
   The 10Gi volumes over the mesh to casa's MinIO are the numbers that would matter and
   they are not recorded anywhere yet.
