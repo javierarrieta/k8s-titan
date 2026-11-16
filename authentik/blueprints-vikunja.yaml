@@ -1,0 +1,106 @@
+# authentik blueprint: Vikunja's OIDC application and provider, for tasks.titan.arrieta.eu.
+#
+# WHY A BLUEPRINT
+# authentik ships no CRDs, so this is the only declarative path: a rebuilt authentik gets Vikunja's
+# client back from git instead of from someone's memory. Same argument as blueprints-mealie.yaml, and
+# docs/authentik-runbook.md §5 is the record of what a blueprint that is never mounted looks like
+# (nothing — it is indistinguishable from one never written).
+#
+# HOW THIS FILE BECOMES A SECRET
+# Nothing here is applied directly. scripts/setup-vikunja-secrets.sh substitutes the two `${...}`
+# placeholders and writes the result, sops-encrypted, to
+# apply/10-secrets/authentik-vikunja-blueprint.yaml. `make vikunja-check` proves the rendered
+# artifact, this template, Vikunja's own copy of the client, the host it is for, and the mount agree.
+#
+# THE ENDPOINTS ARE NOT COMPOSED, THEY ARE READ
+# authorize/token/userinfo are GLOBAL paths with no slug; issuer and jwks are per-provider — see
+# blueprints-grafana.yaml. Building `.../o/<slug>/authorize/` returns 404, measured.
+version: 1
+metadata:
+  name: titan-vikunja
+entries:
+  - model: authentik_providers_oauth2.oauth2provider
+    id: vikunja-provider
+    identifiers:
+      name: vikunja
+    state: present
+    attrs:
+      name: vikunja
+      # confidential. Vikunja speaks the standard Authorization Code flow and holds a client secret;
+      # its own docs require a confidential client.
+      client_type: confidential
+      client_id: "${VIKUNJA_OIDC_CLIENT_ID}"
+      client_secret: "${VIKUNJA_OIDC_CLIENT_SECRET}"
+      # ONE strict URI. The path is /auth/openid/<provider-id>, where the provider id is the key
+      # Vikunja is configured under — `authentik`, from
+      # VIKUNJA_AUTH_OPENID_PROVIDERS_AUTHENTIK_* in apply/50-apps/vikunja/vikunja.yaml. Strict,
+      # because a prefix match is a redirect bypass.
+      #
+      # This URI and that env-var key are one fact kept in two files, which is what vikunja-check
+      # compares. Change the provider key and this line must move with it.
+      redirect_uris:
+        - url: https://tasks.titan.arrieta.eu/auth/openid/authentik
+          matching_mode: strict
+      # authorization_code only. Vikunja does not refresh the authentik token — it exchanges the code
+      # once and then issues its own JWT — and there is no offline_access scope below, so a
+      # refresh_token grant would be a capability nothing uses.
+      grant_types:
+        - authorization_code
+      # openid + email + profile. `email` is not optional here: mergeClaims() in
+      # pkg/modules/auth/openid/openid.go returns ErrNoOpenIDEmailProvided when the ID token has no
+      # email and the userinfo lookup cannot supply one, so a missing email claim is a refused login.
+      #
+      # `profile` is what carries preferred_username. Without it Vikunja falls back to `nickname` and
+      # then to a generated pet-name, so the login SUCCEEDS with a nonsense username and nothing
+      # errors anywhere. That is the silent failure this scope prevents.
+      #
+      # NO `groups` scope, deliberately: from Vikunja 2.8.0 a `groups` scope switches on team sync,
+      # where every group name becomes a Vikunja team. Nothing here needs that (spec D20). Adding
+      # `groups` to this list is a behaviour change, not a scope tidy-up.
+      property_mappings:
+        - !Find [authentik_providers_oauth2.scopemapping, [managed, goauthentik.io/providers/oauth2/scope-openid]]
+        - !Find [authentik_providers_oauth2.scopemapping, [managed, goauthentik.io/providers/oauth2/scope-email]]
+        - !Find [authentik_providers_oauth2.scopemapping, [managed, goauthentik.io/providers/oauth2/scope-profile]]
+      # implicit consent: an app this cluster owns and configures does not need a click that adds no
+      # security. Same reasoning as coder's, Grafana's, open-webui's and Mealie's providers.
+      authorization_flow: !Find [authentik_flows.flow, [slug, default-provider-authorization-implicit-consent]]
+      invalidation_flow: !Find [authentik_flows.flow, [slug, default-invalidation-flow]]
+      signing_key: !Find [authentik_crypto.certificatekeypair, [managed, goauthentik.io/crypto/jwt-managed]]
+      # per_provider makes the issuer https://auth.titan.arrieta.eu/application/o/vikunja/, which is
+      # what vikunja.yaml's ..._AUTHENTIK_AUTHURL names. If the slug moves and that URL does not, the
+      # two disagree and the failure looks like a bad token.
+      issuer_mode: per_provider
+      # hashed_user_id: stable across renames and it does not leak the username into every token.
+      #
+      # READ THIS BEFORE CHANGING IT. Vikunja keys a user on (issuer, sub) — getOrCreateUser() looks
+      # the user up by exactly those two columns and nothing else. Changing sub_mode here changes
+      # every user's sub, and the next login therefore creates a brand-new Vikunja user with an empty
+      # task list. Mealie keys on the email claim and would survive this; Vikunja does not.
+      sub_mode: hashed_user_id
+
+  - model: authentik_core.application
+    identifiers:
+      slug: vikunja
+    state: present
+    attrs:
+      name: Vikunja
+      slug: vikunja
+      provider: !KeyOf vikunja-provider
+      meta_launch_url: https://tasks.titan.arrieta.eu/
+      # Written out rather than inherited: the default is `any`, which is what is wanted, but a
+      # security decision should not live in a default a future release is free to change.
+      policy_engine_mode: any
+
+  # --- who may reach Vikunja at all ---------------------------------------------------------------
+  # The same shape as the gate in blueprints-mealie.yaml. Short version: the IdP refuses before a
+  # token exists, and a binding naming a group that does not exist DENIES rather than allows.
+  #
+  # Vikunja has no admin-group concept fed from the token, so this is the whole authorization story:
+  # who may sign in at all. There is no second group to bind.
+  - model: authentik_policies.policybinding
+    identifiers:
+      target: !Find [authentik_core.application, [slug, vikunja]]
+      order: 0
+    state: present
+    attrs:
+      group: !Find [authentik_core.group, [name, titan-family]]
