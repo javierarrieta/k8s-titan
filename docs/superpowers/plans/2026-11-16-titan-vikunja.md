@@ -313,7 +313,7 @@ Create `scripts/setup-vikunja-secrets.sh`. It is `scripts/setup-mealie-secrets.s
 # RUN IT, DON'T READ IT INTO A SHELL. The operator's login shell is fish, which has no heredocs and no
 # `read -rs -p`; this file's bash-isms are deliberate and the shebang is the interpreter.
 #
-# WHY ONE SCRIPT FOR FOUR VALUES
+# WHY ONE SCRIPT FOR FOUR MINTED VALUES
 # The DB password exists twice (CNPG's DatabaseRole in `databases`, and Vikunja's
 # VIKUNJA_DATABASE_PASSWORD in namespace `vikunja`) and the OIDC client exists twice (authentik's
 # blueprint, Vikunja's env). Minting all of it in one process is the only way "they agree" is a
@@ -321,7 +321,7 @@ Create `scripts/setup-vikunja-secrets.sh`. It is `scripts/setup-mealie-secrets.s
 # from the tree — and it has to, because Vikunja takes split VIKUNJA_DATABASE_* keys rather than a
 # single DATABASE_URL, so the generic `make db-url-check` never looks at this app at all.
 #
-# WHY A FIFTH VALUE MEALIE DID NOT NEED
+# WHY THE FOURTH OF THOSE FOUR IS A VALUE MEALIE DID NOT NEED
 # VIKUNJA_SERVICE_SECRET signs every issued token. Unset, generateServiceSecretIfEmpty() in
 # pkg/config/config.go mints a random one per boot and every already-issued token dies with the old
 # process — with strategy: Recreate that is every deploy logging everyone out. Mealie signs its own
@@ -332,10 +332,17 @@ Create `scripts/setup-vikunja-secrets.sh`. It is `scripts/setup-mealie-secrets.s
 # that box's config PVC, not in git. Passing a wrong password in here is worse than passing none:
 # ENABLE_FAIL2BAN=1 on that box means a wrong credential from titan gets titan's address banned, and
 # the symptom is "mail stopped working", not "auth failed". So the script takes the file, refuses a
-# malformed one, and never prints what is in it.
+# malformed one, and never prints the password.
 #
-# NOTHING PRINTS A VALUE. What you see is a truncated SHA-256 per file.
+# NO SECRET VALUE IS PRINTED. What you see is a truncated SHA-256 per file, plus the mailbox ADDRESS.
+# The address is echoed on purpose: it is an identifier rather than a credential, and being able to see
+# which mailbox you baked in is worth more than the tidiness of printing nothing at all. The password
+# never appears.
 set -euo pipefail
+
+# The three staging files hold plaintext between the python dump and `sops --encrypt`, and the default
+# umask would create them world-readable inside that window. Cheap to close, so close it.
+umask 077
 
 REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$REPO"
@@ -349,10 +356,17 @@ STAGE_DB=apply/10-secrets/.staging.vikunja-db-credentials.yaml
 STAGE_APP=apply/10-secrets/.staging.vikunja-secrets.yaml
 KEY=${SOPS_AGE_KEY_FILE:-$HOME/.config/sops/age/keys.txt}
 
-# Never leave plaintext behind, whatever fails. The staging paths are git-ignored by name
-# (apply/10-secrets/.staging.*.yaml) and sit under apply/10-secrets/ because sops picks its
-# recipients from the file's own path, not from your intent.
-trap 'rm -f "$STAGE_BP" "$STAGE_DB" "$STAGE_APP"' EXIT
+# Never leave plaintext behind, whatever fails — and "whatever fails" includes an interrupt. EXIT alone
+# is not enough: bash does not run an EXIT trap for an untrapped SIGINT/SIGTERM, so a Ctrl-C or a kill
+# between the plaintext write and `sops --encrypt` would leave a staging file holding a real mailbox
+# password on disk. Trapping INT/TERM to the removal alone is not enough either: a trapped signal runs
+# its handler and then RESUMES the script, so the handler has to exit. The EXIT trap still fires from
+# inside it, so the removal is written once. Same shape as scripts/setup-observability-grafana.sh.
+# The staging paths are git-ignored by name (apply/10-secrets/.staging.*.yaml) and sit under
+# apply/10-secrets/ because sops picks its recipients from the file's own path, not from your intent.
+cleanup() { rm -f "$STAGE_BP" "$STAGE_DB" "$STAGE_APP"; }
+trap cleanup EXIT
+trap 'cleanup; exit 130' INT TERM
 
 for tool in sops python3; do
   command -v "$tool" >/dev/null || { echo "FAIL: $tool not on PATH"; exit 1; }
@@ -361,13 +375,19 @@ done
 export SOPS_AGE_KEY_FILE="$KEY"
 [ -f "$TEMPLATE" ] || { echo "FAIL: $TEMPLATE missing - nothing to render"; exit 1; }
 
-# The mailbox. Two lines: address, then password. Blank lines and trailing whitespace are tolerated;
-# anything else is a hard stop, because a mangled address is a MAIL FROM refusal later.
+# The mailbox. Two lines: address, then password. Trailing whitespace is stripped; an empty address or
+# an empty password is a hard stop, because a mangled address is a MAIL FROM refusal later.
 SMTP_FILE=${SMTP_FILE:?FAIL: set SMTP_FILE=/path/to/two-line-file (address on line 1, password on line 2)}
 [ -f "$SMTP_FILE" ] || { echo "FAIL: SMTP_FILE=$SMTP_FILE does not exist"; exit 1; }
 SMTP_USER=$(sed -n '1s/[[:space:]]*$//p' "$SMTP_FILE")
 SMTP_PASS=$(sed -n '2s/[[:space:]]*$//p' "$SMTP_FILE")
-[ -n "$SMTP_USER" ] && case "$SMTP_USER" in *@*) ;; *) echo "FAIL: line 1 of $SMTP_FILE is not an address"; exit 1;; esac
+# Emptiness is its own hard stop, on its own line. Do NOT fold it into the shape check as
+# `[ -n "$SMTP_USER" ] && case ...`: as the guard of an `&&`, a false `[ -n ]` short-circuits the whole
+# list, `set -e` is exempt for a non-final `&&` member, and the script sails on with an empty address
+# that then gets committed as an empty VIKUNJA_MAILER_USERNAME. A stray leading blank line is the most
+# likely malformed input there is.
+[ -n "$SMTP_USER" ] || { echo "FAIL: line 1 of $SMTP_FILE is empty - no address"; exit 1; }
+case "$SMTP_USER" in *@*) ;; *) echo "FAIL: line 1 of $SMTP_FILE is not an address"; exit 1;; esac
 [ -n "$SMTP_PASS" ] || { echo "FAIL: line 2 of $SMTP_FILE is empty - no password"; exit 1; }
 echo "smtp user: $SMTP_USER"
 
@@ -457,6 +477,11 @@ PY
 
 for f in "$STAGE_BP" "$STAGE_DB" "$STAGE_APP"; do
   sops --encrypt --in-place "$f"
+  # sops can exit 0 without having encrypted anything — a creation-rule or `encrypted_regex` mismatch in
+  # .sops.yaml is enough — and this is the last moment at which plaintext can be stopped short of
+  # apply/10-secrets/. `make secrets-placement` would catch it later, but a writer that emits plaintext
+  # and relies on a later gate to notice is the wrong order of defence.
+  grep -q "ENC\[" "$f" || { echo "FAIL: $f carries no ENC[ - sops did not encrypt; nothing moved into place"; exit 1; }
   if [ "$f" = "$STAGE_BP" ]; then dest=$BP_SECRET
   elif [ "$f" = "$STAGE_DB" ]; then dest=$DB_SECRET
   else dest=$APP_SECRET; fi
@@ -466,7 +491,7 @@ done
 
 cat <<'DONE'
 
-Done. Three files, five values, all encrypted.
+Done. Three files, four minted values plus the supplied mailbox credential, all encrypted.
 
 Still to do, in order:
   1. make vikunja-check            proves the copies agree and the blueprint is mounted.
