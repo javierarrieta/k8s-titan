@@ -262,12 +262,28 @@ def main():
             fail("BOOTSTRAP_OWNER_SUBJ is set. It is a ONE-WAY transfer with no admin undo and it "
                  "cannot be repeated; leaving it set means anyone who can present that sub can claim "
                  "whatever the placeholder still owns. Remove it once the handover has run.")
+        tags_by_name: dict = {}
         for c in dep["spec"]["template"]["spec"]["containers"]:
             img = c.get("image", "")
+            # Two ways to name an image that cannot change underneath you: a digest, or a release
+            # tag the release workflow pushes once. `:latest` is neither, and it is the case this
+            # rule exists to catch -- `kubectl rollout undo` on a tag is a no-op when the template
+            # is byte-identical, so the rollback story for a bad auth deploy needs a previous
+            # revision that actually differs.
             if "@sha256:" not in img:
-                fail(f"{APP} container {c.get('name')} is not digest-pinned ({img!r}). The rollback "
-                     "story for an auth change is `kubectl rollout undo`, which is a no-op on a tag "
-                     "because the pod template is byte-identical.")
+                repo_and_tag = img.rsplit("/", 1)[-1]
+                tag = repo_and_tag.split(":", 1)[1] if ":" in repo_and_tag else ""
+                if not tag or tag == "latest":
+                    fail(f"{APP} container {c.get('name')} names no immutable image ({img!r}). Use a "
+                         "digest or a release tag such as `:v0.1.0-M2`; never `:latest`. The "
+                         "rollback story for an auth change is `kubectl rollout undo`, which is a "
+                         "no-op on a mutable tag.")
+                tags_by_name[c.get("name")] = tag
+        # Both images ship from one release build, so a release that moves one container and not
+        # the other is caught here rather than noticed in a diff weeks later.
+        if len(set(tags_by_name.values())) > 1:
+            fail(f"{APP} containers sit on different releases: {tags_by_name}. Keeping the pair "
+                 "aligned is what makes the manifest read as one version.")
             if c.get("name") == "backend" and not c.get("startupProbe"):
                 fail("the backend has no startupProbe. sqlx::migrate! applies backend_rust/migrations/ "
                      "before Rocket binds the port; without a startup probe the kubelet kills the "

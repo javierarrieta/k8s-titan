@@ -140,12 +140,17 @@ spec:
         fsGroupChangePolicy: OnRootMismatch
       containers:
         - name: frontend
-          # Pinned by digest, not by tag, and the digest is the one the v0.0.6-M5 release published.
-          # The rollback story for an auth change is "roll back the image revision": AUTH_MODE=disabled
-          # is not compiled into a release build, so no environment variable can undo a bad auth
-          # deploy, and `kubectl rollout undo` against `:latest` is a no-op because the pod template is
-          # byte-identical.
-          image: ghcr.io/javierarrieta/portfolio-prism/frontend@sha256:a6cc45eb9a2f4b16fef52700ad4597f187ee4c9de20323890ede321df36552af
+          # Named by release tag rather than digest, and both containers carry the same release
+          # on purpose so the deployment reads as one version instead of a pair that has quietly
+          # drifted apart. What that gives up is exactness: a tag can be re-pushed, and the pod
+          # spec no longer names the bytes running. What it keeps is the rollback story that
+          # actually matters here — `AUTH_MODE=disabled` is not compiled into a release build, so
+          # undoing a bad auth deploy means rolling back to a previous revision, and that works as
+          # long as each release names a *different* pod template. `:latest` would break it, being
+          # byte-identical across releases; a version tag does not. `tools/portfolio-prism-
+          # check.py` enforces both halves: it refuses `:latest` and refuses two containers on
+          # different tags, so this is a gate rather than a habit.
+          image: ghcr.io/javierarrieta/portfolio-prism/frontend:v0.1.0-M2
           ports:
             - name: http
               containerPort: 80
@@ -181,14 +186,20 @@ spec:
             periodSeconds: 20
 
         - name: backend
-          # v0.1.0-M1. This is the Postgres-only build: the engine is no longer SQLite, and what runs
-          # before Rocket binds the port is `sqlx::migrate!` applying backend_rust/migrations/ rather
-          # than M5's in-process decimal migration, duplicate-row collapse and unique index. The
-          # startup probe below (60 x 5s) is still what keeps the kubelet from killing the container
-          # mid-migration, and it matters more now: migrations against a real server can be slower than
-          # the local-file work they replaced. Digest, not tag: `kubectl rollout undo` against `:latest`
-          # is a no-op because the pod template is byte-identical.
-          image: ghcr.io/javierarrieta/portfolio-prism/backend@sha256:4811d37249cf94d7b68112ea7bb5f5560b3ca8d085aa089f9662b7821fdf14d5
+          # v0.1.0-M2, kept aligned with the frontend above. The Postgres-only change arrived in
+          # v0.1.0-M1: the engine is no longer SQLite, and what runs before Rocket binds the port
+          # is `sqlx::migrate!` applying backend_rust/migrations/ rather than M5's in-process
+          # decimal migration, duplicate-row collapse and unique index. The startup probe below
+          # (60 x 5s) is still what keeps the kubelet from killing the container mid-migration,
+          # and it matters more now: migrations against a real server can be slower than the
+          # local-file work they replaced. Tagged by release, not by digest — see the frontend
+          # pin above for why, and for what that gives up.
+          #
+          # Worth saying plainly: no backend source changed between v0.1.0-M1 and v0.1.0-M2, so
+          # this is a rebuild of the same code. A backend restart is therefore not evidence of a
+          # backend change — if a backend pod rolls and nothing else did, check the release tag
+          # before looking for a regression.
+          image: ghcr.io/javierarrieta/portfolio-prism/backend:v0.1.0-M2
           ports:
             # NOT named `http`. Named ports must be unique within a pod, and the Service below
             # resolves `targetPort: http`; two containers both calling their port `http` (8000 here,
