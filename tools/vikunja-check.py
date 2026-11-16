@@ -42,7 +42,21 @@ It also checks the settings whose ABSENCE is a silent failure:
 The dead-key and unknown-key sweeps cover the container's WHOLE environment: `env:` plus every key of
 every Secret named by `envFrom`. That is what the pod actually receives. A typo'd key added to
 vikunja-secrets — VIKUNJA_MAILER_FROMEAMIL, say — reaches the container as a dead variable in exactly
-the shape this file exists to catch, and a sweep that walked `env:` alone reports clean on it.
+the shape this file exists to catch, and a sweep that walked `env:` alone reports clean on it. The
+sweeps cannot see the opposite mistake either: `env:` beats `envFrom` in Kubernetes, so one of the
+three Secret-owned keys pinned inline in `env:` silently overrides the real value, and the unknown-key
+sweep passes it because those names are known by definition. That is asserted too.
+
+Two facts are asserted on the blueprint body rather than on Vikunja's own copy, because the app's copy
+cannot see them. The application's `slug` is what `issuer_mode: per_provider` turns into the issuer
+URL, so comparing the Deployment's AUTHURL against ISSUER_URL proves nothing until something pins the
+blueprint's slug to the slug ISSUER_URL is built from — move the slug and the live issuer moves while
+the constant still matches. And the `titan-family` policybinding on that application is the entire
+authorization story for this host: it is in NOT_PROXY_GATED, so there is no forwardAuth in front of
+it, VIKUNJA_AUTH_LOCAL_ENABLED=false closes the local-password door and registration is off, so who
+may sign in at all is exactly the set of groups bound to that application. `blueprint-mount-check`
+cannot cover it: it only proves that a *present* binding names a declared group, absence is not a
+failure there, and it never reads the rendered Secret.
 
 There is deliberately NO email_verified check here, which will read as an omission to anyone who has
 seen coder or mealie. Vikunja keys identity on (issuer, sub) and reads email_verified only in the
@@ -55,11 +69,19 @@ decrypt is reported, never silently skipped.
 Nothing here prints a secret value or a line of a blueprint body. That rules out the obvious way to
 report an unparseable blueprint: a YAML error quotes the offending source line, and a blueprint line
 is exactly where a client_secret lives, so an unparseable blueprint is named by file or by Secret key
-and the parser's own message is dropped.
+and the parser's own message is dropped. The only values echoed out of a parsed blueprint are the
+non-credentials an assertion is specifically about — the redirect URI list, the admission group names,
+the policy engine mode — and never the client credential fields.
 
-Malformed input is a FAIL: line, never a traceback. Every field this file reads out of a manifest or a
-blueprint may be absent, null, or the wrong type entirely, and a gate that dies is a gate that gets
-skipped; the helpers below absorb the shapes and the assertions still run on what comes back.
+Malformed input is a FAIL: line wherever an element can be absorbed. Every field this file reads out
+of a manifest or a blueprint may be absent, null, or the wrong type, and a gate that dies is a gate
+that gets skipped; the helpers below absorb an absent, null or wrong-typed *element* and the
+assertions still run on what comes back. A wrong-typed *container* — `tls: 5`, `redirect_uris: 5`,
+`property_mappings: 5` — may still raise: absorbing those means inventing a meaning for a scalar tls
+block, and no such manifest survives the API server, so `make dry-run` owns that class. The one
+container fixed here instead is a `Database` with no `spec`, because a mis-indented `name:` under
+`metadata` produces exactly that shape and this gate runs before `crd-check` in `make check`, so a
+traceback here masks the gate that would have named the cause.
 """
 import argparse
 import os
@@ -75,7 +97,19 @@ PROVIDER = "authentik"
 # /auth/openid/<provider-id>. The provider id is the YAML key Vikunja is configured under, which is
 # the env-var segment lowercased — setConfigFromEnv() splits on "_" and lowercases every segment.
 REDIRECT = f"https://{HOST}/auth/openid/{PROVIDER}"
-ISSUER_URL = "https://auth.titan.arrieta.eu/application/o/vikunja/"
+# The application slug, and the issuer it produces. Under `issuer_mode: per_provider` authentik
+# publishes the issuer at /application/o/<slug>/, so this constant and the blueprint's slug are one
+# fact: ISSUER_URL is BUILT from APP_SLUG so that the AUTHURL comparison below and the blueprint slug
+# assertion below cannot drift apart, and the assertion is what ties both to the real object.
+APP_SLUG = "vikunja"
+ISSUER_URL = f"https://auth.titan.arrieta.eu/application/o/{APP_SLUG}/"
+# The reviewed admission set, in the gate rather than read from the blueprint: a decision about who may
+# reach a public host with no proxy-side gate has to be written down twice to be reviewed twice.
+GROUPS = ("titan-family",)
+POLICY_ENGINE_MODE = "any"
+APP_MODEL = "authentik_core.application"
+BINDING_MODEL = "authentik_policies.policybinding"
+GROUP_MODEL = "authentik_core.group"
 # The two placeholders scripts/setup-vikunja-secrets.sh fills, each paired with the provider attribute
 # it stands for. Both the leftover-placeholder check and the byte-rebuild below are driven off this one
 # tuple, so adding a third placeholder cannot leave one of the two checks behind.
@@ -106,6 +140,66 @@ def provider_of(entries, name="vikunja"):
         if e.get("model", "").endswith("oauth2provider") and e.get("identifiers", {}).get("name") == name:
             return e.get("attrs", {})
     return None
+
+
+def find_value(tag, model, key):
+    """Value of a rebuilt `!Find [model, [key, value]]` tag, or None if this is not that shape.
+
+    `load_tolerating_tags` turns an authentik tag into a plain list — `["!Find", model, [key, val]]`
+    — because PyYAML's safe loader rejects the tag outright. Matching the rebuilt structure rather
+    than the raw text is what stops this passing when someone writes the same lookup with the
+    arguments swapped or the inner pair flattened. Same helper, same shape, as grafana-oidc-check's.
+    """
+    if not (isinstance(tag, list) and len(tag) == 3 and tag[0] == "!Find"):
+        return None
+    if tag[1] != model or not isinstance(tag[2], list) or len(tag[2]) != 2 or tag[2][0] != key:
+        return None
+    return tag[2][1]
+
+
+def keyof(value):
+    """The name inside a rebuilt `!KeyOf NAME`, or None."""
+    if isinstance(value, str) and value.startswith("!KeyOf "):
+        return value.split(None, 1)[1].strip()
+    return None
+
+
+def app_of(entries):
+    """The blueprint's `authentik_core.application` entry, or None.
+
+    Returns the ENTRY, not its attrs, because the caller needs `id` to recognise a `!KeyOf` reference
+    to it from a binding. This blueprint declares exactly one application, so matching on the model
+    is enough; the slug is then asserted rather than used to find the entry, which is the whole point
+    — a renamed slug must fail loudly, not be quietly followed.
+    """
+    for e in entries or []:
+        if e.get("model") == APP_MODEL:
+            return e
+    return None
+
+
+def bindings_for(entries, app_id, slug):
+    """The policybinding entries that target the application, in either reference form.
+
+    A binding names its target as `!KeyOf <local id>` when the target is declared in the same
+    blueprint with an `id`, or as `!Find [authentik_core.application, [slug, …]]` when it is looked
+    up. Matching only one form means rewriting the other silently detaches the binding from the
+    application it was gating — and a detached binding still looks like a binding in the file.
+
+    `app_id` is guarded rather than compared bare: a missing `id` yields None, and `keyof()` returning
+    None for a target that is not a recognised shape would otherwise match it and pull in every
+    binding in the blueprint.
+    """
+    out = []
+    for e in entries or []:
+        if e.get("model") != BINDING_MODEL:
+            continue
+        target = (e.get("identifiers") or {}).get("target")
+        if find_value(target, APP_MODEL, "slug") == slug:
+            out.append(e)
+        elif app_id is not None and keyof(target) == app_id:
+            out.append(e)
+    return out
 
 
 def entries_of(body):
@@ -234,9 +328,58 @@ def main():
             fail(f"{tpl_path} is not valid YAML ({type(exc).__name__}) - the reviewed template cannot "
                  "be read, so nothing below it can be compared")
 
-    prov = provider_of(entries_of(tpl))
+    tpl_entries = entries_of(tpl)
+    prov = provider_of(tpl_entries)
     if prov is None:
         fail("blueprints-vikunja.yaml declares no oauth2provider named vikunja")
+
+    # --- the application, and who is admitted to it ----------------------------------------------
+    # Both of these are on the reviewed template, which is the artifact a human edits and the one that
+    # wins the argument with the generated Secret (the byte-rebuild below is what makes the rendered
+    # artifact obey it). Neither was read at all before the whole-branch review.
+    app = app_of(tpl_entries)
+    if app is None:
+        fail("blueprints-vikunja.yaml declares no authentik_core.application entry - the application is "
+             "what fixes the issuer under issuer_mode: per_provider and what the admission binding "
+             "attaches to, so with none in the blueprint neither can be checked")
+    else:
+        app_attrs = app.get("attrs") or {}
+        if app_attrs.get("slug") != APP_SLUG:
+            # Deliberately not echoing the value found: the slug is not a secret, but the file is one
+            # `git diff` away and the message is already unambiguous about which field moved.
+            fail(f"blueprints-vikunja.yaml's application slug is not {APP_SLUG!r}. Under "
+                 "issuer_mode: per_provider the slug IS the issuer path, so the issuer authentik "
+                 f"publishes no longer matches the {ISSUER_URL} the Deployment is configured with: "
+                 "every login fails on a token from an issuer Vikunja never configured, and the error "
+                 "names neither file. Move the slug and this constant together, or leave the slug alone.")
+        # The whole authorization story, in the literal sense: this host is in NOT_PROXY_GATED, so no
+        # forwardAuth refuses anyone first, VIKUNJA_AUTH_LOCAL_ENABLED=false closes the local-password
+        # door and registration is off. Whoever this binding names is who may sign in.
+        #
+        # Exact set equality, not "at least one": dropping a binding and adding one both change who
+        # gets in, and both read as a perfectly healthy login page.
+        bindings = bindings_for(tpl_entries, app.get("id"), APP_SLUG)
+        groups = sorted({g for e in bindings
+                         for g in [find_value((e.get("attrs") or {}).get("group"),
+                                              GROUP_MODEL, "name")]
+                         if g})
+        if not bindings:
+            fail(f"blueprints-vikunja.yaml binds no policy to the {APP_SLUG} application. With no "
+                 "binding authentik's policy engine admits every authenticated account, and this host "
+                 "has no proxy-side gate, no local password and no registration to refuse anyone first - "
+                 "this binding is the entire authorization decision for a public internet-facing host.")
+        elif groups != sorted(GROUPS):
+            fail(f"blueprints-vikunja.yaml binds the {APP_SLUG} application to {groups}, expected "
+                 f"exactly {sorted(GROUPS)} - missing {sorted(set(GROUPS) - set(groups))}, extra "
+                 f"{sorted(set(groups) - set(GROUPS))}. Either direction changes who may sign in on a "
+                 "host with no other gate in front of it. If the change was deliberate, change GROUPS "
+                 "in this script in the same commit so the decision is reviewed twice.")
+        mode = app_attrs.get("policy_engine_mode")
+        if mode != POLICY_ENGINE_MODE:
+            fail(f"the {APP_SLUG} application's policy_engine_mode is {mode!r}, expected "
+                 f"{POLICY_ENGINE_MODE!r}. These bindings are a union only under `any`; under `all` the "
+                 "same rows demand membership of every group at once and lock out everyone the set was "
+                 "written to admit.")
 
     bp = find(docs, "Secret", "authentik-vikunja-blueprint", "auth")
     if bp is None:
@@ -387,6 +530,17 @@ def main():
         # envFrom is read from every container, the same scope env_of and all_env_names use.
         names = env_from_names(dep)
         REQUIRED = (PREFIX + "CLIENTID", "VIKUNJA_DATABASE_PASSWORD", "VIKUNJA_SERVICE_SECRET")
+        # `env:` wins over `envFrom` in Kubernetes: a key present in both reaches the container as the
+        # literal in `env:` and the Secret's value is never read. Each of these three is exactly the
+        # kind of value someone pins inline "just to test", and the unknown-key sweep cannot see it —
+        # these names are in KNOWN_KEYS by definition, so the sweep passes them. A rotation would then
+        # sit in the Secret, Reloader would restart the pod, and the pod would come back with the old
+        # value, which is the worst possible ordering of surprises.
+        shadowed = sorted(k for k in REQUIRED if k in all_env_names(dep))
+        if shadowed:
+            fail(f"{shadowed} is set in the Deployment's `env:` as well as in the envFrom Secret. `env:` "
+                 "beats `envFrom`, so the Secret's value is silently overridden and rotating it does "
+                 "nothing. These keys are meant to arrive from the Secret alone.")
         # The predicate demands all three keys in ONE Secret, because that is what the message below
         # claims and what scripts/setup-vikunja-secrets.sh writes. Accepting a Secret that carried any
         # one of them — what this loop used to do — let a half-populated Secret through, and then every
@@ -487,9 +641,16 @@ def main():
     db = find(docs, "Database", "vikunja", "databases")
     if db is None:
         fail("no Database vikunja in namespace databases")
-    elif dep is not None and (db.get("spec") or {}).get("name") != env_of(dep, "VIKUNJA_DATABASE_DATABASE"):
-        fail(f"Database vikunja creates {db['spec'].get('name')!r} but the Deployment connects to "
-             f"{env_of(dep, 'VIKUNJA_DATABASE_DATABASE')!r}")
+    else:
+        # Bound once and used twice, on purpose. The guard used to be `(db.get("spec") or {})` inline in
+        # the condition while the message below indexed `db['spec']` directly, so a Database with no
+        # `spec` at all passed the guard and then raised KeyError in the failure path — and a
+        # mis-indented `name:` under `metadata` produces exactly that shape. This gate runs before
+        # crd-check in `make check`, so that traceback masked the gate that would have named the cause.
+        db_spec = db.get("spec") or {}
+        if dep is not None and db_spec.get("name") != env_of(dep, "VIKUNJA_DATABASE_DATABASE"):
+            fail(f"Database vikunja creates {db_spec.get('name')!r} but the Deployment connects to "
+                 f"{env_of(dep, 'VIKUNJA_DATABASE_DATABASE')!r}")
     role = find(docs, "DatabaseRole", "vikunja", "databases")
     if role is None:
         fail("no DatabaseRole vikunja in namespace databases")
