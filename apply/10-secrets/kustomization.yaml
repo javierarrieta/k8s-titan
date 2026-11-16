@@ -188,3 +188,9 @@ resources:
   # exists to catch. Ships holding a placeholder with the job suspended; docs/drive-sync.md is the
   # procedure for putting real credentials in it.
   - drive-sync-secrets.yaml
+  # Vikunja: its own Secret set, CNPG's copy of the same DB password, and the rendered authentik
+  # blueprint. All three are written by scripts/setup-vikunja-secrets.sh; an unlisted one builds fine
+  # and is silently never applied, which is the coder-db.yaml story.
+  - vikunja-secrets.yaml
+  - vikunja-db-credentials.yaml
+  - authentik-vikunja-blueprint.yaml
