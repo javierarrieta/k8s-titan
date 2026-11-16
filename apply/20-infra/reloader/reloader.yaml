@@ -128,3 +128,9 @@ spec:
         # wrong one. Without this line a rotation sits unread in a running pod that reports Ready.
         # `watchGlobally: false` means this list is the whole scope.
         - sure
+        # Vikunja. Seventh time this list has bitten. Vikunja carries
+        # `reloader.stakater.com/auto: "true"` and reads its whole config through `envFrom`, so a
+        # rotated service secret, DB password or SMTP credential would otherwise sit unread in a
+        # running pod: it keeps signing session tokens with the old service secret and reports Ready
+        # the whole time. `watchGlobally: false` means this list is the whole scope.
+        - vikunja

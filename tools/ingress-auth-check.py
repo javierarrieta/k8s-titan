@@ -108,6 +108,14 @@ NOT_PROXY_GATED = {
                                   "ENABLE_LOGIN_FORM=false and group-mapped roles",
     ("mealie", "mealie"): "Mealie is OIDC-only with ALLOW_PASSWORD_LOGIN=false "
                           "(apply/50-apps/mealie/mealie.yaml)",
+    ("vikunja", "vikunja"): "Vikunja is OIDC-only with VIKUNJA_AUTH_LOCAL_ENABLED=false and "
+                            "VIKUNJA_SERVICE_ENABLEREGISTRATION=false "
+                            "(apply/50-apps/vikunja/vikunja.yaml). WHO may sign in is a policy "
+                            "binding to titan-family on the vikunja Application "
+                            "(authentik/blueprints-vikunja.yaml); this repo cannot see that binding "
+                            "applied. A forwardAuth here would add a second IdP round trip per "
+                            "session and put the outpost cookie's refresh behaviour (issue #243) in "
+                            "the path of a host that does not need it.",
     ("apps", "portfolio-prism"): "the app authenticates itself against authentik — OIDC Authorization "
                                  "Code + PKCE with its own session cookie (AUTH_MODE=oidc on the "
                                  "Deployment, apply/50-apps/portfolio-prism/portfolio-prism.yaml). A "

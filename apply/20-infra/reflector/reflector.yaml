@@ -1,6 +1,6 @@
 # Reflector replicates TLS material across namespaces, plus exactly one credential and one
 # ConfigMap: the restic backup Secret and the backup scripts, both declared in `apps` and mirrored
-# to the six namespaces that run backup jobs (apply/70-backup/). The database credential is still
+# to the five namespaces that run backup jobs (apply/70-backup/). The database credential is still
 # authored instead (spec 4 A4).
 #
 # That is a reversal of this file's original rule - "TLS material and nothing else" - made in the

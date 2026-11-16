@@ -104,9 +104,10 @@ measured. **The gap that survives all of it:** a volume whose `backup.titan.arri
 annotation was removed produces no Job, so it has no series and therefore cannot be stale. Nothing on
 the metrics side can see that; only `make backup-coverage`, on the tree side, can. **One restic volume has been restored and verified** —
 `mealie/mealie-data`, 2026-11-03, `DRILL_RESULT … match=yes`, recorded in
-[`pv-restore-drill.md`](pv-restore-drill.md). The other three opted-in volumes
-(`apps/investing-agent-pv-claim`, `open-webui/open-webui-data`, `sure/sure-storage`) have
-**not** been restored, so "the restic backups are drilled" is still false; what is proven is
+[`pv-restore-drill.md`](pv-restore-drill.md). The other five opted-in volumes
+(`apps/investing-agent-pv-claim`, `apps/portfolio-prism-data`, `open-webui/open-webui-data`,
+`sure/sure-storage`, `vikunja/vikunja-data`) have **not** been restored, so "the restic backups
+are drilled" is still false; what is proven is
 the mechanism — repository, mirrored credentials, tag lookup, `--target` layout, byte-for-byte
 content. Two things that drill found belong here, because both would otherwise be discovered
 during a real restore: **a restore needs more privilege than a backup** (the nightly jobs'
@@ -192,7 +193,7 @@ the stream is rejected per-pod, silently, with promtail reporting healthy.
   `Certificate` and reflected into consuming namespaces by Reflector; reference it as
   `secretName: titan-tls` from the namespace your Ingress lives in. Nothing else
   receives it — the allow-list is the `secretTemplate` annotations on
-  `apply/40-certificates/titan-wildcard.yaml`, today `apps,auth,open-webui,observability,files,mealie,llm,sure,gatus`,
+  `apply/40-certificates/titan-wildcard.yaml`, today `apps,auth,open-webui,observability,files,mealie,llm,sure,gatus,vikunja`,
   so a new consuming namespace means editing that file, never copying the Secret by hand — and
   `make tls-reflection-check` fails if a namespace consumes `titan-tls` without being on that list, or if
   the copy of the list in this file drifts from the annotation it quotes. **The one deliberate exception is
