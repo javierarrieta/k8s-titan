@@ -354,8 +354,8 @@ export SOPS_AGE_KEY_FILE="$KEY"
 # anything else is a hard stop, because a mangled address is a MAIL FROM refusal later.
 SMTP_FILE=${SMTP_FILE:?FAIL: set SMTP_FILE=/path/to/two-line-file (address on line 1, password on line 2)}
 [ -f "$SMTP_FILE" ] || { echo "FAIL: SMTP_FILE=$SMTP_FILE does not exist"; exit 1; }
-SMTP_USER=$(sed -n '1{ :a;N;$!ba; s/[[:space:]]*$//; p }' "$SMTP_FILE" | head -1)
-SMTP_PASS=$(awk 'NR==2{sub(/[[:space:]]*$/,""); print}' "$SMTP_FILE")
+SMTP_USER=$(sed -n '1s/[[:space:]]*$//p' "$SMTP_FILE")
+SMTP_PASS=$(sed -n '2s/[[:space:]]*$//p' "$SMTP_FILE")
 [ -n "$SMTP_USER" ] && case "$SMTP_USER" in *@*) ;; *) echo "FAIL: line 1 of $SMTP_FILE is not an address"; exit 1;; esac
 [ -n "$SMTP_PASS" ] || { echo "FAIL: line 2 of $SMTP_FILE is empty - no password"; exit 1; }
 echo "smtp user: $SMTP_USER"
