@@ -95,8 +95,10 @@ entries:
   # The same shape as the gate in blueprints-mealie.yaml. Short version: the IdP refuses before a
   # token exists, and a binding naming a group that does not exist DENIES rather than allows.
   #
-  # Vikunja has no admin-group concept fed from the token, so this is the whole authorization story:
-  # who may sign in at all. There is no second group to bind.
+  # Nothing here maps an IdP group into a Vikunja team, so this binding is the whole authorization
+  # story: who may sign in at all. Some providers in this directory add a second, app-specific
+  # admin group so their admins can reach the app without titan-family; Vikunja deliberately does
+  # not, and binds the one group. Spec §5.
   - model: authentik_policies.policybinding
     identifiers:
       target: !Find [authentik_core.application, [slug, vikunja]]
