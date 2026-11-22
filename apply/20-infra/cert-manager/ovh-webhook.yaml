@@ -19,7 +19,7 @@ spec:
       sourceRef:
         kind: HelmRepository
         name: cert-manager-webhook-ovh
-      version: "0.9.19"
+      version: "0.9.20"
   interval: 1h0s
   releaseName: cert-manager-webhook-ovh
   # The webhook chart templates cert-manager.io kinds (its serving Certificate and
