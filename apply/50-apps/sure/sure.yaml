@@ -278,7 +278,7 @@ spec:
       chart: sure
       # Pinned to an exact pre-release. NEVER `stable` here: this is pre-1.0 software (769 open
       # issues, and v0.7.6-alpha.9 was published the day this was written). An upgrade is a commit.
-      version: "0.7.6"
+      version: "0.7.6-hotfix.2"
       sourceRef:
         kind: HelmRepository
         name: sure
