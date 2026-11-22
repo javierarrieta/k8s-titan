@@ -58,7 +58,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: postgres-exporter
-          image: quay.io/prometheuscommunity/postgres-exporter:v0.20.1
+          image: quay.io/prometheuscommunity/postgres-exporter:v0.21.1
           args:
             - --config.file=
             - --collector.long_running_transactions
