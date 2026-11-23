@@ -204,7 +204,11 @@ ten ways this went wrong before it went right. Read that file before editing the
 Three things this replaced, each of which cost hours the first time:
 
 - **`go install` of the proxy does not work.** The module carries a `replace` directive, so
-  `@v0.4.1` cannot resolve. Build from a clone; `preflight` prints the commands.
+  `@v0.4.1` cannot resolve. Build from a clone; **`proxy` prints the commands, not `preflight`.**
+  This file used to say `preflight`, and that is a dead end: re-measured 2026-11-23, `preflight` on a
+  laptop with no proxy prints `MISS nothing at https://127.0.0.1:4443 and no tesla-http-proxy to
+  start one` and stops. The clone-and-build lines are in `cmd_proxy` (`scripts/tesla-push-telemetry-config.sh`),
+  so run `proxy` to be told how to install the thing `proxy` needs.
 - **The signing key is not the TLS key.** `-tls-key` and `-key-file` must be different files; the
   proxy refuses otherwise, and rightly so — `-key-file` is the credential that can drive the car.
 - **The proxy wants an envelope, `{"vins":[...], "config":{...}}`.** A bare config makes it sign a
@@ -213,9 +217,28 @@ Three things this replaced, each of which cost hours the first time:
 
 The token must be a **Fleet API** access token for the owner, minted by your own application — not
 the old Owner-API bearer this migration replaces. TeslaMate stores its copy encrypted in the
-database; doing the authorization-code flow again (§5a) is less work than decrypting it. Tokens last
-about two hours, so expect to re-mint across a long session. The script never puts it on a command
-line and never prints it.
+database; doing the authorization-code flow again (§5a) is less work than decrypting it.
+
+**A token lives 8 hours, not the two this file claimed.** Measured 2026-11-23 by decoding a freshly
+minted one: `iat` 1795460634, `exp` 1795489434 — 28,800 s. Long enough that a whole pairing session
+fits inside one token, so re-mint only when something actually 401s rather than on a timer. The
+script never puts the token on a command line and never prints it.
+
+**The interactive token prompt can fail on macOS, and the failure looks like a frozen terminal.**
+`read_token`'s tty path is `read -r -s -p … </dev/tty`, and macOS still ships bash 3.2, which does
+not understand bracketed paste: the terminal wraps the paste in `ESC[200~ … ESC[201~`, those bytes
+arrive as literal input, and the prompt appears to swallow both the paste and the newline. That
+explanation is inferred from the symptom, not reproduced — the workarounds below are what was
+verified. The script already reads stdin when it is not a tty, so skip the prompt entirely:
+
+```fish
+pbpaste | tr -d '[:space:]' | ./scripts/tesla-push-telemetry-config.sh vehicles
+```
+
+`tr -d '[:space:]'` is safe because a JWT has no internal whitespace, and it removes the trailing
+newline that would otherwise trip the script's own whitespace check. `set -x TESLA_ACCESS_TOKEN
+(read -s)` on its own line also works — fish handles bracketed paste — but leaves the token in the
+child's environment, which is why it is the second choice and not the first.
 
 **`ca` is mandatory.** Tesla answers `{"error":"ca is not a valid PEM"}` without it. The earlier text
 here claimed omitting it made the vehicle fall back to the public CA chain; that was never true and is
