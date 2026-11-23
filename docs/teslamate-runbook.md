@@ -259,6 +259,16 @@ changes that until it is paired. Revocation is on the car's Locks screen.
 Nothing below `synced: true` is evidence. Before the car has been told, the cluster logs are quiet
 because the car has not been asked, not because anything is broken.
 
+**`synced: true` is Tesla accepting, not the car confirming.** Measured 2026-11-23 while pairing a
+second vehicle: two pushes, and `status` reported `synced: true` within seconds of the POST on both.
+Including the first one, on a car that had never streamed and still had not connected an hour later.
+A flag that flips true in the same second as the write is not waiting for a car. Read it as *"Tesla
+holds this config for this VIN"* — which is what `updated_vehicles: 1` already said — and treat the
+only proof that the vehicle acted on it as a `socket_connected` carrying that VIN. The corollary is
+the expensive part: **config accepted and car connecting are two separate events, and nothing in
+`status` spans the gap between them.** A push can be completely successful and the cluster still
+correctly silent, for hours.
+
 After `synced: true`, the proof is a client connection, not a config echo:
 
 ```fish
@@ -266,6 +276,19 @@ kubectl --context titan -n apps logs deploy/tesla-fleet-telemetry --tail=20
 kubectl --context titan -n apps exec deploy/tesla-redis -- redis-cli info commandstats
 kubectl --context titan -n apps exec deploy/tesla-forwarder -- wget -qO- http://127.0.0.1:8080/metrics
 ```
+
+**`cmd_ca` writes a fleet-telemetry log line that looks exactly like a car being rejected.** `cmd_ca`
+reads the served chain with `openssl s_client -showcerts -connect telemetry.titan.arrieta.eu:443`,
+and that connection presents no client certificate — so fleet-telemetry, which requires one, logs:
+
+```
+http: TLS handshake error from <traefik pod ip>:<port>: tls: client didn't provide a certificate
+```
+
+That is the same sentence a vehicle would produce if its key grant had not landed, from the same
+path, with the Traefik pod as the source address. It is not a vehicle. Timestamp it against your own
+commands before reading anything into it: this produced a wrong conclusion on 2026-11-23, where a
+`ca` artifact was read as a car failing mTLS, and the correction only came from reading `cmd_ca`.
 
 `socket_connected` with `user_agent=Hermes/*` is the car. `cmdstat_publish` and `forwarded` rising
 together is the pipeline. Two traps in those numbers: the per-type counts in `socket_disconnected`
