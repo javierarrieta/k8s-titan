@@ -113,6 +113,13 @@ read_token() {
       read -r -s -p "Fleet API access token: " TESLA_ACCESS_TOKEN </dev/tty; echo >&2
     fi
   fi
+  # Bracketed paste. A terminal in bracketed-paste mode wraps the pasted text in ESC[200~ ... ESC[201~,
+  # and bash 3.2 (still what macOS ships) has no idea what those are, so they arrive as literal bytes
+  # around the token. They are not whitespace, so the check below would wave them through and the API
+  # would answer with a malformed header. Stripping a prefix/suffix that is absent is a no-op, so this
+  # cannot change the behaviour of a clean paste or of the stdin path.
+  TESLA_ACCESS_TOKEN=${TESLA_ACCESS_TOKEN#$'\033[200~'}
+  TESLA_ACCESS_TOKEN=${TESLA_ACCESS_TOKEN%$'\033[201~'}
   [ -n "${TESLA_ACCESS_TOKEN:-}" ] || die "no token."
   # A token with whitespace in it was pasted wrong. It produces a malformed header, which the proxy
   # answers by resetting the stream — an error that looks nothing like its cause.
