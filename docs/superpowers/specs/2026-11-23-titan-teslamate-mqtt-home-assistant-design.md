@@ -104,21 +104,25 @@ Why cleartext is acceptable anyway:
 
 - The path is the **WireGuard mesh and the home LAN**, not the internet. The threat being priced is a
   passive observer on those segments, which is a much shorter list than "anyone".
-- **The compensating control is the ACL, not the transport.** §5 scopes the TeslaMate credential so
-  that a captured one is nearly useless: write to `teslamate/#` and `homeassistant/#`, read of
-  `teslamate/#` only. A captured credential lets an attacker *inject* fake telemetry, not exfiltrate
-  anything Home Assistant holds. That is a real reduction in what the plaintext credential is worth,
-  and it is the thing that makes this decision defensible rather than merely convenient.
+- **There is no compensating control, and this bullet used to claim there was.** Amended 2026-11-24.
+  The ACL that made this defensible on paper **cannot be enforced on this add-on**; §5 records the
+  measurement and the mechanism. A captured `teslamate` credential can read every topic the broker
+  holds, including all of Home Assistant's — zigbee sensor states and everything else. What is left
+  in favour of cleartext is the path alone: the WireGuard mesh and the home LAN, not the internet.
+  That is a real reduction in exposure and it is **not** a control. Read §5 before believing this
+  section.
 - The data itself is not made more secret by TLS. If location on this path is unacceptable, the
   answer is to stop publishing location, not to encrypt it.
 
 **What would reopen this.** Any of: the add-on's port being published beyond the mesh or the LAN;
 the broker being reused by anything that is not this TeslaMate; a certificate with a real chain
 becoming available (at which point TLS *with* verification is worth having and
-`MQTT_TLS_ACCEPT_INVALID_CERTS` should stay off); or a third car whose telemetry matters more.
+`MQTT_TLS_ACCEPT_INVALID_CERTS` should stay off); a third car whose telemetry matters more; or a
+judgement that path trust alone is not enough now that the ACL is off the table — in which case the
+real options are TLS (§4a) or a broker where ACLs actually bind (§5).
 This is a decision with an expiry condition, not a permanent property.
 
-## 5. The broker user and its ACL — operator-side, and first
+## 5. The broker user, and the ACL that does not bind
 
 There is nothing to extract from the add-on; a credential is created, not read out.
 
@@ -137,33 +141,54 @@ logins:
 keeps it out of the add-on config in plaintext. `homeassistant` and `addons` are reserved names and
 cannot be used.
 
-**ACL: opt-in, and not enabled today.** Set `customize: {active: true, folder: mosquitto}`, create
-`/share/mosquitto/acl.conf` containing `acl_file /share/mosquitto/accesscontrollist`, then write
-that list. `/share` is `/usr/share/hassio/share` on the HAOS host.
+### The ACL: attempted, and inert
 
-**The footgun, which is the reason this section is not a footnote.** Enabling `acl_file` applies it
-to *every* user, including the add-on's own `homeassistant` and `addons`. The add-on's docs are
-explicit that those two need unrestricted `readwrite #` or Home Assistant's own MQTT breaks. An ACL
-written to scope only `teslamate`, which is the natural thing to write, takes down Home Assistant.
-The list has to start with them:
+The add-on's own documented procedure was followed exactly on 2026-11-24 — `customize: {active: true,
+folder: mosquitto}`, `/share/mosquitto/acl.conf` containing `acl_file
+/share/mosquitto/accesscontrollist`, and a list granting every other observed user `readwrite #`
+while scoping `teslamate` to `write teslamate/#`, `write homeassistant/#`, `read teslamate/#`.
+
+It loaded, and it did nothing. Add-on startup log:
 
 ```text
-user addons
-topic readwrite #
-
-user homeassistant
-topic readwrite #
-
-user teslamate
-topic write teslamate/#
-topic write homeassistant/#
-topic read  teslamate/#
+Loading config file '/share/mosquitto/acl.conf'
+Plugin builtin-security has registered to receive 'acl-check' events.
+Loading plugin: /usr/share/mosquitto/go-auth.so
+Plugin has registered to receive 'acl-check' events.
 ```
 
-`teslamate` needs **write on two trees**, not one. Vehicle topics go to `teslamate/#`; the discovery
-payloads (§6) go to `homeassistant/#`. An ACL that allows only `teslamate/#` produces a state that
-is very hard to diagnose: sensors update, entities never appear, and nothing reports an error,
-because a denied publish is not a connection failure.
+**Two plugins register for `acl-check` and `go-auth` answers first.** go-auth is the add-on's own
+auth plugin; it calls Home Assistant over `http://127.0.0.1:80/acl` and `/superuser`, and Home
+Assistant answers *allow* for any authenticated client. The built-in file plugin is never consulted.
+Confirmed by subscribing as `teslamate` after the restart: `teslamate/#` returned 131 messages,
+`homeassistant/#` 305 and `zigbee2mqtt/#` 83 — the last two being precisely what the ACL was written
+to deny.
+
+The `customize` block and the ACL file were therefore **removed**, on this repo's standing rule that a
+gate which passes vacuously is worse than no gate. A dead `acl_file` reads like a control to the next
+person and is not one.
+
+Two findings worth keeping even though the ACL is gone:
+
+- **The enumeration is useful on its own.** Seven days of add-on logs show three users: `addons`
+  (client-id `mqttjs_…`, i.e. zigbee2mqtt), `teslamate`, and `mqtt` from an IPv6 ULA address with
+  random client-ids — **an unidentified LAN device with unrestricted broker access**, which is worth
+  knowing about independently of this document.
+- **`homeassistant` never appears in those seven days**, including across an add-on restart that
+  forced every other client to reconnect. How Home Assistant core authenticates to its own broker is
+  unknown. That is harmless while nothing binds, and it would be the first thing to find out if
+  anyone tried again.
+
+If topic restriction is ever genuinely needed, `acl_file` on this add-on is not the mechanism. The
+choices are a broker where the file plugin is the only `acl-check` registrant — which means not the
+HAOS add-on — or TLS, which at least defeats the passive sniffing the ACL was meant to backstop.
+
+Two things that were learned about `acl_file` semantics and stay true regardless of whether it is ever
+used again: enabling it applies it to *every* user including the add-on's own `homeassistant` and
+`addons`, which need unrestricted `readwrite #` or Home Assistant's MQTT breaks; and `teslamate`
+would need **write on two trees**, since vehicle topics go to `teslamate/#` while discovery payloads
+(§6) go to `homeassistant/#`. An ACL allowing only `teslamate/#` yields sensors that update, entities
+that never appear, and no error — a denied publish is not a connection failure.
 
 ## 6. TeslaMate side — the repo change, and why it is small
 
@@ -246,8 +271,9 @@ Tesla integration. Then:
 Order matters because the failure mode of doing it the other way round is having no vehicle
 telemetry at all.
 
-1. Broker user + ACL (§5), then prove an **authenticated** `CONNECT` from a titan pod. Until that
-   passes, nothing else is testable.
+1. Broker user (§5), then prove an **authenticated** `CONNECT` from a titan pod. Until that passes,
+   nothing else is testable. The ACL half of this step turned out to be unachievable on this add-on;
+   §5 records it, and the step is now just the user.
 2. TeslaMate publishes, Home Assistant's Tesla integration still running. Both consumers in
    parallel. This is the safe state and it can be held indefinitely.
 3. Discovery entities proven for both cars.
@@ -261,7 +287,9 @@ deleted until step 5. The one irreversible action is step 5, and it is deliberat
 
 ## 9. Decisions
 
-**a. Cleartext 1883 with credentials, ACL-scoped.** §4, with its expiry conditions.
+**a. Cleartext 1883 with credentials, protected by path trust alone.** §4, with its expiry
+conditions. Amended 2026-11-24: this originally read "ACL-scoped", and the ACL cannot be enforced on
+this add-on (§5). The decision stands, but on a weaker basis than it was written on.
 
 **b. Local add-on user, not a Home Assistant user.** §5 — avoids making MQTT auth depend on the
 consumer's own auth.
@@ -294,39 +322,43 @@ because TeslaMate's documented env list has no hook for it. That has not changed
   `charge_current_request(_max)`, `climate_keeper_mode`, `center_display_state`, `service_mode`,
   `sun_roof_*`, `download_perc`, `install_perc` are published as topics but not surfaced by
   discovery. If Home Assistant needs one, the fix is a template sensor over the topic, not a patch.
-- **The Model Y's missing stream.** As of 2026-11-23 its Fleet Telemetry config is `synced: true`
-  with the key grant present and the car has still never connected. MQTT data for that car is only
-  as good as its stream, and this change neither fixes nor hides that.
+- **The Model Y's stream.** It was missing when this was written and it **connected on 2026-11-23 at
+  14:07:25** (`socket_connected network_interface=cellular`), so both cars now publish. What remains
+  out of scope is keeping it connected: a stream that drops is invisible on the MQTT side, and the
+  billing limit is what can delete the config outright (§3).
 - **Home Assistant's own automations and dashboards.** Rewriting them is the operator's work; this
   document's job is to make the entity names predictable enough to rewrite against.
 
 ## 11. What is proven and what is not
 
-**Proven, by measurement on 2026-11-23:** a titan pod can reach the add-on's listener and complete an
-MQTT protocol exchange; the broker requires credentials; no TLS listener exists; the November billing
-figures; the casa-cluster broker is anonymous and is a different broker.
+**Proven, by measurement.** A titan pod can reach the add-on's listener and complete an MQTT protocol
+exchange; the broker requires credentials; no TLS listener exists; the November billing figures; the
+casa-cluster broker is anonymous and is a different broker. Added 2026-11-24, after rollout: an
+**authenticated** `CONNECT` from a titan pod succeeds (`CONNACK 0`); TeslaMate publishes 132 topics
+across both cars; discovery configs are retained for both cars and Home Assistant created entities
+for both; the `car_id` ↔ VIN mapping is now recorded — car 1 is the Model 3, car 2 the Model Y; and
+the Model Y's stream is connected. Also proven, negatively: **`acl_file` does not restrict anything
+on this addon** (§5).
 
 **Not proven:**
 
-- That an **authenticated** `CONNECT` from a titan pod succeeds. It is the first thing to test and
-  it has never been tried, because the user does not exist yet.
-- That discovery produces the expected entities for both cars, or that the two cars are the two
-  expected cars. TeslaMate's logs never print VINs and `car_id` ↔ VIN mapping is not recorded
-  anywhere in this repo, so "both cars appeared" is weaker evidence than it sounds.
 - That Home Assistant's existing automations survive the swap. Nobody has enumerated what they
-  reference.
-- That the Tesla developer application actually goes to $0.00.
-- That the Model Y produces any MQTT data at all, given §10's open stream.
+  reference, and the integration removal has not happened yet.
+- That the Tesla developer application actually goes to $0.00. Home Assistant's Tesla integration is
+  still installed and still polling.
+- That the Model Y's stream *stays* connected, or that the €5 billing limit does not delete the
+  telemetry config that makes it possible.
 
 ## 12. Implementation checklist
 
-Operator-side, in order, none of it in this repo:
+Operator-side, in order, none of it in this repo. Status as of 2026-11-24 in brackets.
 
-1. Add the `teslamate` local user to the Mosquitto add-on (§5).
-2. Enable `customize` and write the ACL, `addons` and `homeassistant` first (§5).
-3. Restart the add-on; confirm Home Assistant's own MQTT still works.
-4. Prove an authenticated `CONNECT` from a titan pod.
-5. Hand the address and credential to be committed.
+1. Add the `teslamate` local user to the Mosquitto add-on (§5). *[done]*
+2. Enable `customize` and write the ACL, `addons` and `homeassistant` first (§5). *[done, and
+   removed again — it does not bind; see §5]*
+3. Restart the add-on; confirm Home Assistant's own MQTT still works. *[done]*
+4. Prove an authenticated `CONNECT` from a titan pod. *[done — `CONNACK 0`]*
+5. Hand the address and credential to be committed. *[done]*
 
 Repo-side, once those are done:
 
