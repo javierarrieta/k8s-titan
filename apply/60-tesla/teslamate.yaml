@@ -118,19 +118,30 @@ spec:
         #
         # Spec §3.1. TeslaMate's documented defaults are driving 2.5 s, charging 5 s, online 60 s,
         # asleep 30 s, default 15 s. Against the Fleet API that is roughly $65/month and blows the
-        # free 200 device-data calls per vehicle per day inside one trip. These values put a
-        # typical day near $8.60, inside the $10/month individual discount. Realtime detail comes
-        # from the telemetry stream, not from polling; polling only has to notice state changes.
+        # free 200 device-data calls per vehicle per day inside one trip. Realtime detail comes from
+        # the telemetry stream, not from polling; polling only has to notice state changes.
+        #
+        # Raised again 2026-11-24, and the reason is arithmetic this file got wrong once already. The
+        # old values were derived for ONE car against a $10/month discount that is per ACCOUNT, not per
+        # vehicle. There are two cars now. Charging at 60 s is 1,440 calls a day ($64.80/month) if a
+        # car sits on a charger, and online at 300 s is 288 a day ($13/month). Pairing the Model Y for
+        # streaming made this worse rather than better: a car TeslaMate can reach is a car it treats as
+        # `online`, so it gets polled at the online interval instead of the asleep one. Streaming is
+        # the cheap path — delta-only, about $0.0067/hour/car — and polling is what is being paid for.
+        #
+        # Note the floor: `interval/2` in lib/teslamate/vehicles/vehicle.ex does
+        # `String.to_integer(x) |> max(default)`, so these values are FLOORED at TeslaMate's defaults
+        # and anything below them is silently ignored. Raising is free; lowering is not possible.
         - name: POLLING_DRIVING_INTERVAL
           value: "30"
         - name: POLLING_CHARGING_INTERVAL
-          value: "60"
+          value: "600"
         - name: POLLING_ONLINE_INTERVAL
-          value: "300"
+          value: "900"
         - name: POLLING_ASLEEP_INTERVAL
           value: "1800"
         - name: POLLING_DEFAULT_INTERVAL
-          value: "120"
+          value: "300"
         # No startupProbe: TeslaMate boots in a few seconds, and / is a LiveView route that answers
         # 200 once the endpoint is up. Liveness with a generous initial delay is enough and one less
         # thing to get wrong.

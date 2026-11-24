@@ -120,17 +120,30 @@ roughly **$65/month**. The values in `apply/60-tesla/teslamate.yaml` are:
 | env | value | why |
 |---|---|---|
 | `POLLING_DRIVING_INTERVAL` | 30 s | realtime detail comes from the telemetry stream, not from polling; polling only has to notice state changes |
-| `POLLING_CHARGING_INTERVAL` | 60 s | charge curves are minutes-slow |
-| `POLLING_ONLINE_INTERVAL` | 300 s | a parked online car is not changing |
+| `POLLING_CHARGING_INTERVAL` | 600 s | charge curves are minutes-slow. Was 60 s, which is 1,440 calls/day — **$64.80/month** for a car that sits on a charger |
+| `POLLING_ONLINE_INTERVAL` | 900 s | a parked online car is not changing. Was 300 s = 288 calls/day = **$13/month** |
 | `POLLING_ASLEEP_INTERVAL` | 1800 s | an asleep car should not be woken by the poller |
-| `POLLING_DEFAULT_INTERVAL` | 120 s | the in-between state |
+| `POLLING_DEFAULT_INTERVAL` | 300 s | the in-between state. With a stream connected, driving-state updates arrive on this interval too (`vehicle.ex`: `if streaming?(data), do: default_interval()`) |
 
-That is roughly **190 calls/day ≈ $8.60/month**, inside the **$10/month individual-developer
-discount**, and under the 200/day cap. It is arithmetic, not a measurement.
+**The budget is per account, and there are two cars.** The original derivation — "roughly 190
+calls/day ≈ $8.60/month, inside the $10 discount" — was written for one vehicle and is simply wrong
+for two: Tesla's `$10/month` discount is **per account**, and its rate limits are per vehicle
+*shared across applications in that account*. Charging was the landmine, because the cost scales with
+hours-on-the-cable and nobody was counting those.
+
+Pairing the Model Y for streaming made the polling bill **worse**, not better, which is
+counterintuitive enough to write down: a car TeslaMate can reach is a car it treats as `online`, so it
+gets polled at the online interval instead of the asleep one — a 6× difference at the old values.
+Streaming itself is the cheap path (delta-only, about $0.0067/hour/car), so the fix is to poll less,
+not to stream less.
+
+All of these are **floored** at TeslaMate's own defaults by `interval/2`
+(`String.to_integer(x) |> max(default)` in `lib/teslamate/vehicles/vehicle.ex`), so a value below the
+default is silently ignored. Raising is free; lowering is not possible.
 
 | | predicted | measured after a week |
 |---|---|---|
-| device-data calls/day | ~190 | **not measured — see §10** |
+| device-data calls/day | ~80–100 per car at these values (was ~190 at the old ones) | **not measured — see §10** |
 | commands/day | ~0 (no remote commands in v1) | |
 | wakes/day | a few | |
 | streaming signals/day | large, and irrelevant at $1 per 150,000 | |
