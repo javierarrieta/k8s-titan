@@ -256,15 +256,15 @@ a missing annotation — which is the failure mode here too, not a case for clus
 
 Home Assistant already talks to the add-on as its internal broker, so the MQTT integration needs no
 new endpoint — the change is that vehicle entities start arriving by discovery instead of by the
-Tesla integration. Then:
+Tesla integration. Status as of 2026-11-24 in brackets.
 
-1. Confirm the MQTT integration is loaded and discovery is enabled on it.
+1. Confirm the MQTT integration is loaded and discovery is enabled on it. *[done]*
 2. Let discovery create the entities for **both** cars, and check them against the car summary in
-   TeslaMate — same values, same cars.
-3. Only then remove the Tesla integration.
+   TeslaMate — same values, same cars. *[done — both cars, and the `car_id` ↔ VIN mapping is in §11]*
+3. Only then remove the Tesla integration. *[disabled 2026-11-24]*
 4. Only after a full billing cycle at $0.00, retire the Tesla developer application on
    developer.tesla.com. Until then it is a live credential and a billing line waiting to be
-   re-enabled by habit.
+   re-enabled by habit. *[outstanding — this is the only step left]*
 
 ## 8. Rollout order, and rollback
 
@@ -275,15 +275,21 @@ telemetry at all.
    nothing else is testable. The ACL half of this step turned out to be unachievable on this add-on;
    §5 records it, and the step is now just the user.
 2. TeslaMate publishes, Home Assistant's Tesla integration still running. Both consumers in
-   parallel. This is the safe state and it can be held indefinitely.
-3. Discovery entities proven for both cars.
+   parallel. This is the safe state and it can be held indefinitely. *[done]*
+3. Discovery entities proven for both cars. *[done]*
 4. Remove Home Assistant's Tesla integration. Watch the developer application's usage for a full
-   cycle.
-5. Retire the application.
+   cycle. *[integration disabled 2026-11-24; the cycle is being watched]*
+5. Retire the application. *[outstanding]*
 
 **Rollback is cheap at every step**, which is the good property of this design: re-enabling the
 Tesla integration in Home Assistant is a config change, and the developer application is not
 deleted until step 5. The one irreversible action is step 5, and it is deliberately last.
+
+**Which application dies at step 5.** The one Home Assistant's Tesla integration was built against,
+*not* the one TeslaMate uses. TeslaMate's application holds the Fleet Telemetry configuration both
+cars stream through, so retiring the wrong one takes the stream with it and the pairing has to be
+done again by hand. Two applications on one Tesla account look interchangeable in the dashboard and
+are not; check which one the usage line has actually fallen to zero before deleting anything.
 
 ## 9. Decisions
 
@@ -324,8 +330,9 @@ because TeslaMate's documented env list has no hook for it. That has not changed
   discovery. If Home Assistant needs one, the fix is a template sensor over the topic, not a patch.
 - **The Model Y's stream.** It was missing when this was written and it **connected on 2026-11-23 at
   14:07:25** (`socket_connected network_interface=cellular`), so both cars now publish. What remains
-  out of scope is keeping it connected: a stream that drops is invisible on the MQTT side, and the
-  billing limit is what can delete the config outright (§3).
+  out of scope is keeping it connected: a stream that drops is invisible on the MQTT side, and
+  exceeding the account's billing limit deletes the telemetry config outright — see §11 for the rule
+  on what that limit has to be.
 - **Home Assistant's own automations and dashboards.** Rewriting them is the operator's work; this
   document's job is to make the entity names predictable enough to rewrite against.
 
@@ -342,12 +349,20 @@ on this addon** (§5).
 
 **Not proven:**
 
-- That Home Assistant's existing automations survive the swap. Nobody has enumerated what they
-  reference, and the integration removal has not happened yet.
-- That the Tesla developer application actually goes to $0.00. Home Assistant's Tesla integration is
-  still installed and still polling.
-- That the Model Y's stream *stays* connected, or that the €5 billing limit does not delete the
-  telemetry config that makes it possible.
+- That Home Assistant's existing automations survive the swap. Nobody enumerated what they reference,
+  and the Tesla integration was disabled rather than deleted, so nothing failed loudly when it went.
+- That the Tesla developer application actually goes to $0.00. Home Assistant's integration is now
+  disabled, so nothing is polling it — but "disabled" and "costs nothing" are the same claim, not two
+  facts, and only the next full billing cycle settles it.
+- That the Model Y's stream *stays* connected.
+
+**The billing limit, stated as a rule rather than a number.** The account's billing limit must sit
+comfortably above worst-case spend, not just above expected spend. Exceeding it does not merely
+suspend the API — Tesla deletes the Fleet Telemetry configurations and **they are not restored**, so
+an overage costs a manual re-pairing of every streaming car, not a phone call. A limit set tight
+against a quiet month is the failure mode: the polling intervals in §3 are what make worst case
+bounded, and the limit belongs above that, not below it. The specific figure is deliberately not
+recorded here — it is a dashboard field that changes, and a stale number in a runbook reads as fact.
 
 ## 12. Implementation checklist
 

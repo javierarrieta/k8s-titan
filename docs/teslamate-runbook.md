@@ -909,6 +909,13 @@ removed rather than left in place looking like a control. So a captured MQTT cre
 everything the broker holds. The exposure is bounded by the path — WireGuard mesh and home LAN — and
 by nothing else. §5 of the spec is the full record, including the enumeration of who is on that broker.
 
+**Home Assistant's own Tesla integration was disabled on 2026-11-24**, which was the whole point of the
+switch. One step remains and it is deliberately last: after a full billing cycle showing $0.00 on the
+developer application that integration used, retire *that* application on developer.tesla.com. Not the
+one TeslaMate uses — TeslaMate's application holds the Fleet Telemetry configuration both cars stream
+through, so retiring the wrong one takes the stream down and the pairing must be redone by hand. Two
+applications on one account look interchangeable in that dashboard and are not.
+
 Two behaviours that read as breakage and are not, both documented TeslaMate behaviour rather than
 local findings:
 
