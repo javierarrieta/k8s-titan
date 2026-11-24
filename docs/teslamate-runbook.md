@@ -93,12 +93,22 @@ application's keypair must be replaced at Tesla and every paired vehicle re-pair
 | DB password | edit both Secret files (or `FORCE=1` the script and re-sync), then `kubectl -n databases apply -f` the `DatabaseRole` | CNPG `ALTER ROLE`s on the Secret change; TeslaMate keeps its old password in its env until restarted |
 | `ENCRYPTION_KEY` | regenerate, restart TeslaMate | **every stored vehicle token becomes undecryptable** — sign in again in the UI afterwards. This is not a routine operation |
 | Grafana admin password | edit `tesla-grafana-admin.yaml`, restart Grafana | — |
-| `teslamate-secrets`, anything | `kubectl --context titan -n apps rollout restart deploy/teslamate deploy/tesla-grafana` | see below |
+| `teslamate-secrets`, anything | TeslaMate is restarted by Reloader; **Grafana is not** — `kubectl --context titan -n apps rollout restart deploy/tesla-grafana` | see below |
 
-**Reloader does not watch this namespace.** It is scoped to `coder` in this cluster, so editing
-`teslamate-secrets` changes the Secret and nothing else: TeslaMate and Grafana keep running with the
-old values in their environment, and no amount of waiting fixes it. The rollout restart above is the
-step, not a convenience.
+**Reloader watches this namespace, but only rolls what is annotated.** An earlier version of this
+section said Reloader "does not watch this namespace" and was "scoped to `coder`". That was wrong:
+Reloader's own release lives in `apps`, the chart adds its release namespace to the watched set, the
+live RBAC is a namespaced `Role` in `apps` with no ClusterRole anywhere, and `investing-agent` and
+`portfolio-prism` already carry `reloader.stakater.com/last-reloaded-from`. What was actually true is
+that **no workload here was annotated**, so nothing pointed at `teslamate-secrets` — which is why the
+manual restart was, and for Grafana remains, the step rather than a convenience.
+
+As of 2026-11-24 the TeslaMate Deployment carries
+`secret.reloader.stakater.com/reload: teslamate-secrets`, so editing that Secret rolls TeslaMate by
+itself. `tesla-grafana` carries no annotation, so it keeps running with whatever it read at start and
+still needs the explicit rollout above. The general rule: Reloader acts on annotated workloads, not on
+namespaces, so "nothing restarted" means check for the annotation before concluding anything about
+scope.
 
 ## 3. Polling budget
 
