@@ -61,10 +61,25 @@ spec:
           value: "true"
         - name: TZ
           value: UTC
-        # No Home Assistant integration in v1 (spec §3 T12). If it is ever wanted, this is the only
-        # thing to flip plus MQTT_HOST.
+        # Home Assistant subscribes to TeslaMate's MQTT instead of holding its own Tesla developer
+        # application. Two consumers of one Tesla account share one $10/month discount and one
+        # per-vehicle rate limit, and Home Assistant had never been inside the polling budget above;
+        # its $1.83 in November was the difference between inside the discount and suspended.
+        # MQTT_HOST / MQTT_USERNAME / MQTT_PASSWORD arrive from teslamate-secrets via the envFrom
+        # above and are deliberately not named here — a second path to one value is the one that
+        # drifts, and the address stays out of a public tree the same way DATABASE_HOST already does.
+        # Cleartext 1883 is a recorded decision with expiry conditions, not an oversight: spec
+        # 2026-11-23 §4.
         - name: DISABLE_MQTT
+          value: "false"
+        - name: MQTT_PORT
+          value: "1883"
+        # Discovery rather than a hand-written mqtt_sensors.yaml: 4.5.0 ships it natively and publishes
+        # the VIN as the Home Assistant device serial. The manual include file is frozen upstream.
+        - name: MQTT_HOME_ASSISTANT_DISCOVERY
           value: "true"
+        - name: MQTT_HOME_ASSISTANT_DISCOVERY_URL
+          value: https://tesla.titan.arrieta.eu/
         # Europe, Middle East, Africa. The region is not cosmetic: a EU vehicle against the NA
         # fleet endpoint does not resolve.
         - name: TESLA_API_HOST

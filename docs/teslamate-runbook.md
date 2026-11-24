@@ -866,8 +866,29 @@ the check.
 
 ## 11. Deliberately not done
 
-Remote vehicle commands (no standing vehicle-command proxy — §5 runs one on a laptop, once), Home
-Assistant MQTT (`DISABLE_MQTT=true`), elevation enrichment (`OPENTOPODATA_URL` empty), and live
-instantaneous power, which the bridge reports as 0. TeslaMate's settings — vehicles, geofences, charge
-costs — live in the database and not in git, so they are backed up by the CNPG stream and not by this
-repo. Each omission is a separate change with its own spec if it is ever wanted.
+Remote vehicle commands (no standing vehicle-command proxy — §5 runs one on a laptop, once), elevation
+enrichment (`OPENTOPODATA_URL` empty), and live instantaneous power, which the bridge reports as 0.
+TeslaMate's settings — vehicles, geofences, charge costs — live in the database and not in git, so they
+are backed up by the CNPG stream and not by this repo. Each omission is a separate change with its own
+spec if it is ever wanted.
+
+**Home Assistant MQTT came off this list on 2026-11-24.** Home Assistant now subscribes to TeslaMate
+rather than holding its own Tesla developer application, because two consumers of one Tesla account
+share one `$10/month` discount and one per-vehicle rate limit, and the second one had never been inside
+the budget in §3 — its `$1.83` in November was the difference between inside the discount and
+suspended. The design, including why the transport is cleartext and what would reopen that, is
+[`superpowers/specs/2026-11-23-titan-teslamate-mqtt-home-assistant-design.md`](superpowers/specs/2026-11-23-titan-teslamate-mqtt-home-assistant-design.md).
+
+Two behaviours that read as breakage and are not, both documented TeslaMate behaviour rather than
+local findings:
+
+- Every TeslaMate restart logs one `conflicting MQTT discovery message` warning per legacy topic per
+  car — 62 of them. TeslaMate clears its former per-entity discovery format on startup and Home
+  Assistant sees each zero-byte retained publish. No entity changes and none is removed.
+- With discovery **disabled** the same zero-byte cleanup still runs on every start, so turning it off
+  is not silent either: the car's entities are removed from Home Assistant at the next restart.
+
+What the switch costs Home Assistant: live instantaneous power, which arrives as `0`, and elevation,
+which is not enriched at all — both §10, both properties of the telemetry path rather than of MQTT,
+and neither fixed by this change. Remote commands were never in use, which is the only reason this was
+a swap rather than a redesign.
