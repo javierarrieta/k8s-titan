@@ -902,6 +902,13 @@ the budget in §3 — its `$1.83` in November was the difference between inside 
 suspended. The design, including why the transport is cleartext and what would reopen that, is
 [`superpowers/specs/2026-11-23-titan-teslamate-mqtt-home-assistant-design.md`](superpowers/specs/2026-11-23-titan-teslamate-mqtt-home-assistant-design.md).
 
+**The broker has no topic ACL, and that is a measured fact rather than an omission.** An `acl_file`
+scoped to `teslamate` was written, loaded, and then never consulted: the add-on's `go-auth` plugin also
+registers for `acl-check` and answers first, on Home Assistant's behalf, with allow. The config was
+removed rather than left in place looking like a control. So a captured MQTT credential reads
+everything the broker holds. The exposure is bounded by the path — WireGuard mesh and home LAN — and
+by nothing else. §5 of the spec is the full record, including the enumeration of who is on that broker.
+
 Two behaviours that read as breakage and are not, both documented TeslaMate behaviour rather than
 local findings:
 
