@@ -93,12 +93,22 @@ application's keypair must be replaced at Tesla and every paired vehicle re-pair
 | DB password | edit both Secret files (or `FORCE=1` the script and re-sync), then `kubectl -n databases apply -f` the `DatabaseRole` | CNPG `ALTER ROLE`s on the Secret change; TeslaMate keeps its old password in its env until restarted |
 | `ENCRYPTION_KEY` | regenerate, restart TeslaMate | **every stored vehicle token becomes undecryptable** — sign in again in the UI afterwards. This is not a routine operation |
 | Grafana admin password | edit `tesla-grafana-admin.yaml`, restart Grafana | — |
-| `teslamate-secrets`, anything | `kubectl --context titan -n apps rollout restart deploy/teslamate deploy/tesla-grafana` | see below |
+| `teslamate-secrets`, anything | TeslaMate is restarted by Reloader; **Grafana is not** — `kubectl --context titan -n apps rollout restart deploy/tesla-grafana` | see below |
 
-**Reloader does not watch this namespace.** It is scoped to `coder` in this cluster, so editing
-`teslamate-secrets` changes the Secret and nothing else: TeslaMate and Grafana keep running with the
-old values in their environment, and no amount of waiting fixes it. The rollout restart above is the
-step, not a convenience.
+**Reloader watches this namespace, but only rolls what is annotated.** An earlier version of this
+section said Reloader "does not watch this namespace" and was "scoped to `coder`". That was wrong:
+Reloader's own release lives in `apps`, the chart adds its release namespace to the watched set, the
+live RBAC is a namespaced `Role` in `apps` with no ClusterRole anywhere, and `investing-agent` and
+`portfolio-prism` already carry `reloader.stakater.com/last-reloaded-from`. What was actually true is
+that **no workload here was annotated**, so nothing pointed at `teslamate-secrets` — which is why the
+manual restart was, and for Grafana remains, the step rather than a convenience.
+
+As of 2026-11-24 the TeslaMate Deployment carries
+`secret.reloader.stakater.com/reload: teslamate-secrets`, so editing that Secret rolls TeslaMate by
+itself. `tesla-grafana` carries no annotation, so it keeps running with whatever it read at start and
+still needs the explicit rollout above. The general rule: Reloader acts on annotated workloads, not on
+namespaces, so "nothing restarted" means check for the annotation before concluding anything about
+scope.
 
 ## 3. Polling budget
 
@@ -866,8 +876,29 @@ the check.
 
 ## 11. Deliberately not done
 
-Remote vehicle commands (no standing vehicle-command proxy — §5 runs one on a laptop, once), Home
-Assistant MQTT (`DISABLE_MQTT=true`), elevation enrichment (`OPENTOPODATA_URL` empty), and live
-instantaneous power, which the bridge reports as 0. TeslaMate's settings — vehicles, geofences, charge
-costs — live in the database and not in git, so they are backed up by the CNPG stream and not by this
-repo. Each omission is a separate change with its own spec if it is ever wanted.
+Remote vehicle commands (no standing vehicle-command proxy — §5 runs one on a laptop, once), elevation
+enrichment (`OPENTOPODATA_URL` empty), and live instantaneous power, which the bridge reports as 0.
+TeslaMate's settings — vehicles, geofences, charge costs — live in the database and not in git, so they
+are backed up by the CNPG stream and not by this repo. Each omission is a separate change with its own
+spec if it is ever wanted.
+
+**Home Assistant MQTT came off this list on 2026-11-24.** Home Assistant now subscribes to TeslaMate
+rather than holding its own Tesla developer application, because two consumers of one Tesla account
+share one `$10/month` discount and one per-vehicle rate limit, and the second one had never been inside
+the budget in §3 — its `$1.83` in November was the difference between inside the discount and
+suspended. The design, including why the transport is cleartext and what would reopen that, is
+[`superpowers/specs/2026-11-23-titan-teslamate-mqtt-home-assistant-design.md`](superpowers/specs/2026-11-23-titan-teslamate-mqtt-home-assistant-design.md).
+
+Two behaviours that read as breakage and are not, both documented TeslaMate behaviour rather than
+local findings:
+
+- Every TeslaMate restart logs one `conflicting MQTT discovery message` warning per legacy topic per
+  car — 62 of them. TeslaMate clears its former per-entity discovery format on startup and Home
+  Assistant sees each zero-byte retained publish. No entity changes and none is removed.
+- With discovery **disabled** the same zero-byte cleanup still runs on every start, so turning it off
+  is not silent either: the car's entities are removed from Home Assistant at the next restart.
+
+What the switch costs Home Assistant: live instantaneous power, which arrives as `0`, and elevation,
+which is not enriched at all — both §10, both properties of the telemetry path rather than of MQTT,
+and neither fixed by this change. Remote commands were never in use, which is the only reason this was
+a swap rather than a redesign.

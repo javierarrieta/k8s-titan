@@ -210,8 +210,22 @@ needed. Two documented behaviours to expect rather than debug:
   logs one harmless `conflicting MQTT discovery message` warning per legacy topic. Both are cosmetic
   and both will be reported as bugs by whoever sees them first, so they belong in the runbook.
 
-**Reloader will not do this for you.** Reloader is scoped to namespace `coder` and does not watch
-`apps`, so editing the Secret changes nothing until `kubectl -n apps rollout restart deploy/teslamate`.
+**Reloader needs one annotation to do this, and that is all.** An earlier draft of this document
+claimed Reloader was scoped to `coder` and did not watch `apps`. **That was wrong**, and the
+cluster disproves it three ways: `reloader.yaml` records that the chart adds its own release
+namespace to the watched set and that release lives in `apps`; the live RBAC is a namespaced
+`Role/reloader-reloader-role` in `apps` with no ClusterRole anywhere; and `investing-agent` and
+`portfolio-prism`, both in `apps`, already carry
+`reloader.stakater.com/last-reloaded-from`. What was actually missing is that the TeslaMate
+Deployment carried no Reloader annotation at all, so nothing pointed it at `teslamate-secrets`. The
+fix is one annotation, named rather than `auto: "true"` per the coder precedent.
+
+Worth recording why this is not "just watch every namespace": spec decision **R3** of
+`2026-10-07-titan-reloader-design.md` chose `watchGlobally: false` deliberately, because Reflector
+already holds a cluster-wide `secrets: *` held to one purpose by review alone, and Reloader is
+purpose-built to read every Secret in whatever it watches. That list has bitten five times
+(promtail, open-webui, grafana, mealie, llm) and every one of those was a missing namespace entry or
+a missing annotation — which is the failure mode here too, not a case for cluster scope.
 
 ## 7. Home Assistant side
 
@@ -320,9 +334,10 @@ Repo-side, once those are done:
 7. Edit `apply/60-tesla/teslamate.yaml`: replace the `DISABLE_MQTT` block and delete the stale
    comment.
 8. `make check`, then `make dry-run DRYRUN_CONTEXT=<admin context>`.
-9. Apply, `kubectl -n apps rollout restart deploy/teslamate`, confirm the pod is not CrashLooping —
-   TeslaMate refuses to start if `MQTT_HOST` is unreachable, which is the loud failure and the one
-   you want.
+9. Apply. The annotation added per §6 means Reloader rolls the pod when the Secret changes, so no
+   manual `rollout restart` is needed for later edits — but the first apply changes the Deployment
+   itself, so it restarts anyway. Confirm the pod is not CrashLooping: TeslaMate refuses to start if
+   `MQTT_HOST` is unreachable, which is the loud failure and the one you want.
 10. Update `docs/teslamate-runbook.md` §11: Home Assistant MQTT moves from *deliberately not done*
     to done, and record the discovery-restart warnings there so the next person does not file them.
 
