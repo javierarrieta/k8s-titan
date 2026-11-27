@@ -298,7 +298,20 @@ spec:
   values:
     image:
       repository: ghcr.io/we-promise/sure
-      tag: "0.7.6"
+      # No tag, deliberately. The chart defaults it to Chart.AppVersion, and the repo index says
+      # chart 0.7.6-hotfix.2 carries appVersion 0.7.6-hotfix.2, so the chart version is the one
+      # place this release is pinned.
+      #
+      # It used to say `tag: "0.7.6"` here, and that is why 0c227b1 ("update: sure chart
+      # 0.7.6 -> 0.7.6-hotfix.2 (7 CRITICAL / 354 HIGH)") did nothing to the running app: an
+      # explicit values tag outranks the chart default, so sure-web and sure-worker were still
+      # pulling 0.7.6 (digest 61cd4c1f) while the hotfix is a different image (08f4fb26). The
+      # security bump was committed, reconciled, reported Ready, and never deployed. `make
+      # sure-check` now rejects the two-place form so an automated chart bump cannot repeat it.
+      #
+      # Consequence of merging: this is a real image change, 0.7.6 -> 0.7.6-hotfix.2, with the
+      # migrate hook running post-upgrade (see `migrations` below and the upgrade.remediation
+      # comment above it).
       pullPolicy: IfNotPresent
 
     rails:
