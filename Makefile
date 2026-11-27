@@ -13,7 +13,7 @@ KUSTOMIZE_DIRS := $(shell find apply -name kustomization.yaml 2>/dev/null | sed 
 # not be able to slip between the encryption rule and the validation glob.
 SECRET_FIND := find apply/10-secrets \( -name '*.yaml' -o -name '*.yml' \) ! -name kustomization.yaml
 
-.PHONY: check check-ci kustomize-check kustomize-listing dry-run py-deps validate update-keys scan leak-check secrets-placement secrets-list secrets-present release-secrets secret-refs ingress-auth tls-reflection-check outpost-binding-check backup-coverage db-url-check oidc-check grafana-oidc-check observability-oidc-check open-webui-oidc-check mealie-check sure-check vikunja-check crd-check namespace-check tesla-forwarder-test chart-values-check traefik-exposure-check update-cnpg-crds update-crds blueprint-mount-check
+.PHONY: check check-ci kustomize-check kustomize-listing dry-run py-deps validate update-keys scan leak-check secrets-placement secrets-list secrets-present release-secrets secret-refs ingress-auth tls-reflection-check outpost-binding-check backup-coverage db-url-check oidc-check grafana-oidc-check observability-oidc-check open-webui-oidc-check mealie-check sure-check vikunja-check crd-check namespace-check tesla-forwarder-test chart-values-check traefik-exposure-check update-cnpg-crds update-crds blueprint-mount-check update-flux
 
 # leak-check runs FIRST: make has no -k, so it stops at the first failing prerequisite.
 # validate needs the age key, so an operator who forgot SOPS_AGE_KEY_FILE would never
@@ -152,6 +152,42 @@ tesla-forwarder-test:
 # header of the script for why these come from the cluster rather than from upstream tags.
 update-crds:
 	@scripts/update-crds.sh $(CRD_CONTEXT)
+
+# Regenerate the Flux controller install (apply/00-bootstrap/flux-system/gotk-components.yaml)
+# from an upstream flux2 release. Laptop-only and deliberately NOT in `check` or `check-ci`: it
+# needs the network to fetch the release manifest, and the tree alone cannot say what upstream
+# shipped. Same class as `validate` and `dry-run` — the gates that need something outside git.
+#
+# It verifies before it overwrites, and that order is the point. If the committed file does not
+# reproduce from the version its own header names, something was hand-edited into it, and that
+# edit has to be read before it is overwritten: this file carried a 2026-10-27 CRD swap that
+# kept notification-controller from crash-looping, and a blind regenerate would have reverted
+# it while every offline gate stayed green. verify reports the differences and does not fail —
+# you are supposed to read them, not be told.
+#
+#   make update-flux FLUX_VERSION=v2.10.1
+FLUX_VERSION ?=
+update-flux:
+	@if [ -z "$(FLUX_VERSION)" ]; then \
+	  echo "update-flux: set FLUX_VERSION=vX.Y.Z to the release you are moving to"; \
+	  echo "             (current file says: $$(sed -n 's/^# Flux Version: //p' apply/00-bootstrap/flux-system/gotk-components.yaml | head -1))"; \
+	  exit 1; \
+	fi
+	@current=$$(sed -n 's/^# Flux Version: //p' apply/00-bootstrap/flux-system/gotk-components.yaml | head -1); \
+	tmp=$$(mktemp -d); trap 'rm -rf $$tmp' EXIT; \
+	for v in $$current $(FLUX_VERSION); do \
+	  if ! curl -fsSL -o $$tmp/install-$$v.yaml \
+	       "https://github.com/fluxcd/flux2/releases/download/$$v/install.yaml"; then \
+	    echo "update-flux: could not fetch flux2 $$v install.yaml"; exit 1; \
+	  fi; \
+	done; \
+	printf 'committed file reproduces from %s? read the diff below\n' "$$current"; \
+	python3 tools/flux-bundle-export.py verify $$tmp/install-$$current.yaml $$current \
+	  apply/00-bootstrap/flux-system/gotk-components.yaml; \
+	echo; \
+	python3 tools/flux-bundle-export.py emit $$tmp/install-$(FLUX_VERSION).yaml $(FLUX_VERSION) \
+	  > apply/00-bootstrap/flux-system/gotk-components.yaml; \
+	echo "wrote $(FLUX_VERSION) — now re-vendor the CRDs the live cluster will enforce: make update-crds CRD_CONTEXT=<ctx> after it applies"
 
 # Re-vendor the CRDs against a specific operator tag. The names match the plural resource
 # names, which is exactly how upstream spells the file names.
