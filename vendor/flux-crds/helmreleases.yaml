@@ -5,7 +5,7 @@ metadata:
     app.kubernetes.io/component: helm-controller
     app.kubernetes.io/instance: flux-system
     app.kubernetes.io/part-of: flux
-    app.kubernetes.io/version: v2.9.6
+    app.kubernetes.io/version: v2.10.1
     kustomize.toolkit.fluxcd.io/name: flux-system
     kustomize.toolkit.fluxcd.io/namespace: flux-system
   name: helmreleases.helm.toolkit.fluxcd.io
@@ -50,6 +50,11 @@ spec:
             properties:
               chart:
                 properties:
+                  kind:
+                    enum:
+                    - HelmChart
+                    - OCIRepository
+                    type: string
                   metadata:
                     properties:
                       annotations:
@@ -63,20 +68,74 @@ spec:
                     type: object
                   spec:
                     properties:
+                      certSecretRef:
+                        properties:
+                          name:
+                            type: string
+                        required:
+                        - name
+                        type: object
                       chart:
                         maxLength: 2048
                         minLength: 1
                         type: string
+                      ignore:
+                        type: string
                       ignoreMissingValuesFiles:
+                        type: boolean
+                      insecure:
                         type: boolean
                       interval:
                         pattern: ^([0-9]+(\.[0-9]+)?(ms|s|m|h))+$
                         type: string
+                      layerSelector:
+                        properties:
+                          mediaType:
+                            type: string
+                          operation:
+                            enum:
+                            - extract
+                            - copy
+                            type: string
+                        type: object
+                      provider:
+                        enum:
+                        - generic
+                        - aws
+                        - azure
+                        - gcp
+                        type: string
+                      proxySecretRef:
+                        properties:
+                          name:
+                            type: string
+                        required:
+                        - name
+                        type: object
                       reconcileStrategy:
-                        default: ChartVersion
                         enum:
                         - ChartVersion
                         - Revision
+                        type: string
+                      ref:
+                        properties:
+                          digest:
+                            type: string
+                          semver:
+                            type: string
+                          semverFilter:
+                            type: string
+                          tag:
+                            type: string
+                        type: object
+                      secretRef:
+                        properties:
+                          name:
+                            type: string
+                        required:
+                        - name
+                        type: object
+                      serviceAccountName:
                         type: string
                       sourceRef:
                         properties:
@@ -100,12 +159,32 @@ spec:
                         - kind
                         - name
                         type: object
+                      suspend:
+                        type: boolean
+                      timeout:
+                        pattern: ^([0-9]+(\.[0-9]+)?(ms|s|m))+$
+                        type: string
+                      url:
+                        pattern: ^oci://.*$
+                        type: string
                       valuesFiles:
                         items:
                           type: string
                         type: array
                       verify:
                         properties:
+                          matchOIDCIdentity:
+                            items:
+                              properties:
+                                issuer:
+                                  type: string
+                                subject:
+                                  type: string
+                              required:
+                              - issuer
+                              - subject
+                              type: object
+                            type: array
                           provider:
                             default: cosign
                             enum:
@@ -119,19 +198,41 @@ spec:
                             required:
                             - name
                             type: object
+                          trustedRootSecretRef:
+                            properties:
+                              name:
+                                type: string
+                            required:
+                            - name
+                            type: object
                         required:
                         - provider
                         type: object
                       version:
-                        default: '*'
                         type: string
-                    required:
-                    - chart
-                    - sourceRef
                     type: object
                 required:
                 - spec
                 type: object
+                x-kubernetes-validations:
+                - message: chart.spec.url must be set when chart.kind is 'OCIRepository'
+                  rule: '!has(self.kind) || self.kind != ''OCIRepository'' || (has(self.spec.url) && size(self.spec.url) > 0)'
+                - message: 'chart.spec.url requires chart.kind: ''OCIRepository''; for a HelmChart template set spec.chart and spec.sourceRef instead'
+                  rule: '!has(self.spec.url) || (has(self.kind) && self.kind == ''OCIRepository'')'
+                - message: chart.spec.chart and chart.spec.sourceRef must be set when chart.kind is not 'OCIRepository'
+                  rule: (has(self.kind) && self.kind == 'OCIRepository') || (has(self.spec.chart) && has(self.spec.sourceRef))
+                - message: chart.spec.chart cannot be set when chart.kind is 'OCIRepository'
+                  rule: '!has(self.kind) || self.kind != ''OCIRepository'' || !has(self.spec.chart)'
+                - message: chart.spec.version cannot be set when chart.kind is 'OCIRepository'
+                  rule: '!has(self.kind) || self.kind != ''OCIRepository'' || !has(self.spec.version) || self.spec.version == ''*'''
+                - message: chart.spec.sourceRef cannot be set when chart.kind is 'OCIRepository'
+                  rule: '!has(self.kind) || self.kind != ''OCIRepository'' || !has(self.spec.sourceRef)'
+                - message: chart.spec.reconcileStrategy cannot be set when chart.kind is 'OCIRepository'
+                  rule: '!has(self.kind) || self.kind != ''OCIRepository'' || !has(self.spec.reconcileStrategy) || self.spec.reconcileStrategy == ''ChartVersion'''
+                - message: chart.spec.valuesFiles cannot be set when chart.kind is 'OCIRepository'
+                  rule: '!has(self.kind) || self.kind != ''OCIRepository'' || !has(self.spec.valuesFiles)'
+                - message: chart.spec.ignoreMissingValuesFiles cannot be set when chart.kind is 'OCIRepository'
+                  rule: '!has(self.kind) || self.kind != ''OCIRepository'' || !has(self.spec.ignoreMissingValuesFiles)'
               chartRef:
                 properties:
                   apiVersion:
@@ -314,9 +415,7 @@ spec:
                 type: object
                 x-kubernetes-validations:
                 - message: exactly one of spec.kubeConfig.configMapRef or spec.kubeConfig.secretRef must be specified
-                  rule: has(self.configMapRef) || has(self.secretRef)
-                - message: exactly one of spec.kubeConfig.configMapRef or spec.kubeConfig.secretRef must be specified
-                  rule: '!has(self.configMapRef) || !has(self.secretRef)'
+                  rule: has(self.configMapRef) != has(self.secretRef)
               maxHistory:
                 type: integer
               persistentClient:
