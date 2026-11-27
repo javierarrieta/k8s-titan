@@ -5,7 +5,7 @@ metadata:
     app.kubernetes.io/component: kustomize-controller
     app.kubernetes.io/instance: flux-system
     app.kubernetes.io/part-of: flux
-    app.kubernetes.io/version: v2.9.6
+    app.kubernetes.io/version: v2.10.1
     kustomize.toolkit.fluxcd.io/name: flux-system
     kustomize.toolkit.fluxcd.io/namespace: flux-system
   name: kustomizations.kustomize.toolkit.fluxcd.io
@@ -214,9 +214,7 @@ spec:
                 type: object
                 x-kubernetes-validations:
                 - message: exactly one of spec.kubeConfig.configMapRef or spec.kubeConfig.secretRef must be specified
-                  rule: has(self.configMapRef) || has(self.secretRef)
-                - message: exactly one of spec.kubeConfig.configMapRef or spec.kubeConfig.secretRef must be specified
-                  rule: '!has(self.configMapRef) || !has(self.secretRef)'
+                  rule: has(self.configMapRef) != has(self.secretRef)
               namePrefix:
                 maxLength: 200
                 minLength: 1

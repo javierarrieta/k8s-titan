@@ -7,8 +7,8 @@ metadata:
     app.kubernetes.io/instance: cert-manager
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/name: cert-manager
-    app.kubernetes.io/version: v1.21.1
-    helm.sh/chart: cert-manager-1.21.1_15c0b46d9006
+    app.kubernetes.io/version: v1.21.3
+    helm.sh/chart: cert-manager-1.21.3_e482675aec32
     helm.toolkit.fluxcd.io/name: cert-manager
     helm.toolkit.fluxcd.io/namespace: cert-manager
   name: certificates.cert-manager.io
@@ -378,6 +378,8 @@ spec:
                 properties:
                   ari:
                     properties:
+                      certID:
+                        type: string
                       explanationURL:
                         type: string
                       lastChecked:
