@@ -8,11 +8,15 @@ the build order and the reasoning per step live in
 This file is what you read at 23:00 when it has stopped working, or when you are about to rotate
 something and are not sure what breaks.
 
-**Read this before touching anything: this pipeline has never carried a real frame from a real car.**
-Every component was built and checked offline or against the cluster's own API, and the pieces that
-could only be proven with a vehicle in front of them are listed in §10 as *not yet proven*, with the
-command that would prove them. Do not treat a green `make check` here as evidence that the car is
-streaming. Nothing downstream of the car is evidence until `synced: true` (§5).
+**Read this before touching anything: this pipeline has carried real frames from real cars, and §10
+carries the proof** (2345 `data:update` frames pushed to TeslaMate's websocket; a drive started from a
+stream frame on 2026-11-25). It used to say the opposite here, and the counters that misled whoever
+wrote it are the same ones that have misled checks since — §5 names them before you spend an
+evening on a healthy system.
+
+What is still true: do not treat a green `make check` here as evidence that the car is streaming, and
+nothing downstream of the car is evidence until `synced: true` (§5) — and `synced: true` is Tesla
+accepting a config, not the car confirming it. §10 still lists what remains unproven.
 
 ## 1. Components
 
@@ -320,6 +324,29 @@ together is the pipeline. Two traps in those numbers: the per-type counts in `so
 chain, so compare them once traffic has settled. The forwarder logs nothing on success; its metrics
 endpoint is the only honest readout.
 
+**`records.V` goes to redis and not to the logger, so a vehicle record never appears as a
+`record_payload` line.** `config.json` routes `alerts` and `errors` to `["logger"]` and `V` to
+`["redis"]`. Counting `txtype:"errors"` in fleet-telemetry's log and concluding "no data arrived" is
+reading the one channel that was deliberately sent somewhere else; the `V` byte counter on the
+`socket_disconnected` line is the only place the vehicle data shows up in the log at all.
+
+**`subscribe_oauth: token not validated ("Invalid API key: go to app.myteslamate.com/fleet")` is the
+designed path, not a fault, and there is no fleet API key here to rotate.** The bridge's
+`validateToken()` calls the third-party `api.myteslamate.com` proxy — the service this migration exists
+to get away from — and `ENFORCE_TOKEN` is `false` precisely so that proxy cannot stop a car from
+streaming. The failure logs a warning and the subscribe is allowed anyway (`— allowing during
+migration`), which is the behaviour the `ENFORCE_TOKEN` comment in
+`apply/60-tesla/streaming.yaml` asks for. Nothing in `apply/10-secrets/` holds such a key.
+
+**An idle stream is not a broken one.** TeslaMate opens the websocket in short probe windows
+(`Vehicle online, connect stream to check for real online` → 30 s → `Stream connected, but nothing
+received, allow real online`), while a parked car's fleet-telemetry sessions run 1–3 min roughly
+hourly. When the two do not overlap the bridge has no socket for that tag: the forwarder's POST is
+still accepted (`rejected: 0`, `lastPost: ok`) and the frame goes nowhere. That last half is inferred
+from the bridge's in-memory `tags[tag] = ws` map, not measured — but the consequence is measurable,
+and it is the reason a healthy install can show no frame for days: drive-start detection needs the
+overlap, and a car that has not moved gives it nothing to overlap.
+
 ## 5a. Signing TeslaMate in — the token pair, and why it is not `TESLA_AUTH_CLIENT_ID` alone
 
 **TeslaMate v4.3.0 cannot start itself from a Fleet API client id.** Read in its source at v4.3.0,
@@ -531,9 +558,11 @@ Tested on OTP 28; the image runs OTP 29. The `false` on 28 reproduces the produc
 two agree on the case that matters, and an exact SAN match is the trivial first clause of the match
 fun.
 
-**Still not observed: a real `Stream connected` from a car.** Nothing came online in the window after
-this landed, so zero restarts is consistent with the fix and is not evidence for it. The certificate
-decision is proven; the end-to-end path is not.
+**Observed on 2026-11-25: a real `Stream connected` from a car, and real frames through it.** The Model
+Y subscribed at 12:38:32Z, TeslaMate started a drive from a stream frame at 12:45:09Z, and the socket
+closed at 13:06:27Z with no crash-loop anywhere in between. §10 carries the frame counts and the
+TeslaMate line. The certificate decision was already proven at the mechanism level; it is now also
+proven in production, which is what this paragraph was waiting for.
 
 ### The DNS trap, because it will happen again
 
@@ -637,6 +666,7 @@ of them can be done by the agent.
 | API logs `Account <client_id> must be registered in the current region` | **not** a region mismatch. It means the partner account registration was never done — spec §7 step 3, `POST /api/1/partner_accounts` with `{"domain":"<app domain>"}` (field is `domain`, not `domain_code`) and a partner token whose `audience` is the EU Fleet API base URL. Prove it with `GET /api/1/partner_accounts/public_key?domain=…`, which must return the key served at `/.well-known`. A successful token exchange does **not** prove registration is complete, which is what made this look like a region problem. |
 | no live speed/elevation, but positions appear | that is expected: the bridge reports live power as 0 and there is no elevation enrichment (§10) |
 | `synced: false` forever | car asleep or offline; the config only applies on a sync |
+| no `data:update` in the bridge log for days, and TeslaMate keeps logging `Stream connected, but nothing received, allow real online` | **usually a parked car.** Ask the counters before believing it: `redis-cli info commandstats` (`cmdstat_publish`) and the forwarder's `:8080/metrics` (`forwarded`). If both are climbing, the intake is fine and only the window overlap is missing — TeslaMate's probes are 30 s against sessions of 1–3 min, roughly hourly (§5). If `publish` climbs and `forwarded` does not, the break is the forwarder |
 | car connects, fleet-telemetry rejects | the public-CA assumption (§5), or the cert hazard (§6) |
 | fleet-telemetry logs frames, TeslaMate sees nothing | the forwarder, then the bridge: `make tesla-forwarder-test`, then §4's synthetic publish |
 | bridge logs `Bad POST body` | `transmit_decoded_records` got turned off (§4) |
@@ -865,7 +895,7 @@ Retired by measurement on 2026-10-19, and retired **negative**:
 | claim | what was actually found |
 |---|---|
 | the decoded Redis payload shape matches what the forwarder and bridge expect | **cannot be tested yet.** The forwarder reports `{"connected":true,"forwarded":0,"rejected":0,"lastPost":"never"}` over two days, `fleet-telemetry` has logged nothing since its own startup on 2026-10-17T16:34:05 with `log_level: info`, and the bridge has never had a websocket attached. Nothing has ever been published, so §4's synthetic publish is the only way to exercise this path until the car is pointed at it. |
-| TeslaMate's own polling survives a car coming online | **it did not.** With a wildcard on `streaming.titan.arrieta.eu` it crash-looped instead — §6. Replaced by the single-name certificate, and **the certificate decision is now proven**: Erlang's default matcher returns `false` for the old wildcard and `true` for the live single-name cert, tested directly against both DER files. What is *still* unobserved is a real `Stream connected` from a car — see §6. |
+| TeslaMate's own polling survives a car coming online | **it did not.** With a wildcard on `streaming.titan.arrieta.eu` it crash-looped instead — §6. Replaced by the single-name certificate, and **the certificate decision is now proven**: Erlang's default matcher returns `false` for the old wildcard and `true` for the live single-name cert, tested directly against both DER files. A real `Stream connected` from a car was observed on 2026-11-25 — §6 and the retirement below. |
 
 Retired by measurement on 2026-10-19, and retired **positive** — see
 `docs/tesla-telemetry-bringup-2026-10-19.md` for the evidence behind each line:
@@ -877,9 +907,17 @@ Retired by measurement on 2026-10-19, and retired **positive** — see
 | the decoded Redis payload shape matches what the forwarder and bridge expect | **yes, at small volume.** `cmdstat_publish:calls=4` and `forwarded:4, rejected:0, lastPost:ok`. Not yet exercised at driving volume. |
 | the forwarder's `PATTERN` matches the producer's channel | **yes.** Upstream `vinChannel` is `tesla_telemetry_V_{VIN}` (`datastore/redis/redis.go` at v0.9.5) and `tesla_telemetry_V_*` matches it under PSUBSCRIBE; `pubsub numpat` = 1. |
 
-Still open: **sustained volume.** The one session measured was a parked car emitting 650 bytes, and
-`forwarded` has never been compared against `publish` across a real trip. Everything above is proven
-in kind, not at rate.
+Retired by measurement on 2026-11-27, and retired **positive**. Three independent readouts agree that
+the path from the car to TeslaMate carries vehicle data:
+
+| claim | what was actually found |
+|---|---|
+| a frame reaching TeslaMate (§4's synthetic publish, but better: a real one) | **yes.** `tesla-streaming` has logged **2345 `data:update` frames** pushed to a TeslaMate websocket — 2089 for `LRWYHCEK6PC004910`, 256 for `5YJ3F7EBXKF523805` — spanning 2026-11-19 09:16:16Z to 2026-11-25 12:51:30Z, carrying GPS, odometer, SoC and shift state (`…,23603.97,70,,,42.461907,-2.430161,0,P,,,`). TeslaMate did not merely receive them, it acted on one: `2026-11-25 12:45:09.398 [info] Online / Start of drive initiated by: %TeslaApi.Stream.Data{time: ~U[2026-11-25 12:45:09.273Z], odometer: 23601.889840905482, soc: 71, est_lat: 42.474581, est_lng: -2.401617, power: 0, shift_state: "R"}`. A drive **started by a stream frame**, not by polling. |
+| sustained volume, and `forwarded` compared against `publish` | **they match.** `cmdstat_publish:calls=3671` against `{"connected":true,"forwarded":3671,"rejected":0,"lastPost":"ok"}` — publish equals forwarded, nothing rejected, over the forwarder's whole uptime. In the same window the car's `socket_disconnected` counters read `V` = 656, 452, 808, 1142 and 640 **bytes** across five sessions, which is a parked car's worth of data, not a stall. |
+
+Still open after that: **a long high-rate trip.** The frames above came from two cars in ordinary use,
+one of them a drive with real shift changes; the promise-chain serialisation §5 warns about has not
+been watched under a sustained burst, and `rejected` has never been non-zero for any reason at all.
 
 One warning attached to that first row of the table above, learned the hard way on 2026-10-19: if you
 switch `telemetry.titan.arrieta.eu` to a single-name certificate, **declare its A record in
