@@ -289,10 +289,25 @@ def main():
         if len(set(tags_by_name.values())) > 1:
             fail(f"{APP} containers sit on different releases: {tags_by_name}. Keeping the pair "
                  "aligned is what makes the manifest read as one version.")
-            if c.get("name") == "backend" and not c.get("startupProbe"):
-                fail("the backend has no startupProbe. sqlx::migrate! applies backend_rust/migrations/ "
-                     "before Rocket binds the port; without a startup probe the kubelet kills the "
-                     "container mid-migration and it restarts into the same work.")
+        # The startup probe is asserted HERE, on the normal path, and NOT inside the mismatch branch
+        # above. It used to live inside it, which made the assertion unreachable: that branch only
+        # runs when the two tags already differ, so a manifest with the pair aligned and no probe at
+        # all reported success while checking nothing. v0.1.0-M4 is what made the dead line matter —
+        # migrations 0002-0006 apply via sqlx::migrate! before Rocket binds the port, and without a
+        # startup probe the kubelet kills the container mid-migration and it restarts into the same
+        # work, forever. Looked up by name rather than reusing `c` from the loop above: after a
+        # for-loop `c` is whatever the last iteration left, so it named the backend only by accident
+        # of container ordering.
+        containers = dep["spec"]["template"]["spec"]["containers"]
+        backend = next((x for x in containers if x.get("name") == "backend"), None)
+        if backend is None:
+            fail(f"{APP} has no container named 'backend' (names: "
+                 f"{[x.get('name') for x in containers]}). The probe assertion below has no subject "
+                 "without it, and a renamed container must not read as a passing check.")
+        elif not backend.get("startupProbe"):
+            fail("the backend has no startupProbe. sqlx::migrate! applies backend_rust/migrations/ "
+                 "before Rocket binds the port; without a startup probe the kubelet kills the "
+                 "container mid-migration and it restarts into the same work.")
         names = [s.get("secretRef", {}).get("name")
                  for c in dep["spec"]["template"]["spec"]["containers"]
                  for s in (c.get("envFrom") or [])]
