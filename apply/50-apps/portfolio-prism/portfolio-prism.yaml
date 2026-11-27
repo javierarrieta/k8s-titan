@@ -283,6 +283,25 @@ spec:
             # `tools/portfolio-prism-check.py` fails if a DATABASE_URL ever reappears in this list.
             - name: RUST_LOG
               value: "info"
+            # MCP_ALLOWED_HOSTS is the list rmcp's DNS-rebinding guard will answer `/mcp` on, and it is
+            # not optional on a deployment. `StreamableHttpService::handle` validates the `Host` header
+            # against a list that defaults to loopback only, and it does that AFTER the route has
+            # already accepted the bearer. nginx forwards the public name (`frontend/nginx.conf`,
+            # `proxy_set_header Host $host`), so with this variable absent every MCP call answers
+            # `403 Forbidden: Host header is not allowed` against a perfectly good `pp_…` token — which
+            # reads as a broken credential, because nothing in the response names the missing setting.
+            # Measured 2026-11-27: a bogus bearer gets 401, a real one gets the 403, consistently.
+            #
+            # A bare authority, no scheme. This is NOT `ALLOWED_ORIGINS` a few lines above, which wants
+            # a URL, and copying that format across fails the same silent way. It has to name the host
+            # the Ingress below serves, and `make portfolio-prism-check` fails if the two disagree.
+            #
+            # INERT UNTIL THE IMAGE READS IT. v0.1.0-M4 does not know this variable — the lever arrived
+            # in app-repo PR #82 — so the 403 stands until the backend tag moves past the release that
+            # carries it. Setting it here first is deliberate: an unknown env var is inert, not an
+            # error, and the configuration is already in place when the image lands.
+            - name: MCP_ALLOWED_HOSTS
+              value: "portfolio.titan.arrieta.eu"
             # BACKUP_ALLOW_PRICE_RESTORE is deliberately absent, and the gate now refuses it
             # rather than merely not asking for it. Without it the server refuses any bundle
             # carrying a price section (`PricesDisabled`) instead of quietly skipping it, which is
@@ -294,9 +313,12 @@ spec:
             # change with a gate that objects, not a line added back out of habit.
             # AGENT_MCP_MOUNT is deliberately absent, and absent means ON: v0.1.0-M4 mounts eleven MCP
             # tools at /mcp by default, and the app's nginx.conf proxies that path, so
-            # https://portfolio.titan.arrieta.eu/mcp is live the moment this rolls. That is the
+            # https://portfolio.titan.arrieta.eu/mcp is mounted the moment this rolls. That is the
             # operator's decision, made 2026-11-27, not an oversight — the agent surface is the point
-            # of the release. What is behind it, checked at the tag rather than assumed: the route
+            # of the release. MOUNTED IS NOT THE SAME AS REACHABLE, and this comment claimed it was:
+            # rmcp's Host guard refused every call, so the endpoint was mounted and unreachable at the
+            # same time, with every gate in this repo green. Read MCP_ALLOWED_HOSTS above before
+            # concluding that a client's token is broken. What is behind it, checked at the tag rather than assumed: the route
             # requires `Authorization: Bearer pp_…` unconditionally and refuses a session cookie
             # (backend_rust/src/agent/mount.rs), so a human who signed in cannot call it and a token
             # cannot mint or revoke a token; a token writes a proposal that only a session can approve.
@@ -421,8 +443,9 @@ metadata:
   # this is a row in authentik's database, invisible to every gate in this repo.
   #
   # /mcp IS REACHABLE THROUGH THIS INGRESS and `path: /` Prefix is what lets it: the app's nginx
-  # proxies that path from v0.1.0-M4, so the agent surface is public and gated only by the backend's
-  # own bearer check — no forwardAuth, no authentik, no group binding. The `titan-family` binding
+  # proxies that path from v0.1.0-M4, so the agent surface is public and gated by the backend's own
+  # bearer check and its Host allowlist (MCP_ALLOWED_HOSTS, on the backend env above) — no
+  # forwardAuth, no authentik, no group binding. The `titan-family` binding
   # above decides who gets a session, and a session is precisely what cannot call /mcp; who can call
   # it is decided by a personal access token minted in-app by someone who already has one. See the
   # AGENT_MCP_MOUNT note on the backend env list for the kill switch.
