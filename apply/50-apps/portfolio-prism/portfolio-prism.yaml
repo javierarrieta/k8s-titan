@@ -6,9 +6,15 @@
 #
 # Rust (Rocket) backend + a React SPA served by nginx, in ONE pod as two containers. That is the
 # upstream shape (k8s/app-deployment.yaml in the app repo) and it is load-bearing: frontend/nginx.conf
-# proxies /api, /api-docs and /auth to `http://127.0.0.1:8000`, a loopback address. Splitting them
-# into two Deployments does not fail loudly — nginx answers 502 for every API call while both pods
-# report Ready, which reads as a backend bug.
+# proxies /api, /api-docs, /auth and — since v0.1.0-M4 — /mcp to `http://127.0.0.1:8000`, a loopback
+# address. Splitting them into two Deployments does not fail loudly — nginx answers 502 for every API
+# call while both pods report Ready, which reads as a backend bug.
+#
+# THE PATH LIST ABOVE IS THE PUBLIC SURFACE, NOT A DETAIL. The Ingress below routes `/` Prefix, so every
+# path nginx proxies is reachable from the internet at portfolio.titan.arrieta.eu, and this host has no
+# proxy-side gate. When the app's nginx.conf gains a `location`, that is a new public endpoint here and
+# it belongs in a review, not in an image bump nobody read. /mcp is the case that proved the rule: see
+# the AGENT_MCP_MOUNT note on the backend env list for who is allowed through it.
 #
 # WHY IT IS HERE AT ALL, AND WHY `apps`
 # It passes §3.1 of docs/superpowers/specs/2026-10-19-titan-app-scale-out-design.md on the hard list:
@@ -150,7 +156,7 @@ spec:
           # byte-identical across releases; a version tag does not. `tools/portfolio-prism-
           # check.py` enforces both halves: it refuses `:latest` and refuses two containers on
           # different tags, so this is a gate rather than a habit.
-          image: ghcr.io/javierarrieta/portfolio-prism/frontend:v0.1.0-M3
+          image: ghcr.io/javierarrieta/portfolio-prism/frontend:v0.1.0-M4
           ports:
             - name: http
               containerPort: 80
@@ -186,7 +192,7 @@ spec:
             periodSeconds: 20
 
         - name: backend
-          # v0.1.0-M3, kept aligned with the frontend above. The Postgres-only change arrived in
+          # v0.1.0-M4, kept aligned with the frontend above. The Postgres-only change arrived in
           # v0.1.0-M1: the engine is no longer SQLite, and what runs before Rocket binds the port
           # is `sqlx::migrate!` applying backend_rust/migrations/ rather than M5's in-process
           # decimal migration, duplicate-row collapse and unique index. The startup probe below
@@ -195,13 +201,40 @@ spec:
           # local-file work they replaced. Tagged by release, not by digest — see the frontend
           # pin above for why, and for what that gives up.
           #
-          # Unlike M1 -> M2, where this image was a rebuild of identical code, v0.1.0-M3 changes
-          # what this container returns, and the pairing above is load-bearing rather than tidy:
-          # its backup-plan response carries a shape the previous frontend refuses, and a frontend
-          # that refuses it leaves Restore disabled with no error message at all. Backend ahead of
-          # frontend is a dead button that reads like a UI bug, not like a version mismatch — that
-          # is the concrete case behind the gate refusing two containers on different tags.
-          image: ghcr.io/javierarrieta/portfolio-prism/backend:v0.1.0-M3
+          # Unlike M1 -> M2, where this image was a rebuild of identical code, v0.1.0-M4 changes what
+          # this container ACCEPTS, and the pairing above is load-bearing rather than tidy: money now
+          # travels as a decimal string and the API refuses JSON numbers for money fields, while the
+          # previous frontend posts numbers — so backend ahead of frontend fails transaction creation
+          # and CSV import with `invalid type: integer 10, expected a decimal string`. Frontend ahead
+          # of backend only degrades two panels into an error message. That asymmetry is the concrete
+          # case behind the gate refusing two containers on different tags. It cannot bite this
+          # manifest the way the app repo warns it can: both containers move in one commit and
+          # `strategy: Recreate` above takes the old pod down before the new one starts, so there is
+          # no window with a new backend serving an old frontend. The app repo's own deploy note
+          # ("frontend first, then the backend digest") is written for its manifest, which pins the
+          # frontend to `:latest` and the backend to a digest; that split does not exist here.
+          #
+          # WHAT M4 RUNS BEFORE IT SERVES A REQUEST, AND WHY THAT IS A ROLLBACK PROBLEM. Migrations
+          # 0002-0006 apply via `sqlx::migrate!` before Rocket binds the port, and several of them
+          # refuse to apply to data that violates them — so a raising migration is a crashloop whose
+          # reason is only in the container log. The startup probe below (60 x 5s) covers the time; it
+          # does not cover the refusal. The app ships two pre-flight audits for exactly this
+          # (`backend_rust/scripts/audit_asset_symbols.sh`, `audit_transaction_types.sh`) and NEITHER
+          # runs in this pod: the runtime image is debian-slim plus ca-certificates, so there is no
+          # `psql` in it. Run them from a host that has psql, against the DSN in
+          # portfolio-prism-db-credentials, before rolling. Exit 2 there means "could not run", not
+          # "clean".
+          #
+          # ROLLING BACK PAST 0006 IS NOT CLEAN, and `kubectl rollout undo` will not save you. 0006
+          # adds `uq_assets_portfolio_symbol` on (portfolio_id, upper(symbol)) and deliberately does
+          # NOT rewrite `assets.symbol` — historical_prices is keyed by the symbol string, so a
+          # rewrite would silently detach price history — while the write path moved from
+          # `symbol = $2` to `upper(symbol) = $2`. Roll the image back alone and a row stored in a
+          # mixed-case spelling is invisible to the old binary's case-sensitive lookup: it tries to
+          # insert a duplicate and dies on the raw index violation where it used to write a silent
+          # duplicate. Roll image and database together, or first prove the audit reports zero
+          # mixed-case collisions. App repo docs/postgres-cutover.md has both options.
+          image: ghcr.io/javierarrieta/portfolio-prism/backend:v0.1.0-M4
           ports:
             # NOT named `http`. Named ports must be unique within a pod, and the Service below
             # resolves `targetPort: http`; two containers both calling their port `http` (8000 here,
@@ -259,6 +292,19 @@ spec:
             # over instead of re-fetching what the provider might no longer serve — and that import
             # ran and was verified on 2026-11-16. Reopening it is meant to be a deliberate two-file
             # change with a gate that objects, not a line added back out of habit.
+            # AGENT_MCP_MOUNT is deliberately absent, and absent means ON: v0.1.0-M4 mounts eleven MCP
+            # tools at /mcp by default, and the app's nginx.conf proxies that path, so
+            # https://portfolio.titan.arrieta.eu/mcp is live the moment this rolls. That is the
+            # operator's decision, made 2026-11-27, not an oversight — the agent surface is the point
+            # of the release. What is behind it, checked at the tag rather than assumed: the route
+            # requires `Authorization: Bearer pp_…` unconditionally and refuses a session cookie
+            # (backend_rust/src/agent/mount.rs), so a human who signed in cannot call it and a token
+            # cannot mint or revoke a token; a token writes a proposal that only a session can approve.
+            # Since this host has no proxy-side gate, that bearer check is the ONLY gate on the path —
+            # there is no authentik in front of it. The surface bounds itself (1 MiB body, three
+            # requests in flight, 120s wall clock). To take it off without a code deploy:
+            #   AGENT_MCP_MOUNT: "false"
+            # The other new knob, AGENT_BATCH_TTL_MINUTES, is left at its 60-minute default.
             # BOOTSTRAP_OWNER_SUBJ is deliberately absent. It names who inherits pre-existing unowned
             # rows, and on a fresh database there are none: the cutover restores bundles, and a bundle
             # carries the owner it was exported for. Setting it is a ONE-WAY transfer with no admin
@@ -336,8 +382,8 @@ spec:
     app: portfolio-prism
   ports:
     # 80 -> the frontend container, which is the only one the cluster should reach: nginx proxies /api,
-    # /api-docs and /auth to the backend on loopback inside the pod. The backend has no Service and no
-    # reason to have one.
+    # /api-docs, /auth and (since v0.1.0-M4) /mcp to the backend on loopback inside the pod. The
+    # backend has no Service and no reason to have one.
     - name: http
       port: 80
       targetPort: http
@@ -373,6 +419,13 @@ metadata:
   # `ingress-auth`'s own docstring says out loud
   # that a provider with no access policy gates a host open to every authenticated account and that
   # this is a row in authentik's database, invisible to every gate in this repo.
+  #
+  # /mcp IS REACHABLE THROUGH THIS INGRESS and `path: /` Prefix is what lets it: the app's nginx
+  # proxies that path from v0.1.0-M4, so the agent surface is public and gated only by the backend's
+  # own bearer check — no forwardAuth, no authentik, no group binding. The `titan-family` binding
+  # above decides who gets a session, and a session is precisely what cannot call /mcp; who can call
+  # it is decided by a personal access token minted in-app by someone who already has one. See the
+  # AGENT_MCP_MOUNT note on the backend env list for the kill switch.
   #
   # TLS is `titan-tls`, reflected into `apps` by Reflector; `apps` is already on the secretTemplate
   # allow-list of apply/40-certificates/titan-wildcard.yaml, so this host cost nothing there. The
