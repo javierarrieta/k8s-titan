@@ -35,3 +35,10 @@ coder/templates/**/.terraform.lock.hcl
 # `make check` showed a dirty tree. Artifacts are not source.
 __pycache__/
 *.pyc
+
+# Agent harness state. `pi-subagents` writes schedule and run state under `.pi/subagents/`
+# in the repo root — the directory that holds a schedule's own record, not repo content. It
+# is per-machine and per-operator, and it changes on every scheduled run, so a `git add -A`
+# would pick it up and show a dirty tree in the next `make check`. Same reasoning as the
+# __pycache__ entry above: artifacts are not source.
+.pi/
