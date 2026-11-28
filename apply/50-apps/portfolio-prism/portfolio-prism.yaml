@@ -156,7 +156,7 @@ spec:
           # byte-identical across releases; a version tag does not. `tools/portfolio-prism-
           # check.py` enforces both halves: it refuses `:latest` and refuses two containers on
           # different tags, so this is a gate rather than a habit.
-          image: ghcr.io/javierarrieta/portfolio-prism/frontend:v0.1.0-M4
+          image: ghcr.io/javierarrieta/portfolio-prism/frontend:v0.1.0-M5
           ports:
             - name: http
               containerPort: 80
@@ -192,14 +192,23 @@ spec:
             periodSeconds: 20
 
         - name: backend
-          # v0.1.0-M4, kept aligned with the frontend above. The Postgres-only change arrived in
+          # v0.1.0-M5, kept aligned with the frontend above. The Postgres-only change arrived in
           # v0.1.0-M1: the engine is no longer SQLite, and what runs before Rocket binds the port
-          # is `sqlx::migrate!` applying backend_rust/migrations/ rather than M5's in-process
-          # decimal migration, duplicate-row collapse and unique index. The startup probe below
+          # is `sqlx::migrate!` applying backend_rust/migrations/ rather than the SQLite-era M5's
+          # (v0.0.6-M5) in-process decimal migration, duplicate-row collapse and unique index — that
+          # "M5" is a pre-Postgres milestone and not the tag pinned here. The startup probe below
           # (60 x 5s) is still what keeps the kubelet from killing the container mid-migration,
           # and it matters more now: migrations against a real server can be slower than the
           # local-file work they replaced. Tagged by release, not by digest — see the frontend
           # pin above for why, and for what that gives up.
+          #
+          # WHAT v0.1.0-M5 CHANGES HERE: it is the release carrying app-repo PR #82, so `/mcp` takes
+          # its Host allowlist from MCP_ALLOWED_HOSTS (see that entry below). It also answers a
+          # non-POST `/mcp` with `405` and `Allow: POST` instead of Rocket's HTML 404 (app-repo #80),
+          # so opening the URL in a browser no longer reads as a failed deploy. Both changes are in
+          # what this container ANSWERS, not in what it accepts — no migration, no schema change,
+          # nothing touching the money-as-string contract described underneath, so the pairing
+          # asymmetry below is untouched by this bump.
           #
           # Unlike M1 -> M2, where this image was a rebuild of identical code, v0.1.0-M4 changes what
           # this container ACCEPTS, and the pairing above is load-bearing rather than tidy: money now
@@ -234,7 +243,7 @@ spec:
           # insert a duplicate and dies on the raw index violation where it used to write a silent
           # duplicate. Roll image and database together, or first prove the audit reports zero
           # mixed-case collisions. App repo docs/postgres-cutover.md has both options.
-          image: ghcr.io/javierarrieta/portfolio-prism/backend:v0.1.0-M4
+          image: ghcr.io/javierarrieta/portfolio-prism/backend:v0.1.0-M5
           ports:
             # NOT named `http`. Named ports must be unique within a pod, and the Service below
             # resolves `targetPort: http`; two containers both calling their port `http` (8000 here,
@@ -296,10 +305,13 @@ spec:
             # a URL, and copying that format across fails the same silent way. It has to name the host
             # the Ingress below serves, and `make portfolio-prism-check` fails if the two disagree.
             #
-            # INERT UNTIL THE IMAGE READS IT. v0.1.0-M4 does not know this variable — the lever arrived
-            # in app-repo PR #82 — so the 403 stands until the backend tag moves past the release that
-            # carries it. Setting it here first is deliberate: an unknown env var is inert, not an
-            # error, and the configuration is already in place when the image lands.
+            # v0.1.0-M5 IS THE FIRST TAG THAT READS THIS. The lever arrived in app-repo PR #82 and
+            # landed in M5; every earlier tag — including the v0.1.0-M4 this file pinned until now —
+            # ignores the variable and answers `403 Forbidden: Host header is not allowed` to every
+            # MCP call whatever is set here. That makes the rollback hazard explicit: rolling this
+            # image back below M5 silently re-breaks /mcp while every gate in this repo stays green,
+            # because the tree still carries a correct MCP_ALLOWED_HOSTS and the old binary cannot
+            # read it.
             - name: MCP_ALLOWED_HOSTS
               value: "portfolio.titan.arrieta.eu"
             # BACKUP_ALLOW_PRICE_RESTORE is deliberately absent, and the gate now refuses it
@@ -317,8 +329,9 @@ spec:
             # operator's decision, made 2026-11-27, not an oversight — the agent surface is the point
             # of the release. MOUNTED IS NOT THE SAME AS REACHABLE, and this comment claimed it was:
             # rmcp's Host guard refused every call, so the endpoint was mounted and unreachable at the
-            # same time, with every gate in this repo green. Read MCP_ALLOWED_HOSTS above before
-            # concluding that a client's token is broken. What is behind it, checked at the tag rather than assumed: the route
+            # same time, with every gate in this repo green. From v0.1.0-M5 that guard is configured by
+            # MCP_ALLOWED_HOSTS above; on any earlier tag it was not configurable at all, so read that
+            # entry before concluding that a client's token is broken. What is behind it, checked at the tag rather than assumed: the route
             # requires `Authorization: Bearer pp_…` unconditionally and refuses a session cookie
             # (backend_rust/src/agent/mount.rs), so a human who signed in cannot call it and a token
             # cannot mint or revoke a token; a token writes a proposal that only a session can approve.
