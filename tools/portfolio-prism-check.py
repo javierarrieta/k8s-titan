@@ -7,7 +7,8 @@ Seven things have to agree and nothing else ties them together:
   2. apply/10-secrets/authentik-portfolio-prism-blueprint.yaml - the rendered artifact authentik applies
   3. the HelmRelease mounting that blueprint into the worker
   4. apply/50-apps/portfolio-prism/portfolio-prism.yaml        - the app's own env: issuer, redirect,
-                                                                 origins, and the address Rocket binds
+                                                                 origins, the address Rocket binds, and
+                                                                 the Host allowlist /mcp answers on
   5. apply/10-secrets/portfolio-prism-secrets.yaml             - the app's own copy of the client pair
   6. the Ingress host, which every one of the above derives from
   7. the PVC's restic opt-in annotation, because the volume is one SQLite file holding the user's
@@ -243,6 +244,39 @@ def main():
             got = env_of(dep, k)
             if got != v:
                 fail(f"{APP} env {k} is {got!r}, expected {v!r}")
+        # MCP_ALLOWED_HOSTS is the Host allowlist rmcp judges /mcp against, and it earns its own rule
+        # rather than a want_env row because both of its failure modes are invisible from the outside.
+        # The guard runs AFTER the route has accepted the bearer, so a missing or wrong value answers
+        # `403 Forbidden: Host header is not allowed` to a valid token — which reads as a broken
+        # credential, not as missing configuration — and a value copied from ALLOWED_ORIGINS (a URL,
+        # where this wants a bare authority) fails identically. Measured 2026-11-27, when the endpoint
+        # had been mounted, public, and unreachable since the day it shipped, with every gate green.
+        hosts_env = env_of(dep, "MCP_ALLOWED_HOSTS")
+        if hosts_env is None:
+            fail(f"{APP} sets no MCP_ALLOWED_HOSTS. rmcp then judges /mcp against its loopback default "
+                 f"and refuses {HOST} with `403 Forbidden: Host header is not allowed`, after the "
+                 "bearer check — so every MCP client sees a bad token. Set it to the Ingress host.")
+        else:
+            entries = [e.strip() for e in hosts_env.split(",") if e.strip()]
+            if not entries:
+                # Not a no-op. In rmcp an empty list means allow ANY host, so a blank value here would
+                # open the guard rather than leave it alone.
+                fail(f"{APP} MCP_ALLOWED_HOSTS={hosts_env!r} names no host. An empty allowlist means "
+                     "allow every host in rmcp — the opposite of what a blank value looks like it means.")
+            for entry in entries:
+                if "://" in entry or "/" in entry:
+                    fail(f"{APP} MCP_ALLOWED_HOSTS entry {entry!r} is a URL, not an authority. The "
+                         f"value is the bare host ({HOST}); ALLOWED_ORIGINS is the neighbouring "
+                         "variable that wants a scheme, and copying its format across 403s every "
+                         "MCP call exactly like a missing entry does.")
+                    continue
+                # `host` or `host:port` — a scheme and a path were rejected just above. count(":") == 1
+                # rather than a bare rsplit so an IPv6 literal is not chopped at its first colon.
+                host_part = entry.rsplit(":", 1)[0] if entry.count(":") == 1 else entry
+                if host_part != HOST:
+                    fail(f"{APP} MCP_ALLOWED_HOSTS entry {entry!r} does not name {HOST}, the host the "
+                         "Ingress serves. Every MCP call is refused with `403 Forbidden: Host header "
+                         "is not allowed` after the token has already been accepted.")
         # DATABASE_URL must NOT be an inline env entry. Kubernetes gives `env:` precedence over
         # `envFrom:`, so an inline value silently shadows the one in portfolio-prism-secrets — the app
         # would come up healthy against the wrong engine and nothing would report it. That is exactly
